@@ -1932,23 +1932,16 @@ impl Workspace {
                         && let Some(display) = workspace.display
                         && let Some(bounds) = workspace.window_bounds.as_ref()
                     {
-                        // Reopening an existing workspace - restore its saved bounds
-                        (Some(bounds.0), Some(display))
-                    } else if let Some((display, bounds)) =
-                        persistence::read_default_window_bounds(&kvp)
+                        // Reopening a workspace that was open before - restore where it was, so a
+                        // deliberately placed window stays where it was put.
+                        (Some(maximized_unless_placed(bounds.0)), Some(display))
+                    } else if let Some((display, _)) = persistence::read_default_window_bounds(&kvp)
                     {
-                        // New or empty workspace - use the last known window bounds
-                        (Some(bounds), Some(display))
+                        // A window with no geometry of its own: keep the display it was last on,
+                        // but open it maximized.
+                        (Some(default_window_bounds()), Some(display))
                     } else {
-                        // New window - open maximized. The restore size is GPUI's default, so
-                        // un-maximizing gives a sensible window rather than a zero-sized one.
-                        (
-                            Some(WindowBounds::Maximized(Bounds::new(
-                                point(px(0.), px(0.)),
-                                gpui::DEFAULT_WINDOW_SIZE,
-                            ))),
-                            None,
-                        )
+                        (Some(default_window_bounds()), None)
                     };
 
                     // Use the serialized workspace to construct the new window
@@ -7440,6 +7433,30 @@ impl Workspace {
     }
 }
 
+/// Wu opens maximized.
+///
+/// The restore size is GPUI's default rather than zero, so un-maximizing gives a usable window
+/// instead of a sliver.
+fn default_window_bounds() -> WindowBounds {
+    WindowBounds::Maximized(Bounds::new(
+        point(px(0.), px(0.)),
+        gpui::DEFAULT_WINDOW_SIZE,
+    ))
+}
+
+/// Honours a window the user deliberately placed, and maximizes everything else.
+///
+/// A `Fullscreen` or `Maximized` saved state is already what we would choose. A `Windowed` one is
+/// ambiguous: it is equally the result of the user dragging the window to a size they wanted and of
+/// the platform picking something arbitrary on first run. Wu resolves that towards maximized,
+/// because opening small on a large screen is the more annoying of the two mistakes.
+fn maximized_unless_placed(bounds: WindowBounds) -> WindowBounds {
+    match bounds {
+        WindowBounds::Windowed(_) => default_window_bounds(),
+        already_large => already_large,
+    }
+}
+
 fn window_bounds_env_override() -> Option<Bounds<Pixels>> {
     ZED_WINDOW_POSITION
         .zip(*ZED_WINDOW_SIZE)
@@ -8740,11 +8757,11 @@ pub fn open_workspace_by_id(
             } else if let Some(display) = serialized_workspace.display
                 && let Some(bounds) = serialized_workspace.window_bounds.as_ref()
             {
-                (Some(bounds.0), Some(display))
-            } else if let Some((display, bounds)) = persistence::read_default_window_bounds(&kvp) {
-                (Some(bounds), Some(display))
+                (Some(maximized_unless_placed(bounds.0)), Some(display))
+            } else if let Some((display, _)) = persistence::read_default_window_bounds(&kvp) {
+                (Some(default_window_bounds()), Some(display))
             } else {
-                (None, None)
+                (Some(default_window_bounds()), None)
             };
 
             let options = cx.update(|cx| {

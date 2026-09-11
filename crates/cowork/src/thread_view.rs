@@ -11,12 +11,15 @@ use crate::{
 use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
 use futures::StreamExt as _;
-use gpui::{Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Task, WeakEntity};
+use gpui::{
+    Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, SharedString, Task, WeakEntity,
+    relative,
+};
 use language::LanguageRegistry;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
 use std::sync::Arc;
-use ui::{Divider, Tooltip, prelude::*};
+use ui::{CopyButton, Divider, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -646,6 +649,52 @@ impl Item for CoworkThreadView {
     }
 }
 
+/// The whole failure, wrapped, with a button that takes it away.
+///
+/// A provider's error is often a long JSON body whose useful part — the model name, the status, the
+/// reason — sits at the end. Rendering it as a `Label` put it on one unwrappable line that ran off
+/// the right edge of the window, which hid exactly the part worth reading, and left no way to get
+/// at the text to report it.
+fn render_error(error: SharedString, cx: &App) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    let status = cx.theme().status();
+
+    h_flex()
+        .w_full()
+        .items_start()
+        .px_4()
+        .py_2()
+        .gap_2()
+        .bg(colors.element_background)
+        .border_t_1()
+        .border_color(colors.border_variant)
+        .child(
+            Icon::new(IconName::Warning)
+                .size(IconSize::Small)
+                .color(Color::Error),
+        )
+        .child(
+            div()
+                .id("cowork-error-text")
+                // `min_w_0` is what allows the text to wrap: without it this child keeps its
+                // natural single-line width and pushes the row past the edge of the window.
+                .flex_1()
+                .min_w_0()
+                // A provider can return a very long body. Wrapping it is right; letting it push
+                // the composer off the bottom of the window is not.
+                .max_h(px(160.))
+                .overflow_y_scroll()
+                .text_ui(cx)
+                .text_color(status.error)
+                .child(error.clone()),
+        )
+        .child(
+            CopyButton::new("cowork-copy-error", error)
+                .icon_size(IconSize::Small)
+                .tooltip_label("Copy error"),
+        )
+}
+
 impl Render for CoworkThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -658,15 +707,22 @@ impl Render for CoworkThreadView {
             .iter()
             .enumerate()
             .map(|(index, message)| match message.role {
-                Role::User => v_flex()
+                // The user's own turns are right-aligned and the model's are full width, so the
+                // two are told apart by position before a single word is read.
+                Role::User => h_flex()
                     .id(("cowork-user-message", index))
                     .w_full()
-                    .p_3()
-                    .gap_1()
-                    .rounded_md()
-                    .bg(colors.element_background)
-                    .child(Label::new("You").size(LabelSize::XSmall).color(Color::Muted))
-                    .child(div().child(message.text.clone()))
+                    .justify_end()
+                    .child(
+                        v_flex()
+                            .max_w(relative(0.75))
+                            .p_3()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(colors.element_background)
+                            .child(Label::new("You").size(LabelSize::XSmall).color(Color::Muted))
+                            .child(div().child(message.text.clone())),
+                    )
                     .into_any_element(),
                 Role::Assistant => v_flex()
                     .id(("cowork-assistant-message", index))
@@ -754,16 +810,7 @@ impl Render for CoworkThreadView {
                     .children(messages),
             )
             .when_some(self.error.clone(), |this, error| {
-                this.child(
-                    h_flex()
-                        .w_full()
-                        .px_4()
-                        .py_2()
-                        .gap_2()
-                        .bg(colors.element_background)
-                        .child(Icon::new(IconName::Warning).color(Color::Error))
-                        .child(Label::new(error).color(Color::Error)),
-                )
+                this.child(render_error(error, cx))
             })
             .child(self.render_composer(is_streaming, cx))
     }
