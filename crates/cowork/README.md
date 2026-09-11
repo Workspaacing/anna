@@ -37,6 +37,16 @@ Models come only from the [models.dev](https://models.dev) catalog (`catalog_url
 fetched on first use, cached in Wu's key-value store, and refreshed when it is older than 24 hours
 or when the user asks for a refresh.
 
+**There is no default-model setting, and no output-token setting.** A new thread starts on the
+model you used last — remembered in the key-value store, not in `settings.json` — falling back to
+the first model on offer when that one's provider has been disconnected or the model hidden. A
+configured default would be something you had to keep in step by hand with the providers you have
+actually connected, and it can name a model that no longer exists.
+
+Each request asks for the model's **own** published output ceiling, from the catalog's
+`limit.output`. Where models.dev declares none, the field is omitted so the provider's default
+stands — except for Anthropic, whose Messages API rejects a request without `max_tokens`.
+
 A provider's wire format is chosen from the AI SDK package the catalog names in its `npm` field:
 
 | `npm` contains | Request/response shape | Endpoint |

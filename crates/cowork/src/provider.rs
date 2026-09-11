@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+/// What to ask Anthropic for when the catalog declares no output limit for the model.
+///
+/// Anthropic's Messages API rejects a request without `max_tokens`, so unlike the other two formats
+/// this one cannot simply leave the ceiling to the provider. Every Anthropic model in the catalog
+/// does publish a limit, so this is a floor for an entry that is missing data, not a policy.
+const ANTHROPIC_FALLBACK_MAX_TOKENS: u64 = 8192;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -97,7 +104,9 @@ pub struct CompletionRequest {
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
-    pub max_output_tokens: u64,
+    /// The model's published output ceiling, or `None` when models.dev declares none — in which
+    /// case the provider's own default is left to stand rather than a number invented here.
+    pub max_output_tokens: Option<u64>,
 }
 
 /// Why the model stopped. `ToolUse` is the one the turn loop acts on: it means the assistant message
@@ -287,7 +296,8 @@ fn anthropic_body(request: &CompletionRequest) -> Value {
 
     let mut body = json!({
         "model": request.model_id,
-        "max_tokens": request.max_output_tokens,
+        // Anthropic requires this field, so it is the one format that cannot simply omit it.
+        "max_tokens": request.max_output_tokens.unwrap_or(ANTHROPIC_FALLBACK_MAX_TOKENS),
         "stream": true,
         "messages": messages,
     });
@@ -349,10 +359,11 @@ fn google_body(request: &CompletionRequest) -> Value {
         }
     }
 
-    let mut body = json!({
-        "contents": contents,
-        "generationConfig": { "maxOutputTokens": request.max_output_tokens },
-    });
+    let mut body = json!({ "contents": contents });
+    // Gemini treats the field as optional, so leaving it out means "whatever this model can do".
+    if let Some(limit) = request.max_output_tokens {
+        body["generationConfig"] = json!({ "maxOutputTokens": limit });
+    }
     if let Some(system) = &request.system {
         body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
     }
@@ -416,10 +427,13 @@ fn openai_body(request: &CompletionRequest) -> Value {
 
     let mut body = json!({
         "model": request.model_id,
-        "max_completion_tokens": request.max_output_tokens,
         "stream": true,
         "messages": messages,
     });
+    // Optional here too, and an omitted ceiling is the model's own.
+    if let Some(limit) = request.max_output_tokens {
+        body["max_completion_tokens"] = json!(limit);
+    }
     if !request.tools.is_empty() {
         body["tools"] = json!(
             request
@@ -750,6 +764,53 @@ fn decode_openai_chunk(chunk: &Value, state: &mut SseState) -> Result<Vec<Comple
 mod tests {
     use super::*;
 
+    fn request(npm: &str, max_output_tokens: Option<u64>) -> CompletionRequest {
+        CompletionRequest {
+            provider_id: "p".into(),
+            provider: serde_json::from_str(&format!(r#"{{"npm":"{npm}"}}"#)).unwrap(),
+            model_id: "m".into(),
+            api_key: "k".into(),
+            system: None,
+            messages: vec![Message::user("hi")],
+            tools: Vec::new(),
+            max_output_tokens,
+        }
+    }
+
+    #[test]
+    fn a_published_output_limit_is_asked_for_in_full() {
+        // Whatever the model says it can produce is what we ask for; there is no reason to cap a
+        // response below the ceiling the provider itself publishes.
+        assert_eq!(anthropic_body(&request("@ai-sdk/anthropic", Some(64000)))["max_tokens"], 64000);
+        assert_eq!(
+            openai_body(&request("@ai-sdk/openai", Some(32768)))["max_completion_tokens"],
+            32768
+        );
+        assert_eq!(
+            google_body(&request("@ai-sdk/google", Some(8192)))["generationConfig"]
+                ["maxOutputTokens"],
+            8192
+        );
+    }
+
+    #[test]
+    fn with_no_published_limit_the_provider_decides() {
+        // Omitting the field asks for the provider's own default, which is a better guess than any
+        // number invented here.
+        let openai = openai_body(&request("@ai-sdk/openai", None));
+        assert!(openai.get("max_completion_tokens").is_none(), "got: {openai}");
+
+        let google = google_body(&request("@ai-sdk/google", None));
+        assert!(google.get("generationConfig").is_none(), "got: {google}");
+    }
+
+    #[test]
+    fn anthropic_always_sends_a_ceiling_because_it_rejects_a_request_without_one() {
+        let body = anthropic_body(&request("@ai-sdk/anthropic", None));
+
+        assert_eq!(body["max_tokens"], ANTHROPIC_FALLBACK_MAX_TOKENS);
+    }
+
     fn collect(body: &'static str, wire_api: WireApi) -> Vec<CompletionEvent> {
         futures::executor::block_on(async {
             decode_sse(AsyncBody::from(body), wire_api)
@@ -961,7 +1022,7 @@ mod tests {
                 }]),
             ],
             tools: Vec::new(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
         };
 
         let body = google_body(&request);
@@ -1067,7 +1128,7 @@ mod tests {
                 }]),
             ],
             tools: Vec::new(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
         };
 
         // Anthropic folds results into a user message.

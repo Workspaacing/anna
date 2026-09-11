@@ -111,15 +111,8 @@
     "dock": "left",
     // Default width of the Cowork panel.
     "default_width": 300,
-    // The `provider/model` new threads start on, using models.dev identifiers.
-    // Cowork reads the provider's API key from the environment variable that
-    // models.dev declares for it (for example ANTHROPIC_API_KEY); keys are
-    // never stored by Wu.
-    "default_model": "anthropic/claude-sonnet-4-5",
     // The models.dev catalog Cowork reads its providers and models from.
     "catalog_url": "https://models.dev/api.json",
-    // The maximum number of tokens a single response may generate.
-    "max_output_tokens": 4096,
     // Models hidden from Cowork's model selector, as "provider/model" identifiers.
     "disabled_models": [],
     // The checks Cowork runs over its own agents' work. Every one of them is

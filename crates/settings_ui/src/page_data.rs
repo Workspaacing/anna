@@ -5572,28 +5572,9 @@ fn panels_page() -> SettingsPage {
 }
 
 fn cowork_page() -> SettingsPage {
-    fn threads_section() -> [SettingsPageItem; 4] {
+    fn threads_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SectionHeader("Threads"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Default Model",
-                description: "The provider and model new threads start on, named with models.dev identifiers. Connect a provider under Catalog > Providers; its API key is kept in the operating system's credential store, never in settings.json.",
-                field: Box::new(SettingField {
-                    json_path: Some("cowork.default_model"),
-                    pick: |settings_content| {
-                        settings_content.cowork.as_ref()?.default_model.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content.cowork.get_or_insert_default().default_model = value;
-                    },
-                }),
-                metadata: Some(Box::new(SettingsFieldMetadata {
-                    placeholder: Some("anthropic/claude-sonnet-4-5"),
-                    should_do_titlecase: Some(false),
-                    ..Default::default()
-                })),
-                files: USER,
-            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Model Catalog URL",
                 description: "The models.dev catalog Cowork reads its providers and models from. Cached locally and refreshed once a day.",
@@ -5609,24 +5590,6 @@ fn cowork_page() -> SettingsPage {
                     should_do_titlecase: Some(false),
                     ..Default::default()
                 })),
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Max Output Tokens",
-                description: "The maximum number of tokens a single response may generate.",
-                field: Box::new(SettingField {
-                    json_path: Some("cowork.max_output_tokens"),
-                    pick: |settings_content| {
-                        settings_content.cowork.as_ref()?.max_output_tokens.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .cowork
-                            .get_or_insert_default()
-                            .max_output_tokens = value;
-                    },
-                }),
-                metadata: None,
                 files: USER,
             }),
         ]

@@ -995,18 +995,10 @@ pub struct CoworkSettingsContent {
     ///
     /// Default: 300
     pub default_width: Option<PixelSetting>,
-    /// The `provider/model` new threads start on, named with models.dev identifiers.
-    ///
-    /// Default: "anthropic/claude-sonnet-4-5"
-    pub default_model: Option<String>,
     /// The models.dev catalog Cowork reads its providers and models from.
     ///
     /// Default: "https://models.dev/api.json"
     pub catalog_url: Option<String>,
-    /// The maximum number of tokens a single response may generate.
-    ///
-    /// Default: 4096
-    pub max_output_tokens: Option<u64>,
     /// Models hidden from Cowork's model selector, as `provider/model` identifiers. Listing the
     /// hidden ones rather than the shown ones means models added to a provider later are available
     /// by default.

@@ -281,6 +281,7 @@ impl Catalog {
                     reasoning: model.reasoning,
                     tool_call: model.tool_call,
                     context_limit: model.limit.and_then(|limit| limit.context),
+                    output_limit: model.limit.and_then(|limit| limit.output),
                 });
             }
         }
@@ -303,6 +304,10 @@ pub struct CatalogEntry {
     pub reasoning: bool,
     pub tool_call: bool,
     pub context_limit: Option<u64>,
+    /// The most tokens this model will produce in one response, as models.dev declares it. Cowork
+    /// asks for exactly this much: the point of a limit published per model is that there is no
+    /// reason to guess a smaller one.
+    pub output_limit: Option<u64>,
 }
 
 impl CatalogEntry {

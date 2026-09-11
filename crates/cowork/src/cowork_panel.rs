@@ -144,7 +144,7 @@ impl CoworkPanel {
     }
 
     pub fn start_new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(model) = self.store.read(cx).default_model(cx) else {
+        let Some(model) = self.store.read(cx).model_for_new_thread() else {
             self.report_no_model(cx);
             return;
         };
@@ -155,6 +155,9 @@ impl CoworkPanel {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+
+        self.store
+            .update(cx, |store, cx| store.remember_model(model.clone(), cx));
 
         let thread = self
             .store
@@ -269,8 +272,8 @@ impl CoworkPanel {
         self.open_model_selector(window, cx);
     }
 
-    /// Choosing here writes `cowork.default_model`, which is what new threads start on. An existing
-    /// thread keeps the model it was created with; that one is changed from the thread's own header.
+    /// Choosing here sets what new threads start on. An existing thread keeps the model it was
+    /// created with; that one is changed from the thread's own header.
     fn open_model_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
@@ -281,14 +284,13 @@ impl CoworkPanel {
         self.store
             .update(cx, |store, cx| store.refresh_connections(cx));
 
-        let selected = self.store.read(cx).default_model(cx);
-        let fs = self.fs.clone();
+        let selected = self.store.read(cx).model_for_new_thread();
+        let store = self.store.downgrade();
         let on_confirm: Arc<dyn Fn(ModelRef, &mut Window, &mut App) + Send + Sync> =
             Arc::new(move |model, _window, cx| {
-                let qualified = model.qualified();
-                settings::update_settings_file(fs.clone(), cx, move |settings, _| {
-                    settings.cowork.get_or_insert_default().default_model = Some(qualified);
-                });
+                store
+                    .update(cx, |store, cx| store.remember_model(model, cx))
+                    .log_err();
             });
 
         workspace.update(cx, |workspace, cx| {
@@ -312,8 +314,8 @@ impl CoworkPanel {
 
     fn report_no_model(&mut self, cx: &mut Context<Self>) {
         self.report_error(
-            "No model is available yet. Refresh the models.dev catalog and set a provider key in \
-             your environment."
+            "No model is available yet. Connect a provider in Settings > Cowork > Providers, or \
+             refresh the models.dev catalog."
                 .to_owned(),
             cx,
         );
@@ -456,16 +458,18 @@ impl CoworkPanel {
     /// it at the bottom keeps the thread list starting at the top.
     fn render_model_footer(&self, cx: &Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
-        let configured = CoworkSettings::get_global(cx).default_model.clone();
         let connected = store.connected_count();
 
-        let (label, detail) = match store.default_model(cx) {
+        let (label, detail) = match store.model_for_new_thread() {
             Some(model) => (model.model_id, model.provider_id),
             None if connected == 0 => (
                 "No provider connected".to_owned(),
-                "Set an API key environment variable".to_owned(),
+                "Add an API key in Settings > Cowork > Providers".to_owned(),
             ),
-            None => (configured, "Not available from a connected provider".to_owned()),
+            None => (
+                "No model available".to_owned(),
+                "Every model of your connected providers is hidden".to_owned(),
+            ),
         };
 
         v_flex()

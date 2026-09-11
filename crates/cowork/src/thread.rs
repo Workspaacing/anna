@@ -26,6 +26,7 @@ const KVP_NAMESPACE: &str = "cowork";
 const INDEX_KEY: &str = "index";
 const CATALOG_KEY: &str = "catalog";
 const STORED_KEYS_KEY: &str = "providers_with_keys";
+const LAST_MODEL_KEY: &str = "last_model";
 const PREVIEW_LENGTH: usize = 120;
 const TITLE_LENGTH: usize = 48;
 
@@ -167,6 +168,9 @@ pub struct CoworkStore {
     /// the environment are never copied here.
     stored_keys: HashMap<String, String>,
     disabled_models: HashSet<String>,
+    /// What a new thread starts on. Remembered rather than configured — see
+    /// [`CoworkStore::model_for_new_thread`].
+    last_model: Option<ModelRef>,
     pending_api_key: Option<PendingApiKey>,
     provider_list: Arc<[ProviderRow]>,
     model_list: Arc<[ModelRow]>,
@@ -201,13 +205,19 @@ impl CoworkStore {
         let load = cx.spawn({
             let key_value_store = key_value_store.clone();
             async move |this, cx| {
-                let loaded = cx
-                    .background_spawn(async move { read_index(&key_value_store) })
+                let (loaded, last_model) = cx
+                    .background_spawn(async move {
+                        (
+                            read_index(&key_value_store),
+                            read_last_model(&key_value_store),
+                        )
+                    })
                     .await;
 
                 this.update(cx, |this, cx| {
                     this.load_stored_keys(cx);
                     this.threads = loaded;
+                    this.last_model = last_model;
                     this.next_sequence = this.threads.len() as u64;
                     cx.emit(CoworkStoreEvent::ThreadsChanged);
                     cx.notify();
@@ -229,6 +239,7 @@ impl CoworkStore {
             connected: HashSet::default(),
             stored_keys: HashMap::default(),
             disabled_models: HashSet::default(),
+            last_model: None,
             pending_api_key: None,
             provider_list: Arc::from([]),
             model_list: Arc::from([]),
@@ -568,23 +579,46 @@ impl CoworkStore {
         self.model_list = Arc::from(models);
     }
 
-    /// The model a new thread starts on: the one named in settings when the catalog knows it,
-    /// otherwise the first entry whose credential is actually present in the environment.
-    pub fn default_model(&self, cx: &App) -> Option<ModelRef> {
-        let configured = CoworkSettings::get_global(cx).default_model.clone();
-        // A configured model is only offered when its provider is actually connected; otherwise
-        // the panel would name a model that every request would fail on.
-        if let Some(model) = ModelRef::parse(&configured)
+    /// The model a new thread starts on: the one used last, falling back to the first on offer.
+    ///
+    /// There is deliberately no setting for this. A configured default is something the user would
+    /// have to keep in step by hand with the providers they have actually connected and the models
+    /// they have hidden, and it names a model that may not exist by the time it is read. The answer
+    /// they want is almost always the model they used last, so that is what is remembered.
+    pub fn model_for_new_thread(&self) -> Option<ModelRef> {
+        // Only offered while it is still reachable: a model whose provider was disconnected, or
+        // which the user has since hidden, would fail every request.
+        if let Some(model) = &self.last_model
             && self.connected.contains(&model.provider_id)
-            && self.catalog.model(&model).is_some()
+            && self.catalog.model(model).is_some()
+            && !self.disabled_models.contains(&model.qualified())
         {
-            return Some(model);
+            return Some(model.clone());
         }
 
         self.catalog_entries()
             .into_iter()
             .next()
             .map(|entry| entry.model_ref)
+    }
+
+    /// Records the model as the one to start the next thread on.
+    pub fn remember_model(&mut self, model: ModelRef, cx: &mut Context<Self>) {
+        if self.last_model.as_ref() == Some(&model) {
+            return;
+        }
+
+        let qualified = model.qualified();
+        self.last_model = Some(model);
+        let key_value_store = self.key_value_store.clone();
+        cx.background_spawn(async move {
+            key_value_store
+                .scoped(KVP_NAMESPACE)
+                .write(LAST_MODEL_KEY.to_owned(), qualified)
+                .await
+        })
+        .detach_and_log_err(cx);
+        cx.notify();
     }
 
     pub fn load_catalog(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
@@ -741,6 +775,15 @@ impl CoworkStore {
 
 fn thread_key(id: &ThreadId) -> String {
     format!("thread/{}", id.as_str())
+}
+
+fn read_last_model(key_value_store: &KeyValueStore) -> Option<ModelRef> {
+    key_value_store
+        .scoped(KVP_NAMESPACE)
+        .read(LAST_MODEL_KEY)
+        .ok()
+        .flatten()
+        .and_then(|raw| ModelRef::parse(&raw))
 }
 
 fn read_index(key_value_store: &KeyValueStore) -> Vec<ThreadMetadata> {

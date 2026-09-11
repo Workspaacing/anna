@@ -6,9 +6,7 @@ pub struct CoworkSettings {
     pub button: bool,
     pub dock: DockSide,
     pub default_width: Pixels,
-    pub default_model: String,
     pub catalog_url: String,
-    pub max_output_tokens: u64,
     pub disabled_models: Vec<String>,
     pub verification: VerificationSettings,
 }
@@ -36,9 +34,7 @@ impl Settings for CoworkSettings {
             button: cowork.button.unwrap(),
             dock: cowork.dock.unwrap(),
             default_width: cowork.default_width.unwrap().into_gpui(),
-            default_model: cowork.default_model.clone().unwrap(),
             catalog_url: cowork.catalog_url.clone().unwrap(),
-            max_output_tokens: cowork.max_output_tokens.unwrap(),
             disabled_models: cowork.disabled_models.clone().unwrap(),
             verification: {
                 let verification = cowork.verification.as_ref().unwrap();

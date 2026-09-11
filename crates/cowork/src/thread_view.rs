@@ -1,7 +1,6 @@
 use crate::{
     Cancel, SelectModel, Submit,
     catalog::ModelRef,
-    cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
     provider::{
         self, CompletionEvent, CompletionRequest, Message, Role, StopReason, ToolCall, ToolResult,
@@ -16,7 +15,6 @@ use gpui::{Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Task, Wea
 use language::LanguageRegistry;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
-use settings::Settings as _;
 use std::sync::Arc;
 use ui::{Divider, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -147,9 +145,15 @@ impl CoworkThreadView {
         };
 
         let this = cx.entity().downgrade();
+        let store = self.store.downgrade();
         let selected = Some(self.thread.metadata.model.clone());
         let on_confirm: Arc<dyn Fn(ModelRef, &mut Window, &mut App) + Send + Sync> =
             Arc::new(move |model, _window, cx| {
+                // Also what the next new thread will start on: choosing a model here is the
+                // clearest statement of preference the user can make.
+                store
+                    .update(cx, |store, cx| store.remember_model(model.clone(), cx))
+                    .log_err();
                 this.update(cx, |this, cx| {
                     this.thread.metadata.model = model;
                     this.persist(cx);
@@ -421,7 +425,7 @@ impl CoworkThreadView {
     fn build_request(&self, cx: &App) -> Result<CompletionRequest> {
         let model = self.thread.metadata.model.clone();
         let store = self.store.read(cx);
-        let (catalog_provider, _) = store.catalog().model(&model).with_context(|| {
+        let (catalog_provider, catalog_model) = store.catalog().model(&model).with_context(|| {
             format!(
                 "{} is not in the models.dev catalog. Refresh the catalog from the Cowork panel, \
                  or pick another model.",
@@ -445,7 +449,9 @@ impl CoworkThreadView {
             system: None,
             messages: self.thread.messages.clone(),
             tools: self.tools.definitions(),
-            max_output_tokens: CoworkSettings::get_global(cx).max_output_tokens,
+            // Every model publishes its own ceiling, so asking for less would be leaving the
+            // model's capability on the table for no reason.
+            max_output_tokens: catalog_model.limit.and_then(|limit| limit.output),
         })
     }
 
