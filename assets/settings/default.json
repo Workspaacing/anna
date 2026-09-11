@@ -120,6 +120,8 @@
     "catalog_url": "https://models.dev/api.json",
     // The maximum number of tokens a single response may generate.
     "max_output_tokens": 4096,
+    // Models hidden from Cowork's model selector, as "provider/model" identifiers.
+    "disabled_models": [],
   },
   // Image viewer settings
   "image_viewer": {

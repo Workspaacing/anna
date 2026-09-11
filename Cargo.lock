@@ -2099,6 +2099,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
+ "wu_actions",
 ]
 
 [[package]]
@@ -10384,6 +10385,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "component",
+ "cowork",
  "editor",
  "fs",
  "futures",

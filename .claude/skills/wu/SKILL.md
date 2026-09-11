@@ -276,6 +276,12 @@ Rules:
   `tsconfig.json`/`package.json`. Wu's own schemas are generated at runtime by `json_schema_store` and
   served over `wu://schemas/...`.
 - `crates/settings_ui` is optional and unenforced — skip it and the setting is JSON-only, silently.
+  To surface it, add a `SettingsPageItem::SettingItem` in `crates/settings_ui/src/page_data.rs`;
+  a whole new page is a `fn x_page() -> SettingsPage` plus one line in `settings_data()`. Renderers
+  exist for `bool`, `String`/`SharedString`, the numeric types, `PixelSetting` and any enum
+  registered in `init_renderers`. The framework is declarative, so runtime status (is this env var
+  set?) has no place there — keep that in the feature's own UI. A panel opens its page with
+  `wu_actions::OpenSettingsPage { page: "<title>", target: None }`.
 
 ### Add a modal
 `Picker<D>` already implements `ModalView` (`picker.rs:1998`), so a wrapper struct is optional.

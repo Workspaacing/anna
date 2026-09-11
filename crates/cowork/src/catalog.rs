@@ -16,6 +16,56 @@ pub enum WireApi {
     OpenAiCompatible,
 }
 
+/// The providers shown in the "Popular" section of the settings UI. Everything else in the
+/// catalog is still listed, under "All providers".
+///
+/// models.dev carries 213 providers, most of them resellers and aggregators, and the catalog has
+/// no popularity signal (model count is a poor proxy: the largest entry is an aggregator). So this
+/// ordering is curated: first-party labs, the major clouds, and the gateways people reach for.
+/// Every id here was checked against the live catalog.
+pub const POPULAR_PROVIDERS: [&str; 30] = [
+    "anthropic",
+    "openai",
+    "google",
+    "github-copilot",
+    "openrouter",
+    "xai",
+    "deepseek",
+    "mistral",
+    "groq",
+    "amazon-bedrock",
+    "azure",
+    "google-vertex",
+    "vercel",
+    "togetherai",
+    "fireworks-ai",
+    "cerebras",
+    "perplexity",
+    "cohere",
+    "deepinfra",
+    "huggingface",
+    "moonshotai",
+    "zhipuai",
+    "minimax",
+    "alibaba",
+    "nvidia",
+    "llama",
+    "baseten",
+    "siliconflow",
+    "lmstudio",
+    "opencode",
+];
+
+/// Whether Cowork can actually speak to a provider. Wire formats beyond Anthropic's Messages API
+/// and OpenAI-style chat completions are not implemented, so the UI says so instead of offering a
+/// model that will fail on the first request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Support {
+    Supported,
+    /// The provider needs a request signing scheme or request shape Cowork does not implement.
+    Unsupported,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Catalog {
     #[serde(flatten)]
@@ -132,9 +182,31 @@ impl Provider {
         }
     }
 
-    /// The environment variable holding this provider's credential, as declared by the catalog.
+    /// The environment variables that can hold this provider's credential, as declared by the
+    /// catalog. Several entries usually mean alternatives rather than a set that must all be
+    /// present (`google` accepts either `GOOGLE_API_KEY` or `GOOGLE_GENERATIVE_AI_API_KEY`), so a
+    /// provider counts as connected when any one of them is set.
+    pub fn env_vars(&self) -> &[String] {
+        &self.env
+    }
+
     pub fn primary_env_var(&self) -> Option<&str> {
         self.env.first().map(String::as_str)
+    }
+
+    /// Providers reached through an SDK package whose wire format Cowork does not implement.
+    /// `@ai-sdk/azure` is Azure OpenAI, which is OpenAI-shaped, so it is not listed here.
+    pub fn support(&self) -> Support {
+        const UNSUPPORTED_PACKAGES: [&str; 3] = [
+            "@ai-sdk/google",
+            "@ai-sdk/google-vertex",
+            "@ai-sdk/amazon-bedrock",
+        ];
+
+        match self.npm.as_deref() {
+            Some(npm) if UNSUPPORTED_PACKAGES.contains(&npm) => Support::Unsupported,
+            _ => Support::Supported,
+        }
     }
 }
 
@@ -164,11 +236,15 @@ impl Catalog {
         Some((provider, entry))
     }
 
-    /// Every non-deprecated model in the catalog, sorted by `provider/model` so the picker and the
-    /// settings UI agree on an order.
-    pub fn entries(&self) -> Vec<CatalogEntry> {
+    /// Every non-deprecated model belonging to a connected provider, sorted by `provider/model` so
+    /// the picker and the settings UI agree on an order. A model whose provider has no credential
+    /// is never offered: picking it could only produce a failed request.
+    pub fn entries(&self, is_connected: impl Fn(&str) -> bool) -> Vec<CatalogEntry> {
         let mut entries = Vec::new();
         for (provider_key, provider) in &self.providers {
+            if !is_connected(provider_key) || provider.support() == Support::Unsupported {
+                continue;
+            }
             for (model_key, model) in &provider.models {
                 if model.is_deprecated() {
                     continue;
@@ -293,7 +369,7 @@ mod tests {
     #[test]
     fn parses_catalog_and_skips_deprecated_models() {
         let catalog = parse(SAMPLE.as_bytes()).expect("sample catalog should parse");
-        let entries = catalog.entries();
+        let entries = catalog.entries(|_| true);
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].label(), "Anthropic · Claude Sonnet 4.5");
@@ -323,7 +399,7 @@ mod tests {
         )
         .expect("unknown fields should not fail the parse");
 
-        let entries = catalog.entries();
+        let entries = catalog.entries(|_| true);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].model_ref.qualified(), "acme/m1");
         assert_eq!(entries[0].provider_name, "acme");

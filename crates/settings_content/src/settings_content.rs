@@ -1007,6 +1007,12 @@ pub struct CoworkSettingsContent {
     ///
     /// Default: 4096
     pub max_output_tokens: Option<u64>,
+    /// Models hidden from Cowork's model selector, as `provider/model` identifiers. Listing the
+    /// hidden ones rather than the shown ones means models added to a provider later are available
+    /// by default.
+    ///
+    /// Default: []
+    pub disabled_models: Option<Vec<String>>,
 }
 
 /// The settings for the image viewer.

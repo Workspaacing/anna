@@ -1,4 +1,5 @@
 mod components;
+mod cowork_pages;
 mod page_data;
 
 use anyhow::{Context as _, Result};
@@ -802,7 +803,13 @@ fn open_settings_editor_with(
                     width: SIDEBAR_WIDTH + CONTENT_MIN_WIDTH,
                     height: px(240.0),
                 }),
-                window_bounds: Some(WindowBounds::centered(scaled_bounds, cx)),
+                // The settings window always opens maximized, and has no title bar of its
+                // own, so there are no minimize/restore/close buttons. `escape` and `ctrl-w` are
+                // bound to `workspace::CloseWindow` in the `SettingsWindow` context, which closes
+                // the active window, so there is still a way out.
+                window_bounds: Some(WindowBounds::Maximized(
+                    WindowBounds::centered(scaled_bounds, cx).get_bounds(),
+                )),
                 ..Default::default()
             },
             |window, cx| {
@@ -1758,11 +1765,9 @@ impl SettingsWindow {
         })
         .detach();
 
-        let title_bar = if !cfg!(target_os = "macos") {
-            Some(cx.new(|cx| PlatformTitleBar::new("settings-title-bar", cx)))
-        } else {
-            None
-        };
+        // Deliberately no title bar on any platform: the window opens maximized and is closed
+        // with `escape`, so the window controls only took up space.
+        let title_bar: Option<Entity<PlatformTitleBar>> = None;
 
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(0.0)).measure_all();
         list_state.set_scroll_handler(|_, _, _| {});
@@ -4101,8 +4106,21 @@ impl Render for SettingsWindow {
         client_side_decorations(
             v_flex()
                 .text_color(cx.theme().colors().text)
+                // Without this the window surface shows through wherever a child does not paint,
+                // which left a bright strip above the content.
+                .bg(cx.theme().colors().background)
                 .size_full()
                 .children(self.title_bar.clone())
+                // The window has no title bar and opens maximized, so this is the only way to
+                // close it with the mouse. `escape` also works.
+                .child(
+                    h_flex().w_full().justify_end().px_2().pt_2().child(
+                        IconButton::new("settings-close", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Close settings"))
+                            .on_click(|_, window, _| window.remove_window()),
+                    ),
+                )
                 .child(
                     div()
                         .id("settings-window")

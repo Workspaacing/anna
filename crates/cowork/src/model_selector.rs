@@ -233,6 +233,16 @@ impl PickerDelegate for ModelSelectorDelegate {
                                 .gap_1p5()
                                 .child(
                                     Label::new(entry.provider_name.clone())
+                                        .size(LabelSize::Small)
+                                        .color(Color::Accent),
+                                )
+                                .child(
+                                    Label::new("·")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    Label::new(entry.model_ref.model_id.clone())
                                         .size(LabelSize::XSmall)
                                         .color(Color::Muted),
                                 )

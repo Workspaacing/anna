@@ -4,7 +4,7 @@ use crate::{
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
     provider::{self, CompletionEvent, CompletionRequest, Message, Role},
-    thread::{CoworkStore, Thread, ThreadId, credential},
+    thread::{CoworkStore, Thread, ThreadId},
 };
 use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
@@ -246,17 +246,11 @@ impl CoworkThreadView {
             )
         })?;
 
-        let env_var = catalog_provider.primary_env_var().with_context(|| {
-            format!(
-                "the models.dev catalog does not declare a credential variable for {}",
-                model.provider_id
-            )
-        })?;
-
-        let api_key = credential(env_var).ok_or_else(|| {
+        let api_key = store.api_key(&model.provider_id).ok_or_else(|| {
             anyhow!(
-                "set {env_var} in the environment and restart Wu to use {}",
-                model.qualified()
+                "{} has no API key. Add one from Settings → Cowork → Providers, or set {} in the                  environment.",
+                model.provider_id,
+                catalog_provider.primary_env_var().unwrap_or("its API key variable"),
             )
         })?;
 

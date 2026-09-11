@@ -1,14 +1,20 @@
 use crate::{
-    catalog::{CATALOG_STALE_AFTER, Catalog, CatalogEntry, ModelRef},
+    catalog::{CATALOG_STALE_AFTER, Catalog, CatalogEntry, ModelRef, POPULAR_PROVIDERS, Support},
     cowork_settings::CoworkSettings,
     provider::{Message, Role},
 };
 use anyhow::{Context as _, Result};
 use db::kvp::KeyValueStore;
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task, TaskExt as _};
+use collections::{HashMap, HashSet};
+use editor::Editor;
+use gpui::Focusable as _;
+use gpui::{
+    App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Task, TaskExt as _,
+    Window,
+};
 use http_client::HttpClient;
 use serde::{Deserialize, Serialize};
-use settings::Settings as _;
+use settings::{Settings as _, SettingsStore};
 use std::{
     cmp::Reverse,
     sync::Arc,
@@ -19,6 +25,7 @@ use util::ResultExt as _;
 const KVP_NAMESPACE: &str = "cowork";
 const INDEX_KEY: &str = "index";
 const CATALOG_KEY: &str = "catalog";
+const STORED_KEYS_KEY: &str = "providers_with_keys";
 const PREVIEW_LENGTH: usize = 120;
 const TITLE_LENGTH: usize = 48;
 
@@ -80,6 +87,58 @@ impl Thread {
     }
 }
 
+/// A provider as the settings UI draws it.
+///
+/// Every field is resolved once, when the catalog or the environment is read, and never during
+/// `render`. The catalog carries 213 providers; recomputing display names, joining environment
+/// variable lists and probing the process environment on every frame is what made the old panel
+/// roster stutter.
+#[derive(Clone, Debug)]
+pub struct ProviderRow {
+    pub id: SharedString,
+    pub name: SharedString,
+    /// The environment variables that would connect this provider, already joined for display.
+    pub env_label: SharedString,
+    pub model_count: usize,
+    pub connected: bool,
+    /// The credential came from the OS credential store rather than the environment.
+    pub stored: bool,
+    pub supported: bool,
+}
+
+/// A model of a connected provider, resolved once for the same reason as [`ProviderRow`].
+#[derive(Clone, Debug)]
+pub struct ModelRow {
+    pub model: ModelRef,
+    pub name: SharedString,
+    pub provider_name: SharedString,
+    pub detail: SharedString,
+    /// Whether the model is offered in the model selector.
+    pub enabled: bool,
+}
+
+/// An in-flight "set the API key for this provider" dialog.
+///
+/// The settings window is not a `Workspace`, so it has no modal layer to push onto. The dialog is
+/// therefore drawn by the settings page itself, and its state lives here because the store is the
+/// one thing both the panel and the settings window can reach.
+pub struct PendingApiKey {
+    pub provider_id: SharedString,
+    pub provider_name: SharedString,
+    pub env_label: SharedString,
+    pub mode: ApiKeyMode,
+    pub editor: Entity<Editor>,
+    pub error: Option<SharedString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApiKeyMode {
+    /// No key is stored for this provider yet.
+    Connect,
+    /// A key is stored; the dialog confirms removing it.
+    Disconnect,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CachedCatalog {
     fetched_at: u64,
@@ -103,11 +162,20 @@ pub struct CoworkStore {
     threads: Vec<ThreadMetadata>,
     catalog: Catalog,
     catalog_state: CatalogState,
+    connected: HashSet<String>,
+    /// API keys the user typed into Cowork, mirrored from the OS credential store. Keys read from
+    /// the environment are never copied here.
+    stored_keys: HashMap<String, String>,
+    disabled_models: HashSet<String>,
+    pending_api_key: Option<PendingApiKey>,
+    provider_list: Arc<[ProviderRow]>,
+    model_list: Arc<[ModelRow]>,
     key_value_store: KeyValueStore,
     http_client: Arc<dyn HttpClient>,
     next_sequence: u64,
     _load: Task<()>,
     _refresh: Task<()>,
+    _settings: gpui::Subscription,
 }
 
 struct GlobalCoworkStore(Entity<CoworkStore>);
@@ -138,6 +206,7 @@ impl CoworkStore {
                     .await;
 
                 this.update(cx, |this, cx| {
+                    this.load_stored_keys(cx);
                     this.threads = loaded;
                     this.next_sequence = this.threads.len() as u64;
                     cx.emit(CoworkStoreEvent::ThreadsChanged);
@@ -147,15 +216,28 @@ impl CoworkStore {
             }
         });
 
+        let settings_subscription = cx.observe_global::<SettingsStore>(|this: &mut Self, cx| {
+            this.rebuild_rows(cx);
+            cx.emit(CoworkStoreEvent::CatalogChanged);
+            cx.notify();
+        });
+
         Self {
             threads: Vec::new(),
             catalog: Catalog::default(),
             catalog_state: CatalogState::Idle,
+            connected: HashSet::default(),
+            stored_keys: HashMap::default(),
+            disabled_models: HashSet::default(),
+            pending_api_key: None,
+            provider_list: Arc::from([]),
+            model_list: Arc::from([]),
             key_value_store,
             http_client,
             next_sequence: 0,
             _load: load,
             _refresh: Task::ready(()),
+            _settings: settings_subscription,
         }
     }
 
@@ -172,14 +254,328 @@ impl CoworkStore {
     }
 
     pub fn catalog_entries(&self) -> Vec<CatalogEntry> {
-        self.catalog.entries()
+        self.catalog
+            .entries(|provider_id| self.connected.contains(provider_id))
+            .into_iter()
+            .filter(|entry| !self.disabled_models.contains(&entry.model_ref.qualified()))
+            .collect()
+    }
+
+    /// The credential to authenticate a request with. A key typed into Cowork wins over the
+    /// environment, so setting one in the UI takes effect without restarting Wu.
+    pub fn api_key(&self, provider_id: &str) -> Option<String> {
+        if let Some(key) = self.stored_keys.get(provider_id) {
+            return Some(key.clone());
+        }
+        let provider = self.catalog.providers.get(provider_id)?;
+        provider.env_vars().iter().find_map(|name| credential(name))
+    }
+
+    pub fn pending_api_key(&self) -> Option<&PendingApiKey> {
+        self.pending_api_key.as_ref()
+    }
+
+    /// A provider with a stored key opens a confirmation to remove it; anything else opens the
+    /// dialog to add one.
+    pub fn begin_api_key(&mut self, row: &ProviderRow, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = if row.stored {
+            ApiKeyMode::Disconnect
+        } else {
+            ApiKeyMode::Connect
+        };
+
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_masked(true, cx);
+            editor.set_placeholder_text("Paste the API key", window, cx);
+            editor
+        });
+        if mode == ApiKeyMode::Connect {
+            window.focus(&editor.focus_handle(cx), cx);
+        }
+
+        self.pending_api_key = Some(PendingApiKey {
+            provider_id: row.id.clone(),
+            provider_name: row.name.clone(),
+            env_label: row.env_label.clone(),
+            mode,
+            editor,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Forgets the stored key for the provider named by the open dialog.
+    pub fn remove_api_key(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_api_key.as_ref() else {
+            return;
+        };
+        let provider_id = pending.provider_id.to_string();
+        self.stored_keys.remove(&provider_id);
+        cx.delete_credentials(&credential_url(&provider_id)).detach();
+
+        self.pending_api_key = None;
+        self.persist_stored_key_index(cx);
+        self.rebuild_rows(cx);
+        cx.emit(CoworkStoreEvent::CatalogChanged);
+        cx.notify();
+    }
+
+    /// Shows or hides a model in the selector by writing `cowork.disabled_models`.
+    pub fn set_model_enabled(
+        &mut self,
+        model: &ModelRef,
+        enabled: bool,
+        fs: Arc<dyn fs::Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        let qualified = model.qualified();
+        settings::update_settings_file(fs, cx, move |settings, _| {
+            let disabled = settings
+                .cowork
+                .get_or_insert_default()
+                .disabled_models
+                .get_or_insert_default();
+            if enabled {
+                disabled.retain(|entry| entry != &qualified);
+            } else if !disabled.contains(&qualified) {
+                disabled.push(qualified);
+            }
+        });
+    }
+
+    pub fn cancel_api_key(&mut self, cx: &mut Context<Self>) {
+        self.pending_api_key = None;
+        cx.notify();
+    }
+
+    /// Saves the typed key to the OS credential store, or removes it when the field is empty.
+    pub fn submit_api_key(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_api_key.as_ref() else {
+            return;
+        };
+        let provider_id = pending.provider_id.to_string();
+        let key = pending.editor.read(cx).text(cx).trim().to_owned();
+        let url = credential_url(&provider_id);
+
+        if key.is_empty() {
+            self.stored_keys.remove(&provider_id);
+            cx.delete_credentials(&url).detach();
+        } else {
+            self.stored_keys.insert(provider_id.clone(), key.clone());
+            let write = cx.write_credentials(&url, &provider_id, key.as_bytes());
+            cx.spawn(async move |this, cx| {
+                if let Err(error) = write.await {
+                    log::warn!("cowork: could not store the API key: {error:#}");
+                    this.update(cx, |this, cx| {
+                        // The key still works for this session; only persistence failed.
+                        if let Some(pending) = this.pending_api_key.as_mut() {
+                            pending.error = Some(format!("{error:#}").into());
+                            cx.notify();
+                        }
+                    })
+                    .log_err();
+                }
+            })
+            .detach();
+        }
+
+        self.pending_api_key = None;
+        self.persist_stored_key_index(cx);
+        self.rebuild_rows(cx);
+        cx.emit(CoworkStoreEvent::CatalogChanged);
+        cx.notify();
+    }
+
+    fn persist_stored_key_index(&self, cx: &mut Context<Self>) {
+        let ids = self.stored_keys.keys().cloned().collect::<Vec<_>>();
+        let key_value_store = self.key_value_store.clone();
+        cx.background_spawn(async move {
+            let raw = serde_json::to_string(&ids)?;
+            key_value_store
+                .scoped(KVP_NAMESPACE)
+                .write(STORED_KEYS_KEY.to_owned(), raw)
+                .await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Reads back the keys typed in previous sessions. Only the providers listed in the index are
+    /// touched, so this is a handful of credential-store reads rather than one per catalog entry.
+    fn load_stored_keys(&mut self, cx: &mut Context<Self>) {
+        let key_value_store = self.key_value_store.clone();
+        cx.spawn(async move |this, cx| {
+            let ids = cx
+                .background_spawn(async move {
+                    key_value_store
+                        .scoped(KVP_NAMESPACE)
+                        .read(STORED_KEYS_KEY)
+                        .ok()
+                        .flatten()
+                        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                        .unwrap_or_default()
+                })
+                .await;
+
+            for id in ids {
+                let read = cx.update(|cx| cx.read_credentials(&credential_url(&id)));
+                let Ok(Some((_, key))) = read.await else {
+                    continue;
+                };
+
+                let Ok(key) = String::from_utf8(key) else {
+                    continue;
+                };
+                if this
+                    .update(cx, |this, _| {
+                        this.stored_keys.insert(id.clone(), key);
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                this.rebuild_rows(cx);
+                cx.emit(CoworkStoreEvent::CatalogChanged);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    pub fn is_connected(&self, provider_id: &str) -> bool {
+        self.connected.contains(provider_id)
+    }
+
+    pub fn connected_count(&self) -> usize {
+        self.connected.len()
+    }
+
+    /// Provider rows ordered connected first, then the curated popular set, then the rest.
+    pub fn provider_list(&self) -> Arc<[ProviderRow]> {
+        self.provider_list.clone()
+    }
+
+    /// Model rows grouped by provider. Only connected providers appear.
+    pub fn model_list(&self) -> Arc<[ModelRow]> {
+        self.model_list.clone()
+    }
+
+    /// Re-reads the environment and rebuilds the cached rows. Cheap enough to call when the
+    /// settings window opens, and never called from `render`.
+    pub fn refresh_connections(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_rows(cx);
+        cx.emit(CoworkStoreEvent::CatalogChanged);
+        cx.notify();
+    }
+
+    fn rebuild_rows(&mut self, cx: &App) {
+        self.disabled_models = CoworkSettings::get_global(cx)
+            .disabled_models
+            .iter()
+            .cloned()
+            .collect();
+
+        self.connected = self
+            .catalog
+            .providers
+            .iter()
+            .filter(|(id, provider)| {
+                self.stored_keys.contains_key(*id)
+                    || provider
+                        .env_vars()
+                        .iter()
+                        .any(|name| credential_is_present(name))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let popular_rank = |id: &str| POPULAR_PROVIDERS.iter().position(|entry| *entry == id);
+
+        let mut rows = self
+            .catalog
+            .providers
+            .iter()
+            .filter(|(_, provider)| !provider.models.is_empty())
+            .map(|(id, provider)| ProviderRow {
+                id: id.clone().into(),
+                name: provider.display_name(id).into(),
+                env_label: if provider.env_vars().is_empty() {
+                    SharedString::new_static("no key required")
+                } else {
+                    provider.env_vars().join(" or ").into()
+                },
+                model_count: provider.models.len(),
+                connected: self.connected.contains(id),
+                stored: self.stored_keys.contains_key(id),
+                supported: provider.support() == Support::Supported,
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.name.to_lowercase());
+
+        let (connected, rest): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| row.connected);
+        let (mut popular, other): (Vec<_>, Vec<_>) =
+            rest.into_iter().partition(|row| popular_rank(&row.id).is_some());
+        popular.sort_by_key(|row| popular_rank(&row.id).unwrap_or(usize::MAX));
+
+        let mut list = connected;
+        list.extend(popular);
+        list.extend(other);
+        self.provider_list = Arc::from(list);
+
+        let mut models = Vec::new();
+        let mut provider_names = self
+            .connected
+            .iter()
+            .filter_map(|id| {
+                let provider = self.catalog.providers.get(id)?;
+                (provider.support() == Support::Supported)
+                    .then(|| (id.clone(), provider.display_name(id)))
+            })
+            .collect::<Vec<_>>();
+        provider_names.sort_by_key(|(_, name)| name.to_lowercase());
+
+        for (id, name) in provider_names {
+            let Some(provider) = self.catalog.providers.get(&id) else {
+                continue;
+            };
+            let mut entries = provider
+                .models
+                .iter()
+                .filter(|(_, model)| !model.is_deprecated())
+                .map(|(model_key, model)| ModelRow {
+                    model: ModelRef {
+                        provider_id: id.clone(),
+                        model_id: model_key.clone(),
+                    },
+                    name: model.display_name(model_key).into(),
+                    provider_name: name.clone().into(),
+                    detail: describe_model(model).into(),
+                    enabled: !self
+                        .disabled_models
+                        .contains(&format!("{id}/{model_key}")),
+                })
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                continue;
+            }
+            entries.sort_by_key(|row| row.name.to_lowercase());
+            models.extend(entries);
+        }
+        self.model_list = Arc::from(models);
     }
 
     /// The model a new thread starts on: the one named in settings when the catalog knows it,
     /// otherwise the first entry whose credential is actually present in the environment.
     pub fn default_model(&self, cx: &App) -> Option<ModelRef> {
         let configured = CoworkSettings::get_global(cx).default_model.clone();
+        // A configured model is only offered when its provider is actually connected; otherwise
+        // the panel would name a model that every request would fail on.
         if let Some(model) = ModelRef::parse(&configured)
+            && self.connected.contains(&model.provider_id)
             && self.catalog.model(&model).is_some()
         {
             return Some(model);
@@ -187,12 +583,7 @@ impl CoworkStore {
 
         self.catalog_entries()
             .into_iter()
-            .find(|entry| {
-                entry
-                    .env_var
-                    .as_deref()
-                    .is_some_and(|name| credential_is_present(name))
-            })
+            .next()
             .map(|entry| entry.model_ref)
     }
 
@@ -225,6 +616,7 @@ impl CoworkStore {
                 this.update(cx, |this, cx| {
                     this.catalog = cached.catalog;
                     this.catalog_state = CatalogState::Loaded;
+                    this.rebuild_rows(cx);
                     cx.emit(CoworkStoreEvent::CatalogChanged);
                     cx.notify();
                 })
@@ -252,6 +644,7 @@ impl CoworkStore {
                     this.update(cx, |this, cx| {
                         this.catalog = catalog;
                         this.catalog_state = CatalogState::Loaded;
+                        this.rebuild_rows(cx);
                         cx.emit(CoworkStoreEvent::CatalogChanged);
                         cx.notify();
                     })
@@ -434,7 +827,27 @@ async fn write_cached_catalog(
         .context("writing the models.dev catalog cache")
 }
 
-/// Cowork never stores provider credentials. They are read from the environment variable the
+/// A one-line summary of a model's capabilities for the settings list.
+fn describe_model(model: &crate::catalog::Model) -> String {
+    let mut parts = Vec::new();
+    if let Some(context) = model.limit.and_then(|limit| limit.context) {
+        parts.push(format!("{}k context", context / 1000));
+    }
+    if model.reasoning {
+        parts.push("reasoning".to_owned());
+    }
+    if model.tool_call {
+        parts.push("tools".to_owned());
+    }
+    parts.join(" · ")
+}
+
+/// Where a provider's key lives in the OS credential store.
+fn credential_url(provider_id: &str) -> String {
+    format!("cowork://{provider_id}")
+}
+
+/// Reads a credential from the environment. They are read from the environment variable the
 /// catalog declares for the provider, which is the same contract the AI SDK uses.
 pub fn credential(env_var: &str) -> Option<String> {
     std::env::var(env_var)

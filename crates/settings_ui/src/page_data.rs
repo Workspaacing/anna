@@ -59,6 +59,7 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         search_and_files_page(),
         window_and_layout_page(),
         panels_page(),
+        cowork_page(),
         debugger_page(),
         terminal_page(),
         version_control_page(),
@@ -5567,6 +5568,155 @@ fn panels_page() -> SettingsPage {
             git_panel_section(),
             debugger_panel_section(),
         ],
+    }
+}
+
+fn cowork_page() -> SettingsPage {
+    fn threads_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Threads"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Default Model",
+                description: "The provider and model new threads start on, named with models.dev identifiers. The provider's API key is read from the environment variable models.dev declares for it, and is never stored by Wu.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.default_model"),
+                    pick: |settings_content| {
+                        settings_content.cowork.as_ref()?.default_model.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().default_model = value;
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    placeholder: Some("anthropic/claude-sonnet-4-5"),
+                    should_do_titlecase: Some(false),
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Model Catalog URL",
+                description: "The models.dev catalog Cowork reads its providers and models from. Cached locally and refreshed once a day.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.catalog_url"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.catalog_url.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().catalog_url = value;
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    placeholder: Some("https://models.dev/api.json"),
+                    should_do_titlecase: Some(false),
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Max Output Tokens",
+                description: "The maximum number of tokens a single response may generate.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.max_output_tokens"),
+                    pick: |settings_content| {
+                        settings_content.cowork.as_ref()?.max_output_tokens.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .max_output_tokens = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn panel_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Panel"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Cowork Panel Button",
+                description: "Show the Cowork panel button in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.button"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.button.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Cowork Panel Dock",
+                description: "Where to dock the Cowork panel.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.dock"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.dock.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().dock = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Cowork Panel Default Width",
+                description: "Default width of the Cowork panel in pixels.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.default_width"),
+                    pick: |settings_content| {
+                        settings_content.cowork.as_ref()?.default_width.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().default_width = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn catalog_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Catalog"),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Providers".into(),
+                r#type: crate::SubPageType::Other,
+                description: Some(
+                    "Which models.dev providers Cowork can reach, and the environment variable                      that connects each one."
+                        .into(),
+                ),
+                search_aliases: &["api key", "credentials", "models.dev", "connect"],
+                json_path: None,
+                in_json: false,
+                files: USER,
+                render: |settings_window, scroll_handle, window, cx| {
+                    crate::cowork_pages::render_providers(settings_window, scroll_handle, window, cx)
+                },
+            }),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Models".into(),
+                r#type: crate::SubPageType::Other,
+                description: Some(
+                    "Every model offered by a connected provider, grouped by provider.".into(),
+                ),
+                search_aliases: &["model", "catalog"],
+                json_path: None,
+                in_json: false,
+                files: USER,
+                render: |settings_window, scroll_handle, window, cx| {
+                    crate::cowork_pages::render_models(settings_window, scroll_handle, window, cx)
+                },
+            }),
+        ]
+    }
+
+    SettingsPage {
+        title: "Cowork",
+        items: concat_sections![threads_section(), catalog_section(), panel_section()],
     }
 }
 

@@ -17,9 +17,10 @@ mod provider;
 mod thread;
 mod thread_view;
 
-pub use catalog::{Catalog, CatalogEntry, ModelRef};
+pub use catalog::{Catalog, CatalogEntry, ModelRef, POPULAR_PROVIDERS, Support};
 pub use cowork_panel::CoworkPanel;
 pub use cowork_settings::CoworkSettings;
+pub use thread::{ApiKeyMode, CatalogState, CoworkStore, ModelRow, ProviderRow};
 pub use thread_view::CoworkThreadView;
 
 use gpui::{App, actions};
@@ -38,8 +39,8 @@ actions!(
         Cancel,
         /// Chooses the model for the active thread.
         SelectModel,
-        /// Shows or hides the provider status section of the Cowork panel.
-        ToggleSettings,
+        /// Opens the Cowork page of the settings window.
+        OpenSettings,
         /// Refetches the models.dev catalog.
         RefreshCatalog,
     ]

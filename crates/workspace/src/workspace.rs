@@ -1940,8 +1940,15 @@ impl Workspace {
                         // New or empty workspace - use the last known window bounds
                         (Some(bounds), Some(display))
                     } else {
-                        // New window - let GPUI's default_bounds() handle cascading
-                        (None, None)
+                        // New window - open maximized. The restore size is GPUI's default, so
+                        // un-maximizing gives a sensible window rather than a zero-sized one.
+                        (
+                            Some(WindowBounds::Maximized(Bounds::new(
+                                point(px(0.), px(0.)),
+                                gpui::DEFAULT_WINDOW_SIZE,
+                            ))),
+                            None,
+                        )
                     };
 
                     // Use the serialized workspace to construct the new window

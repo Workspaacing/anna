@@ -9,6 +9,7 @@ pub struct CoworkSettings {
     pub default_model: String,
     pub catalog_url: String,
     pub max_output_tokens: u64,
+    pub disabled_models: Vec<String>,
 }
 
 impl Settings for CoworkSettings {
@@ -21,6 +22,7 @@ impl Settings for CoworkSettings {
             default_model: cowork.default_model.clone().unwrap(),
             catalog_url: cowork.catalog_url.clone().unwrap(),
             max_output_tokens: cowork.max_output_tokens.unwrap(),
+            disabled_models: cowork.disabled_models.clone().unwrap(),
         }
     }
 }

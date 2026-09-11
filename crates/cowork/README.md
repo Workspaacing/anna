@@ -2,10 +2,16 @@
 
 Native AI threads for Wu, split the way the rest of the workspace is:
 
-- **`CoworkPanel`** (dock panel, left by default) — session history, search, per-thread delete, and a
-  provider status section. It is *not* the chat.
+- **`CoworkPanel`** (dock panel, left by default) — session history, search, per-thread delete, and
+  a provider roster in the footer. It is *not* the chat.
 - **`CoworkThreadView`** (workspace item, center pane) — where a conversation actually happens:
   streamed markdown responses, the composer, and the per-thread model picker.
+- **Models** can be hidden from the selector individually; the hidden set is persisted as
+  `cowork.disabled_models`, so a model added to a provider later is available by default.
+- **Settings** live in the settings window on its own **Cowork** page
+  (`crates/settings_ui/src/page_data.rs`, `cowork_page`), reached from the panel's gear button via
+  `wu::OpenSettingsPage`. The panel's provider roster is deliberately *not* there: it is runtime
+  status, and the settings framework only renders declarative fields backed by JSON.
 
 ## Status
 
@@ -72,7 +78,7 @@ domain and therefore no new migration:
 | `editor::Newline` | `shift-enter` (in the composer) | same |
 
 Also registered, unbound by default: `cowork::Cancel`, `cowork::SelectModel`,
-`cowork::ToggleSettings`, `cowork::RefreshCatalog`, and the panel's
+`cowork::OpenSettings`, `cowork::ToggleProviders`, `cowork::RefreshCatalog`, and the panel's
 `SelectNextThread` / `SelectPreviousThread` / `OpenSelectedThread` / `DeleteSelectedThread`.
 
 ## What still needs a human

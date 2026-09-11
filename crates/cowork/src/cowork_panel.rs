@@ -1,26 +1,21 @@
 use crate::{
-    NewThread, RefreshCatalog, ToggleFocus, ToggleSettings,
+    NewThread, OpenSettings, SelectModel, ToggleFocus,
     catalog::ModelRef,
     cowork_settings::CoworkSettings,
-    thread::{
-        CatalogState, CoworkStore, CoworkStoreEvent, ThreadId, ThreadMetadata,
-        credential_is_present, format_age,
-    },
+    model_selector::ModelSelector,
+    thread::{CatalogState, CoworkStore, CoworkStoreEvent, ThreadId, ThreadMetadata, format_age},
     thread_view::CoworkThreadView,
 };
-use anyhow::Context as _;
-use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent};
 use fs::Fs;
 use gpui::{
-    Action, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
-    Subscription, Task, WeakEntity, actions, uniform_list,
+    Action, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Subscription,
+    WeakEntity, actions, uniform_list,
 };
-use serde::{Deserialize, Serialize};
 use settings::{DockSide, Settings as _};
 use std::sync::Arc;
-use ui::{Divider, ListItem, ListItemSpacing, Tooltip, prelude::*};
-use util::{ResultExt as _, TryFutureExt as _};
+use ui::{ListItem, ListItemSpacing, Tooltip, prelude::*};
+use util::ResultExt as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -42,11 +37,6 @@ actions!(
     ]
 );
 
-#[derive(Default, Serialize, Deserialize)]
-struct SerializedCoworkPanel {
-    settings_expanded: Option<bool>,
-}
-
 pub struct CoworkPanel {
     store: Entity<CoworkStore>,
     workspace: WeakEntity<Workspace>,
@@ -56,8 +46,6 @@ pub struct CoworkPanel {
     query: String,
     visible_threads: Vec<ThreadMetadata>,
     selected_index: usize,
-    settings_expanded: bool,
-    pending_serialization: Task<Option<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -66,34 +54,11 @@ impl CoworkPanel {
         workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
     ) -> anyhow::Result<Entity<Self>> {
-        let serialized = match workspace
-            .read_with(&cx, |workspace, _| Self::serialization_key(workspace))
-            .ok()
-            .flatten()
-        {
-            Some(key) => {
-                let key_value_store = cx.update(|_, cx| KeyValueStore::global(cx))?;
-                cx.background_spawn(async move { key_value_store.read_kvp(&key) })
-                    .await
-                    .context("loading the cowork panel")
-                    .log_err()
-                    .flatten()
-                    .map(|panel| serde_json::from_str::<SerializedCoworkPanel>(&panel))
-                    .transpose()
-                    .log_err()
-                    .flatten()
-            }
-            None => None,
-        };
-
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            Self::new(workspace, serialized, window, cx)
-        })
+        workspace.update_in(&mut cx, |workspace, window, cx| Self::new(workspace, window, cx))
     }
 
     fn new(
         workspace: &mut Workspace,
-        serialized: Option<SerializedCoworkPanel>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
@@ -142,49 +107,11 @@ impl CoworkPanel {
                 query: String::new(),
                 visible_threads: Vec::new(),
                 selected_index: 0,
-                settings_expanded: serialized
-                    .and_then(|serialized| serialized.settings_expanded)
-                    .unwrap_or(false),
-                pending_serialization: Task::ready(None),
                 _subscriptions: subscriptions,
             };
             this.refresh_visible_threads(cx);
             this
         })
-    }
-
-    fn serialization_key(workspace: &Workspace) -> Option<String> {
-        workspace
-            .database_id()
-            .map(|id| i64::from(id).to_string())
-            .or(workspace.session_id())
-            .map(|id| format!("{COWORK_PANEL_KEY}-{id:?}"))
-    }
-
-    fn serialize(&mut self, cx: &mut Context<Self>) {
-        let Some(key) = self
-            .workspace
-            .read_with(cx, |workspace, _| Self::serialization_key(workspace))
-            .ok()
-            .flatten()
-        else {
-            return;
-        };
-
-        let settings_expanded = Some(self.settings_expanded);
-        let key_value_store = KeyValueStore::global(cx);
-        self.pending_serialization = cx.background_spawn(
-            async move {
-                key_value_store
-                    .write_kvp(
-                        key,
-                        serde_json::to_string(&SerializedCoworkPanel { settings_expanded })?,
-                    )
-                    .await?;
-                anyhow::Ok(())
-            }
-            .log_err(),
-        );
     }
 
     /// Threads are matched on their title and their preview so a search finds a conversation by
@@ -338,14 +265,49 @@ impl CoworkPanel {
         }
     }
 
-    fn toggle_settings(&mut self, _: &ToggleSettings, _window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_expanded = !self.settings_expanded;
-        self.serialize(cx);
-        cx.notify();
+    fn select_model(&mut self, _: &SelectModel, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_model_selector(window, cx);
     }
 
-    fn refresh_catalog(&mut self, _: &RefreshCatalog, _window: &mut Window, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| store.load_catalog(true, cx));
+    /// Choosing here writes `cowork.default_model`, which is what new threads start on. An existing
+    /// thread keeps the model it was created with; that one is changed from the thread's own header.
+    fn open_model_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+
+        // The environment may have gained a key since the catalog was last read, and a model whose
+        // provider is not connected is never offered.
+        self.store
+            .update(cx, |store, cx| store.refresh_connections(cx));
+
+        let selected = self.store.read(cx).default_model(cx);
+        let fs = self.fs.clone();
+        let on_confirm: Arc<dyn Fn(ModelRef, &mut Window, &mut App) + Send + Sync> =
+            Arc::new(move |model, _window, cx| {
+                let qualified = model.qualified();
+                settings::update_settings_file(fs.clone(), cx, move |settings, _| {
+                    settings.cowork.get_or_insert_default().default_model = Some(qualified);
+                });
+            });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, move |window, cx| {
+                ModelSelector::new(selected, on_confirm, window, cx)
+            });
+        });
+    }
+
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.store
+            .update(cx, |store, cx| store.refresh_connections(cx));
+        window.dispatch_action(
+            Box::new(wu_actions::OpenSettingsPage {
+                page: "Cowork".to_owned(),
+                target: None,
+            }),
+            cx,
+        );
     }
 
     fn report_no_model(&mut self, cx: &mut Context<Self>) {
@@ -391,10 +353,9 @@ impl CoworkPanel {
                     .child(
                         IconButton::new("cowork-settings", IconName::Settings)
                             .icon_size(IconSize::Small)
-                            .toggle_state(self.settings_expanded)
                             .tooltip(Tooltip::text("Cowork settings"))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_settings(&ToggleSettings, window, cx)
+                                this.open_settings(&OpenSettings, window, cx)
                             })),
                     ),
             )
@@ -491,6 +452,71 @@ impl CoworkPanel {
             }))
     }
 
+    /// A footer rather than a header entry: it is the least-used control on the panel, and putting
+    /// it at the bottom keeps the thread list starting at the top.
+    fn render_model_footer(&self, cx: &Context<Self>) -> impl IntoElement {
+        let store = self.store.read(cx);
+        let configured = CoworkSettings::get_global(cx).default_model.clone();
+        let connected = store.connected_count();
+
+        let (label, detail) = match store.default_model(cx) {
+            Some(model) => (model.model_id, model.provider_id),
+            None if connected == 0 => (
+                "No provider connected".to_owned(),
+                "Set an API key environment variable".to_owned(),
+            ),
+            None => (configured, "Not available from a connected provider".to_owned()),
+        };
+
+        v_flex()
+            .w_full()
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                h_flex()
+                    .id("cowork-model-footer")
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .gap_2()
+                    .justify_between()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(cx.theme().colors().element_hover))
+                    .tooltip(Tooltip::text("Choose the model new threads start on"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_model_selector(window, cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1p5()
+                            .child(
+                                Icon::new(IconName::Sparkle)
+                                    .size(IconSize::Small)
+                                    .color(Color::Accent),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Label::new(label).size(LabelSize::Small).truncate_middle())
+                                    .child(
+                                        Label::new(detail)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
+                                            .truncate_middle(),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+    }
+
     fn render_empty_state(&self, cx: &Context<Self>) -> impl IntoElement {
         let has_query = !self.query.trim().is_empty();
         let catalog_state = self.store.read(cx).catalog_state().clone();
@@ -520,128 +546,6 @@ impl CoworkPanel {
                     .color(Color::Muted),
                 )
             })
-    }
-
-    /// The settings section lists every provider the catalog knows about and whether its credential
-    /// is visible to Wu. Keys are never entered or stored here: Cowork only reads the environment
-    /// variable the catalog declares, so this is a status view, not a form.
-    fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement {
-        let store = self.store.read(cx);
-        let catalog_state = store.catalog_state().clone();
-        let default_model = CoworkSettings::get_global(cx).default_model.clone();
-
-        let mut providers = store
-            .catalog()
-            .providers
-            .iter()
-            .filter(|(_, provider)| !provider.models.is_empty())
-            .map(|(key, provider)| {
-                (
-                    provider.display_name(key),
-                    provider.primary_env_var().map(str::to_owned),
-                    provider.models.len(),
-                )
-            })
-            .collect::<Vec<_>>();
-        providers.sort_by_key(|(name, _, _)| name.to_lowercase());
-
-        v_flex()
-            .id("cowork-settings")
-            .w_full()
-            .max_h(rems(22.))
-            .overflow_y_scroll()
-            .border_t_1()
-            .border_color(cx.theme().colors().border_variant)
-            .child(
-                h_flex()
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .gap_1()
-                    .justify_between()
-                    .child(
-                        Label::new("Providers")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        IconButton::new("cowork-refresh-catalog", IconName::ArrowCircle)
-                            .icon_size(IconSize::Small)
-                            .disabled(catalog_state == CatalogState::Loading)
-                            .tooltip(Tooltip::text("Refresh the models.dev catalog"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.refresh_catalog(&RefreshCatalog, window, cx)
-                            })),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .w_full()
-                    .px_2()
-                    .pb_2()
-                    .gap_0p5()
-                    .when(providers.is_empty(), |this| {
-                        this.child(
-                            Label::new(match &catalog_state {
-                                CatalogState::Loading => "Loading…".to_owned(),
-                                CatalogState::Failed(error) => error.clone(),
-                                _ => "No providers loaded.".to_owned(),
-                            })
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                        )
-                    })
-                    .children(providers.into_iter().enumerate().map(
-                        |(index, (name, env_var, model_count))| {
-                            let has_credential =
-                                env_var.as_deref().is_some_and(credential_is_present);
-
-                            h_flex()
-                                .id(("cowork-provider", index))
-                                .w_full()
-                                .gap_1p5()
-                                .justify_between()
-                                .child(
-                                    h_flex()
-                                        .gap_1p5()
-                                        .child(
-                                            Icon::new(if has_credential {
-                                                IconName::Check
-                                            } else {
-                                                IconName::Lock
-                                            })
-                                            .size(IconSize::XSmall)
-                                            .color(if has_credential {
-                                                Color::Success
-                                            } else {
-                                                Color::Muted
-                                            }),
-                                        )
-                                        .child(Label::new(name).size(LabelSize::XSmall)),
-                                )
-                                .child(
-                                    Label::new(
-                                        env_var.unwrap_or_else(|| format!("{model_count} models")),
-                                    )
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                                )
-                        },
-                    )),
-            )
-            .child(Divider::horizontal())
-            .child(
-                v_flex()
-                    .w_full()
-                    .p_2()
-                    .gap_0p5()
-                    .child(
-                        Label::new("Default model")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(Label::new(default_model).size(LabelSize::XSmall)),
-            )
     }
 }
 
@@ -724,8 +628,8 @@ impl Render for CoworkPanel {
             .key_context("CoworkPanel")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_thread))
-            .on_action(cx.listener(Self::toggle_settings))
-            .on_action(cx.listener(Self::refresh_catalog))
+            .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::select_model))
             .on_action(cx.listener(Self::delete_selected_thread))
             .on_action(cx.listener(Self::select_next_thread))
             .on_action(cx.listener(Self::select_previous_thread))
@@ -741,8 +645,6 @@ impl Render for CoworkPanel {
                     this.child(self.render_empty_state(cx))
                 }
             })
-            .when(self.settings_expanded, |this| {
-                this.child(self.render_settings(cx))
-            })
+            .child(self.render_model_footer(cx))
     }
 }
