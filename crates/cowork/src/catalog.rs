@@ -13,6 +13,9 @@ const MAX_CATALOG_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireApi {
     Anthropic,
+    /// Google's Gemini API: `generateContent`, roles of `user`/`model`, and `functionCall` /
+    /// `functionResponse` parts instead of tool calls.
+    Google,
     OpenAiCompatible,
 }
 
@@ -178,7 +181,24 @@ impl Provider {
     pub fn wire_api(&self) -> WireApi {
         match self.npm.as_deref() {
             Some(npm) if npm.contains("anthropic") => WireApi::Anthropic,
+            Some("@ai-sdk/google") => WireApi::Google,
             _ => WireApi::OpenAiCompatible,
+        }
+    }
+
+    /// Where to send requests.
+    ///
+    /// The catalog leaves `api` empty for the providers whose AI SDK package hard-codes the
+    /// endpoint, which is most of the big ones, so the well-known bases are supplied here.
+    pub fn api_base(&self) -> Option<String> {
+        if let Some(api) = &self.api {
+            return Some(api.clone());
+        }
+        match self.npm.as_deref() {
+            Some("@ai-sdk/google") => {
+                Some("https://generativelanguage.googleapis.com/v1beta".to_owned())
+            }
+            _ => None,
         }
     }
 
@@ -194,17 +214,18 @@ impl Provider {
         self.env.first().map(String::as_str)
     }
 
-    /// Providers reached through an SDK package whose wire format Cowork does not implement.
-    /// `@ai-sdk/azure` is Azure OpenAI, which is OpenAI-shaped, so it is not listed here.
+    /// Whether Cowork can reach this provider: it needs both a wire format Cowork implements and
+    /// an endpoint to send to.
     pub fn support(&self) -> Support {
-        const UNSUPPORTED_PACKAGES: [&str; 3] = [
-            "@ai-sdk/google",
-            "@ai-sdk/google-vertex",
-            "@ai-sdk/amazon-bedrock",
-        ];
+        // Vertex needs Google's service-account signing and Bedrock needs SigV4; neither is a
+        // request shape, so neither is reachable by adding a wire format.
+        const UNSUPPORTED_PACKAGES: [&str; 2] =
+            ["@ai-sdk/google-vertex", "@ai-sdk/amazon-bedrock"];
 
         match self.npm.as_deref() {
             Some(npm) if UNSUPPORTED_PACKAGES.contains(&npm) => Support::Unsupported,
+            // A provider with no endpoint cannot be called however well-formed the request is.
+            _ if self.api_base().is_none() => Support::Unsupported,
             _ => Support::Supported,
         }
     }
@@ -395,7 +416,7 @@ mod tests {
     #[test]
     fn tolerates_unknown_fields_and_missing_optionals() {
         let catalog = parse(
-            br#"{ "acme": { "models": { "m1": { "brand_new_field": 3 } } } }"#,
+            br#"{ "acme": { "api": "https://acme.test/v1", "models": { "m1": { "brand_new_field": 3 } } } }"#,
         )
         .expect("unknown fields should not fail the parse");
 
@@ -404,6 +425,20 @@ mod tests {
         assert_eq!(entries[0].model_ref.qualified(), "acme/m1");
         assert_eq!(entries[0].provider_name, "acme");
         assert_eq!(entries[0].model_name, "m1");
+    }
+
+    #[test]
+    fn a_provider_with_no_endpoint_is_not_offered() {
+        // The catalog leaves `api` empty for providers whose SDK hard-codes it. Without either an
+        // `api` or a known default, no request can be formed, so the models must not be listed.
+        let catalog = parse(br#"{ "mystery": { "models": { "m1": {} } } }"#)
+            .expect("the catalog should still parse");
+
+        assert!(catalog.entries(|_| true).is_empty());
+        assert_eq!(
+            catalog.provider("mystery").map(Provider::support),
+            Some(Support::Unsupported)
+        );
     }
 
     #[test]

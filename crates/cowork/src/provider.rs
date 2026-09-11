@@ -140,9 +140,8 @@ pub async fn stream_completion(
 
     let api_base = request
         .provider
-        .api
-        .clone()
-        .ok_or_else(|| anyhow!("the models.dev catalog has no API endpoint for this provider"))?;
+        .api_base()
+        .ok_or_else(|| anyhow!("no API endpoint is known for this provider"))?;
     let wire_api = request.provider.wire_api();
 
     let (url, body, http_request) = match wire_api {
@@ -154,6 +153,21 @@ pub async fn stream_completion(
                 .header("accept", "text/event-stream")
                 .header("anthropic-version", "2023-06-01")
                 .header("x-api-key", request.api_key.as_str());
+            (url, body, http_request)
+        }
+        WireApi::Google => {
+            // Gemini names the model in the path and takes the key in a header. `alt=sse` is what
+            // turns `streamGenerateContent` into an event stream rather than a JSON array.
+            let url = format!(
+                "{}/models/{}:streamGenerateContent?alt=sse",
+                api_base.trim_end_matches('/'),
+                request.model_id
+            );
+            let body = google_body(&request);
+            let http_request = Request::post(&url)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .header("x-goog-api-key", request.api_key.as_str());
             (url, body, http_request)
         }
         WireApi::OpenAiCompatible => {
@@ -282,6 +296,78 @@ fn anthropic_body(request: &CompletionRequest) -> Value {
     }
     if !request.tools.is_empty() {
         body["tools"] = json!(anthropic_tools(request));
+    }
+    body
+}
+
+/// Gemini differs from both other formats in three ways that matter: the assistant role is
+/// called `model`, tool calls and their results are *parts* of a message rather than a field on
+/// it, and a result is matched to its call by function name rather than by an id.
+fn google_body(request: &CompletionRequest) -> Value {
+    let mut contents = Vec::new();
+    for message in &request.messages {
+        match message.role {
+            Role::User => contents.push(json!({
+                "role": "user",
+                "parts": [{ "text": message.text }],
+            })),
+            Role::Assistant => {
+                let mut parts = Vec::new();
+                if !message.text.is_empty() {
+                    parts.push(json!({ "text": message.text }));
+                }
+                for call in &message.tool_calls {
+                    parts.push(json!({
+                        "functionCall": {
+                            "name": call.name,
+                            "args": parse_arguments(&call.arguments),
+                        },
+                    }));
+                }
+                if parts.is_empty() {
+                    continue;
+                }
+                contents.push(json!({ "role": "model", "parts": parts }));
+            }
+            Role::Tool => {
+                let parts = message
+                    .tool_results
+                    .iter()
+                    .map(|result| {
+                        json!({
+                            "functionResponse": {
+                                // The call id is the function name for this format; see
+                                // `decode_google_chunk`.
+                                "name": result.call_id,
+                                "response": { "output": result.content },
+                            },
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                contents.push(json!({ "role": "user", "parts": parts }));
+            }
+        }
+    }
+
+    let mut body = json!({
+        "contents": contents,
+        "generationConfig": { "maxOutputTokens": request.max_output_tokens },
+    });
+    if let Some(system) = &request.system {
+        body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
+    }
+    if !request.tools.is_empty() {
+        body["tools"] = json!([{
+            "functionDeclarations": request
+                .tools
+                .iter()
+                .map(|tool| json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }))
+                .collect::<Vec<_>>(),
+        }]);
     }
     body
 }
@@ -462,7 +548,68 @@ fn decode_chunk(
 ) -> Result<Vec<CompletionEvent>> {
     match wire_api {
         WireApi::Anthropic => decode_anthropic_chunk(chunk),
+        WireApi::Google => decode_google_chunk(chunk),
         WireApi::OpenAiCompatible => decode_openai_chunk(chunk, state),
+    }
+}
+
+/// Gemini sends whole parts rather than fragments, so a function call arrives complete: one
+/// `ToolCallStart` immediately followed by its full arguments.
+///
+/// There is no call id in the response, and a result is matched back by function name, so the name
+/// serves as the id. Two calls to the same tool in one turn therefore share an id; they stay
+/// distinguishable because Gemini pairs responses by position within the parts array.
+fn decode_google_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
+    if let Some(message) = chunk.pointer("/error/message").and_then(Value::as_str) {
+        bail!("{message}");
+    }
+
+    let Some(candidate) = chunk.pointer("/candidates/0") else {
+        return Ok(Vec::new());
+    };
+
+    let mut events = Vec::new();
+    if let Some(parts) = candidate.pointer("/content/parts").and_then(Value::as_array) {
+        for part in parts {
+            if let Some(text) = part.get("text").and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                events.push(CompletionEvent::Text(text.to_owned()));
+            }
+            if let Some(call) = part.get("functionCall")
+                && let Some(name) = call.get("name").and_then(Value::as_str)
+            {
+                events.push(CompletionEvent::ToolCallStart {
+                    id: name.to_owned(),
+                    name: name.to_owned(),
+                });
+                let arguments = call.get("args").cloned().unwrap_or_else(|| json!({}));
+                events.push(CompletionEvent::ToolCallDelta {
+                    id: name.to_owned(),
+                    arguments: arguments.to_string(),
+                });
+            }
+        }
+    }
+
+    if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
+        events.push(CompletionEvent::Stop(google_stop_reason(reason, &events)));
+    }
+
+    Ok(events)
+}
+
+/// Gemini reports `STOP` even when the turn ends in a function call, so the reason has to be
+/// inferred from what the chunk actually contained.
+fn google_stop_reason(reason: &str, events: &[CompletionEvent]) -> StopReason {
+    let asked_for_tools = events
+        .iter()
+        .any(|event| matches!(event, CompletionEvent::ToolCallStart { .. }));
+    match reason {
+        _ if asked_for_tools => StopReason::ToolUse,
+        "STOP" => StopReason::EndTurn,
+        "MAX_TOKENS" => StopReason::MaxTokens,
+        _ => StopReason::Other,
     }
 }
 
@@ -737,6 +884,111 @@ mod tests {
                 CompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
+    }
+
+    #[test]
+    fn decodes_a_google_stream() {
+        let events = collect(
+            concat!(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}],\"role\":\"model\"}}]}\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}]},\"finishReason\":\"STOP\"}]}\n",
+            ),
+            WireApi::Google,
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::Text("Hel".into()),
+                CompletionEvent::Text("lo".into()),
+                CompletionEvent::Stop(StopReason::EndTurn),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_google_function_call_arrives_whole_and_reports_tool_use() {
+        // Gemini sends complete parts, and reports `STOP` even when it wants a tool — the reason
+        // has to come from the content.
+        let events = collect(
+            concat!(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read\",",
+                "\"args\":{\"path\":\"a.rs\"}}}]},\"finishReason\":\"STOP\"}]}\n",
+            ),
+            WireApi::Google,
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::ToolCallStart {
+                    id: "read".into(),
+                    name: "read".into()
+                },
+                CompletionEvent::ToolCallDelta {
+                    id: "read".into(),
+                    arguments: "{\"path\":\"a.rs\"}".into()
+                },
+                CompletionEvent::Stop(StopReason::ToolUse),
+            ]
+        );
+    }
+
+    #[test]
+    fn google_renames_the_assistant_role_and_nests_tool_traffic_in_parts() {
+        let request = CompletionRequest {
+            provider_id: "google".into(),
+            provider: serde_json::from_str(r#"{"npm":"@ai-sdk/google"}"#).unwrap(),
+            model_id: "gemini".into(),
+            api_key: "k".into(),
+            system: Some("be brief".into()),
+            messages: vec![
+                Message::user("hi"),
+                Message {
+                    role: Role::Assistant,
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "read".into(),
+                        name: "read".into(),
+                        arguments: r#"{"path":"a.rs"}"#.into(),
+                    }],
+                    tool_results: Vec::new(),
+                },
+                Message::tool_results(vec![ToolResult {
+                    call_id: "read".into(),
+                    content: "fn main() {}".into(),
+                    is_error: false,
+                }]),
+            ],
+            tools: Vec::new(),
+            max_output_tokens: 64,
+        };
+
+        let body = google_body(&request);
+        let contents = body["contents"].as_array().unwrap();
+
+        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be brief");
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[1]["parts"][0]["functionCall"]["name"], "read");
+        // A result comes back as a user turn, matched by function name.
+        assert_eq!(contents[2]["role"], "user");
+        assert_eq!(contents[2]["parts"][0]["functionResponse"]["name"], "read");
+    }
+
+    #[test]
+    fn the_catalog_endpoint_is_supplied_when_the_provider_omits_it() {
+        let google: Provider = serde_json::from_str(r#"{"npm":"@ai-sdk/google"}"#).unwrap();
+        assert_eq!(google.wire_api(), WireApi::Google);
+        assert!(
+            google
+                .api_base()
+                .is_some_and(|base| base.contains("generativelanguage")),
+            "google declares no `api` in the catalog, so one must be supplied"
+        );
+
+        let bedrock: Provider =
+            serde_json::from_str(r#"{"npm":"@ai-sdk/amazon-bedrock"}"#).unwrap();
+        assert_eq!(bedrock.api_base(), None);
     }
 
     #[test]
