@@ -16,12 +16,14 @@ mod model_selector;
 mod provider;
 mod thread;
 mod thread_view;
+mod tool;
 
 pub use catalog::{Catalog, CatalogEntry, ModelRef, POPULAR_PROVIDERS, Support};
 pub use cowork_panel::CoworkPanel;
 pub use cowork_settings::CoworkSettings;
 pub use thread::{ApiKeyMode, CatalogState, CoworkStore, ModelRow, ProviderRow};
 pub use thread_view::CoworkThreadView;
+pub use tool::{Tool, ToolKind, ToolOutput, ToolRegistry};
 
 use gpui::{App, actions};
 use workspace::Workspace;

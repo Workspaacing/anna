@@ -121,3 +121,67 @@ what stops them collapsing into each other.
 - `` !`shell` `` inside repository-supplied command files, which executes on a keystroke.
 - Provider SDKs downloaded at runtime. Wire formats are compiled in.
 - Plaintext credential files. Keys go to the OS credential store.
+
+## Integration points
+
+Verified against this tree. The surprises are noted because each one would otherwise be found the
+expensive way.
+
+### Reading, listing, searching
+
+- Read through `Project::open_buffer(impl Into<ProjectPath>, cx)` (`project.rs:2407`), never
+  `Fs::load` and never `Worktree::load_file` — the latter hard-errors on remote projects, and `Fs`
+  is the *client* filesystem, so on SSH/WSL it reads the wrong machine. The buffer also reflects
+  unsaved editor state, which is what the agent should see.
+- Model-supplied paths go through `Project::find_project_path` (`project.rs:4190`), which accepts
+  absolute, root-prefixed and bare relative forms. `None` means outside every worktree.
+- List with `Snapshot::child_entries_with_options` (`worktree.rs:2855`) — it already knows about
+  `.gitignore`. `Fs::read_dir` does not.
+- Glob with `util::paths::PathMatcher` (`paths.rs:735`). The file finder's matcher is *fuzzy*, not
+  glob, and is the wrong tool for a model that writes `**/*.rs`.
+- Grep with `Project::search` (`project.rs:3765`), which returns a stream. **Hold `task_handle`** —
+  dropping the result cancels the search.
+
+### Editing
+
+- `Buffer::edit` with `autoindent_mode: None`; the model already indented its text.
+- Bracket each edit in `finalize_last_transaction` / `start_transaction` / `end_transaction` /
+  `finalize_last_transaction`, or the agent's edit time-coalesces into whatever the user typed next.
+- Whole-file rewrites use `Buffer::diff` + `apply_diff` (`buffer.rs:2276`/`:2382`), which rebase onto
+  concurrent user edits and drop conflicting hunks. `set_text` destroys every anchor in the file.
+- Leave buffers dirty for review. Saving is what accepting means.
+- Diff against `DiffBaseKind::Custom`, whose doc comment names this exact case and which cannot
+  accidentally stage into git.
+- Per-hunk accept/reject is the `DiffHunkDelegate` trait (`editor/src/git.rs:26`); reject is
+  `Editor::restore_diff_hunks`, itself an ordinary undoable edit.
+
+### Terminal
+
+- `Project::create_terminal_task(SpawnInTerminal, cx)` (`terminals.rs:64`) needs no `Window`.
+  Completion is `Terminal::wait_for_completed_task` (`terminal.rs:3158`), which only resolves for
+  task-mode terminals.
+- Output arrives as `Event::Wakeup` with **no payload**; the text comes from `get_content()`, which
+  returns the whole scrollback. Streaming means diffing by byte offset.
+- **Headless grids are 100 columns by 6 rows** (`terminal.rs:649-652`) and `set_size` cannot change
+  that without a `Window`, because only `sync()` drains the resize queue. Long lines hard-wrap. A
+  terminal the user can see is therefore not only better UX, it is more correct.
+
+### Undo
+
+`GitStore::checkpoint()` (`git_store.rs:2026`) already implements the snapshot: a temporary index,
+`write-tree`, `commit-tree`, no ref written and no working-tree mutation. It survives a normal
+`git gc`, and it is proto-plumbed so it works on remote projects. Three things it does not do:
+
+- `restore_checkpoint` runs only `git restore --source <sha> --worktree .`; the `git clean` that
+  would remove files created after the checkpoint is **commented out** (`repository.rs:3132-3141`).
+  Creations must be tracked and deleted explicitly.
+- With no git repository it returns `Ok(())` having restored nothing. Check for repositories first;
+  never infer success from `Ok`.
+- When git is missing from `PATH`, the local worker returns without draining its queue
+  (`git_store.rs:9999`), so callers get `oneshot::Canceled` rather than the real message. Probe once
+  at turn start and say something legible.
+
+Prefer `Repository::checkout_files(sha, touched_paths, cx)` over whole-tree `restore_checkpoint`, so
+undoing the agent does not also revert what the user saved meanwhile. Reload open dirty buffers
+afterwards, following `GitPanel::perform_checkout` (`git_ui/src/git_panel.rs:2337`): open first,
+checkout, then reload only the dirty ones.

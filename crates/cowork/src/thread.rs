@@ -929,14 +929,8 @@ mod tests {
     #[test]
     fn metadata_titles_a_thread_from_its_first_prompt() {
         let mut thread = thread_with(vec![
-            Message {
-                role: Role::User,
-                text: "  Explain   the  borrow checker\n".to_owned(),
-            },
-            Message {
-                role: Role::Assistant,
-                text: "It tracks lifetimes.".to_owned(),
-            },
+            Message::user("  Explain   the  borrow checker\n"),
+            Message::assistant("It tracks lifetimes."),
         ]);
 
         thread.refresh_metadata();

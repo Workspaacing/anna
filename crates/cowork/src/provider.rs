@@ -1,5 +1,6 @@
 use crate::catalog::{Provider, WireApi};
 use anyhow::{Context as _, Result, anyhow, bail};
+use collections::HashMap;
 use futures::{
     AsyncBufReadExt as _, AsyncReadExt as _, Stream, StreamExt as _, io::BufReader,
     stream::BoxStream,
@@ -14,12 +15,78 @@ use std::sync::Arc;
 pub enum Role {
     User,
     Assistant,
+    /// Carries the results of the tool calls in the preceding assistant message. Both wire formats
+    /// have this concept; they disagree only on how to spell it.
+    Tool,
 }
 
+/// A tool call the model asked for.
+///
+/// `arguments` is the raw JSON text rather than a parsed `Value` because it arrives in fragments
+/// during streaming and is only valid JSON once the call is complete. Parsing is the caller's job,
+/// so a malformed call can be reported back to the model instead of breaking the turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub call_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+/// Fields added after the first release default, so threads stored by an earlier version still load.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
+    #[serde(default)]
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<ToolResult>,
+}
+
+impl Message {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            text: text.into(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+        }
+    }
+
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            text: text.into(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+        }
+    }
+
+    pub fn tool_results(results: Vec<ToolResult>) -> Self {
+        Self {
+            role: Role::Tool,
+            text: String::new(),
+            tool_calls: Vec::new(),
+            tool_results: results,
+        }
+    }
+}
+
+/// What the model may call. `parameters` is a JSON Schema object.
+#[derive(Clone, Debug)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
 }
 
 pub struct CompletionRequest {
@@ -27,17 +94,29 @@ pub struct CompletionRequest {
     pub provider: Provider,
     pub model_id: String,
     pub api_key: String,
+    pub system: Option<String>,
     pub messages: Vec<Message>,
+    pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: u64,
 }
 
-/// The subset of a streamed response Cowork renders today. Tool calls are deliberately absent:
-/// nothing in the UI can execute one yet, so surfacing them would promise behavior that does not
-/// exist.
+/// Why the model stopped. `ToolUse` is the one the turn loop acts on: it means the assistant message
+/// is complete and is waiting on tool results before it can continue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopReason {
+    EndTurn,
+    ToolUse,
+    MaxTokens,
+    Other,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompletionEvent {
     Text(String),
-    Stop,
+    /// A tool call has begun. Its arguments arrive in later `ToolCallDelta` events.
+    ToolCallStart { id: String, name: String },
+    ToolCallDelta { id: String, arguments: String },
+    Stop(StopReason),
 }
 
 /// Builds the chat endpoint for a provider. models.dev records some `api` bases with a version
@@ -136,50 +215,159 @@ fn describe_error(body: &[u8]) -> String {
     }
 }
 
-fn anthropic_body(request: &CompletionRequest) -> Value {
-    let messages = request
-        .messages
+fn anthropic_tools(request: &CompletionRequest) -> Vec<Value> {
+    request
+        .tools
         .iter()
-        .map(|message| {
+        .map(|tool| {
             json!({
-                "role": match message.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                },
-                "content": [{ "type": "text", "text": message.text }],
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.parameters,
             })
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    json!({
+fn anthropic_body(request: &CompletionRequest) -> Value {
+    let mut messages = Vec::new();
+    for message in &request.messages {
+        match message.role {
+            Role::User => messages.push(json!({
+                "role": "user",
+                "content": [{ "type": "text", "text": message.text }],
+            })),
+            Role::Assistant => {
+                let mut content = Vec::new();
+                if !message.text.is_empty() {
+                    content.push(json!({ "type": "text", "text": message.text }));
+                }
+                for call in &message.tool_calls {
+                    content.push(json!({
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": parse_arguments(&call.arguments),
+                    }));
+                }
+                messages.push(json!({ "role": "assistant", "content": content }));
+            }
+            // Anthropic carries tool results on a *user* message, not a role of their own.
+            Role::Tool => {
+                let content = message
+                    .tool_results
+                    .iter()
+                    .map(|result| {
+                        json!({
+                            "type": "tool_result",
+                            "tool_use_id": result.call_id,
+                            "content": result.content,
+                            "is_error": result.is_error,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                messages.push(json!({ "role": "user", "content": content }));
+            }
+        }
+    }
+
+    let mut body = json!({
         "model": request.model_id,
         "max_tokens": request.max_output_tokens,
         "stream": true,
         "messages": messages,
-    })
+    });
+    if let Some(system) = &request.system {
+        body["system"] = json!(system);
+    }
+    if !request.tools.is_empty() {
+        body["tools"] = json!(anthropic_tools(request));
+    }
+    body
 }
 
 fn openai_body(request: &CompletionRequest) -> Value {
-    let messages = request
-        .messages
-        .iter()
-        .map(|message| {
-            json!({
-                "role": match message.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                },
-                "content": message.text,
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut messages = Vec::new();
+    if let Some(system) = &request.system {
+        messages.push(json!({ "role": "system", "content": system }));
+    }
 
-    json!({
+    for message in &request.messages {
+        match message.role {
+            Role::User => messages.push(json!({ "role": "user", "content": message.text })),
+            Role::Assistant => {
+                let mut entry = json!({ "role": "assistant", "content": message.text });
+                if !message.tool_calls.is_empty() {
+                    entry["tool_calls"] = json!(
+                        message
+                            .tool_calls
+                            .iter()
+                            .map(|call| json!({
+                                "id": call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.name,
+                                    "arguments": call.arguments,
+                                },
+                            }))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                messages.push(entry);
+            }
+            // OpenAI wants one message per result, each naming the call it answers.
+            Role::Tool => {
+                for result in &message.tool_results {
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": result.call_id,
+                        "content": result.content,
+                    }));
+                }
+            }
+        }
+    }
+
+    let mut body = json!({
         "model": request.model_id,
         "max_completion_tokens": request.max_output_tokens,
         "stream": true,
         "messages": messages,
-    })
+    });
+    if !request.tools.is_empty() {
+        body["tools"] = json!(
+            request
+                .tools
+                .iter()
+                .map(|tool| json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
+    body
+}
+
+/// Tool arguments are echoed back to the provider as a JSON value. A call whose arguments never
+/// parsed is sent as an empty object rather than dropped, so the conversation stays well-formed and
+/// the model sees its own malformed call in the transcript.
+fn parse_arguments(arguments: &str) -> Value {
+    serde_json::from_str(arguments).unwrap_or_else(|_| json!({}))
+}
+
+/// Streaming state that spans chunks.
+///
+/// OpenAI identifies a tool call by its position in an array and sends the id and name only on the
+/// first fragment, so the index has to be remembered to attribute later argument deltas.
+#[derive(Default)]
+struct SseState {
+    openai_tool_ids: HashMap<u64, String>,
+    stopped: bool,
 }
 
 fn decode_sse(
@@ -189,19 +377,23 @@ fn decode_sse(
     let lines = BufReader::new(body).lines();
 
     futures::stream::unfold(
-        (lines, wire_api, false),
-        |(mut lines, wire_api, mut stopped)| async move {
+        (lines, wire_api, SseState::default(), Vec::new()),
+        |(mut lines, wire_api, mut state, mut queued): (_, _, SseState, Vec<CompletionEvent>)| async move {
             loop {
-                if stopped {
+                if let Some(event) = (!queued.is_empty()).then(|| queued.remove(0)) {
+                    return Some((Ok(event), (lines, wire_api, state, queued)));
+                }
+                if state.stopped {
                     return None;
                 }
 
                 let line = match lines.next().await {
                     Some(Ok(line)) => line,
                     Some(Err(error)) => {
+                        state.stopped = true;
                         return Some((
                             Err(anyhow!(error).context("reading the provider's event stream")),
-                            (lines, wire_api, true),
+                            (lines, wire_api, state, queued),
                         ));
                     }
                     None => return None,
@@ -215,88 +407,196 @@ fn decode_sse(
                     continue;
                 }
                 if data == "[DONE]" {
-                    return Some((Ok(CompletionEvent::Stop), (lines, wire_api, true)));
+                    state.stopped = true;
+                    return Some((
+                        Ok(CompletionEvent::Stop(StopReason::EndTurn)),
+                        (lines, wire_api, state, queued),
+                    ));
                 }
 
                 let chunk: Value = match serde_json::from_str(data) {
                     Ok(chunk) => chunk,
                     Err(error) => {
+                        state.stopped = true;
                         return Some((
                             Err(anyhow!(error)
                                 .context("parsing a chunk of the provider's event stream")),
-                            (lines, wire_api, true),
+                            (lines, wire_api, state, queued),
                         ));
                     }
                 };
 
-                match decode_chunk(&chunk, wire_api) {
-                    Ok(Some(event)) => {
-                        stopped = event == CompletionEvent::Stop;
-                        return Some((Ok(event), (lines, wire_api, stopped)));
+                match decode_chunk(&chunk, wire_api, &mut state) {
+                    Ok(events) if events.is_empty() => continue,
+                    Ok(events) => {
+                        queued = events;
+                        let event = queued.remove(0);
+                        if matches!(event, CompletionEvent::Stop(_)) {
+                            state.stopped = true;
+                        }
+                        return Some((Ok(event), (lines, wire_api, state, queued)));
                     }
-                    Ok(None) => continue,
-                    Err(error) => return Some((Err(error), (lines, wire_api, true))),
+                    Err(error) => {
+                        state.stopped = true;
+                        return Some((Err(error), (lines, wire_api, state, queued)));
+                    }
                 }
             }
         },
     )
 }
 
-fn decode_chunk(chunk: &Value, wire_api: WireApi) -> Result<Option<CompletionEvent>> {
+fn stop_reason(raw: Option<&str>) -> StopReason {
+    match raw {
+        Some("end_turn") | Some("stop") => StopReason::EndTurn,
+        Some("tool_use") | Some("tool_calls") => StopReason::ToolUse,
+        Some("max_tokens") | Some("length") => StopReason::MaxTokens,
+        _ => StopReason::Other,
+    }
+}
+
+fn decode_chunk(
+    chunk: &Value,
+    wire_api: WireApi,
+    state: &mut SseState,
+) -> Result<Vec<CompletionEvent>> {
     match wire_api {
-        WireApi::Anthropic => {
-            match chunk.get("type").and_then(Value::as_str) {
-                Some("content_block_delta") => {
-                    // Anthropic emits several delta shapes; only `text_delta` carries prose, and
-                    // the rest (thinking, tool input) have no rendering path in Cowork yet.
-                    let text = chunk
-                        .pointer("/delta/text")
+        WireApi::Anthropic => decode_anthropic_chunk(chunk),
+        WireApi::OpenAiCompatible => decode_openai_chunk(chunk, state),
+    }
+}
+
+fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
+    match chunk.get("type").and_then(Value::as_str) {
+        Some("content_block_start") => {
+            let block = chunk.get("content_block");
+            if block.and_then(|block| block.get("type")).and_then(Value::as_str) != Some("tool_use")
+            {
+                return Ok(Vec::new());
+            }
+            let (Some(id), Some(name)) = (
+                block.and_then(|block| block.get("id")).and_then(Value::as_str),
+                block
+                    .and_then(|block| block.get("name"))
+                    .and_then(Value::as_str),
+            ) else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![CompletionEvent::ToolCallStart {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            }])
+        }
+        Some("content_block_delta") => {
+            let delta = chunk.get("delta");
+            match delta.and_then(|delta| delta.get("type")).and_then(Value::as_str) {
+                Some("text_delta") => {
+                    let text = delta
+                        .and_then(|delta| delta.get("text"))
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     if text.is_empty() {
-                        Ok(None)
+                        Ok(Vec::new())
                     } else {
-                        Ok(Some(CompletionEvent::Text(text.to_owned())))
+                        Ok(vec![CompletionEvent::Text(text.to_owned())])
                     }
                 }
-                Some("message_stop") => Ok(Some(CompletionEvent::Stop)),
-                Some("error") => {
-                    let message = chunk
-                        .pointer("/error/message")
+                Some("input_json_delta") => {
+                    let arguments = delta
+                        .and_then(|delta| delta.get("partial_json"))
                         .and_then(Value::as_str)
-                        .unwrap_or("the provider reported an error");
-                    bail!("{message}")
+                        .unwrap_or_default();
+                    if arguments.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        // Anthropic scopes deltas to the open block rather than naming the call, so
+                        // the loop attributes them to the most recent `ToolCallStart`.
+                        Ok(vec![CompletionEvent::ToolCallDelta {
+                            id: String::new(),
+                            arguments: arguments.to_owned(),
+                        }])
+                    }
                 }
-                _ => Ok(None),
+                _ => Ok(Vec::new()),
             }
         }
-        WireApi::OpenAiCompatible => {
-            if let Some(message) = chunk.pointer("/error/message").and_then(Value::as_str) {
-                bail!("{message}");
+        Some("message_delta") => {
+            let reason = chunk
+                .pointer("/delta/stop_reason")
+                .and_then(Value::as_str);
+            match reason {
+                Some(reason) => Ok(vec![CompletionEvent::Stop(stop_reason(Some(reason)))]),
+                None => Ok(Vec::new()),
             }
-
-            let Some(choice) = chunk.pointer("/choices/0") else {
-                return Ok(None);
-            };
-
-            let text = choice
-                .pointer("/delta/content")
+        }
+        Some("message_stop") => Ok(vec![CompletionEvent::Stop(StopReason::EndTurn)]),
+        Some("error") => {
+            let message = chunk
+                .pointer("/error/message")
                 .and_then(Value::as_str)
+                .unwrap_or("the provider reported an error");
+            bail!("{message}")
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn decode_openai_chunk(chunk: &Value, state: &mut SseState) -> Result<Vec<CompletionEvent>> {
+    if let Some(message) = chunk.pointer("/error/message").and_then(Value::as_str) {
+        bail!("{message}");
+    }
+
+    let Some(choice) = chunk.pointer("/choices/0") else {
+        return Ok(Vec::new());
+    };
+
+    let mut events = Vec::new();
+
+    if let Some(text) = choice.pointer("/delta/content").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        events.push(CompletionEvent::Text(text.to_owned()));
+    }
+
+    if let Some(calls) = choice
+        .pointer("/delta/tool_calls")
+        .and_then(Value::as_array)
+    {
+        for call in calls {
+            let index = call.get("index").and_then(Value::as_u64).unwrap_or(0);
+            if let Some(id) = call.get("id").and_then(Value::as_str) {
+                state.openai_tool_ids.insert(index, id.to_owned());
+            }
+            let id = state
+                .openai_tool_ids
+                .get(&index)
+                .cloned()
                 .unwrap_or_default();
-            if !text.is_empty() {
-                return Ok(Some(CompletionEvent::Text(text.to_owned())));
-            }
 
-            if choice
-                .get("finish_reason")
-                .is_some_and(|reason| !reason.is_null())
+            if let Some(name) = call.pointer("/function/name").and_then(Value::as_str)
+                && !name.is_empty()
             {
-                return Ok(Some(CompletionEvent::Stop));
+                events.push(CompletionEvent::ToolCallStart {
+                    id: id.clone(),
+                    name: name.to_owned(),
+                });
             }
-
-            Ok(None)
+            if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str)
+                && !arguments.is_empty()
+            {
+                events.push(CompletionEvent::ToolCallDelta {
+                    id,
+                    arguments: arguments.to_owned(),
+                });
+            }
         }
     }
+
+    if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        events.push(CompletionEvent::Stop(stop_reason(Some(reason))));
+    }
+
+    Ok(events)
 }
 
 #[cfg(test)]
@@ -348,7 +648,39 @@ mod tests {
             vec![
                 CompletionEvent::Text("Hel".into()),
                 CompletionEvent::Text("lo".into()),
-                CompletionEvent::Stop,
+                CompletionEvent::Stop(StopReason::EndTurn),
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_an_anthropic_tool_call() {
+        let events = collect(
+            concat!(
+                "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\"}}\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"a.rs\\\"}\"}}\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n",
+            ),
+            WireApi::Anthropic,
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::ToolCallStart {
+                    id: "toolu_1".into(),
+                    name: "read".into()
+                },
+                CompletionEvent::ToolCallDelta {
+                    id: String::new(),
+                    arguments: "{\"path\":".into()
+                },
+                CompletionEvent::ToolCallDelta {
+                    id: String::new(),
+                    arguments: "\"a.rs\"}".into()
+                },
+                CompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
     }
@@ -367,7 +699,43 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![CompletionEvent::Text("Hi".into()), CompletionEvent::Stop]
+            vec![
+                CompletionEvent::Text("Hi".into()),
+                CompletionEvent::Stop(StopReason::EndTurn)
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_tool_calls_keep_their_id_across_fragments() {
+        // The id and name arrive once, on the first fragment; later fragments carry only the index.
+        let events = collect(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"grep\",\"arguments\":\"\"}}]}}]}\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"fn\\\"}\"}}]}}]}\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
+            ),
+            WireApi::OpenAiCompatible,
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::ToolCallStart {
+                    id: "call_1".into(),
+                    name: "grep".into()
+                },
+                CompletionEvent::ToolCallDelta {
+                    id: "call_1".into(),
+                    arguments: "{\"q\":".into()
+                },
+                CompletionEvent::ToolCallDelta {
+                    id: "call_1".into(),
+                    arguments: "\"fn\"}".into()
+                },
+                CompletionEvent::Stop(StopReason::ToolUse),
+            ]
         );
     }
 
@@ -384,13 +752,17 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![CompletionEvent::Text("a".into()), CompletionEvent::Stop]
+            vec![
+                CompletionEvent::Text("a".into()),
+                CompletionEvent::Stop(StopReason::EndTurn)
+            ]
         );
     }
 
     #[test]
     fn surfaces_errors_embedded_in_the_stream() {
         let error = futures::executor::block_on(async {
+            // `StreamExt::next` needs `Unpin`, which the `unfold` stream is not.
             decode_sse(
                 AsyncBody::from(
                     "data: {\"type\":\"error\",\"error\":{\"message\":\"overloaded\"}}\n",
@@ -414,5 +786,51 @@ mod tests {
             "invalid api key"
         );
         assert_eq!(describe_error(b"plain text failure"), "plain text failure");
+    }
+
+    #[test]
+    fn tool_results_take_the_shape_each_wire_format_expects() {
+        let request = CompletionRequest {
+            provider_id: "test".into(),
+            provider: serde_json::from_str(r#"{"api":"https://x.test"}"#).unwrap(),
+            model_id: "m".into(),
+            api_key: "k".into(),
+            system: None,
+            messages: vec![
+                Message::user("hi"),
+                Message {
+                    role: Role::Assistant,
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: r#"{"path":"a.rs"}"#.into(),
+                    }],
+                    tool_results: Vec::new(),
+                },
+                Message::tool_results(vec![ToolResult {
+                    call_id: "c1".into(),
+                    content: "fn main() {}".into(),
+                    is_error: false,
+                }]),
+            ],
+            tools: Vec::new(),
+            max_output_tokens: 64,
+        };
+
+        // Anthropic folds results into a user message.
+        let anthropic = anthropic_body(&request);
+        let messages = anthropic["messages"].as_array().unwrap();
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "c1");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+
+        // OpenAI gives each result its own message with a role of its own.
+        let openai = openai_body(&request);
+        let messages = openai["messages"].as_array().unwrap();
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "c1");
+        assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "read");
     }
 }

@@ -3,8 +3,11 @@ use crate::{
     catalog::ModelRef,
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
-    provider::{self, CompletionEvent, CompletionRequest, Message, Role},
+    provider::{
+        self, CompletionEvent, CompletionRequest, Message, Role, StopReason, ToolCall, ToolResult,
+    },
     thread::{CoworkStore, Thread, ThreadId},
+    tool::{ToolContext, ToolRegistry},
 };
 use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
@@ -29,6 +32,8 @@ pub enum CoworkThreadEvent {
 struct MessageView {
     role: Role,
     text: String,
+    tool_calls: Vec<ToolCall>,
+    tool_results: Vec<ToolResult>,
     /// Assistant prose is rendered as markdown. The entity is built when the message is created or
     /// extended, never during `render`, because updating an entity while rendering panics.
     rendered: Option<Entity<Markdown>>,
@@ -43,6 +48,8 @@ pub struct CoworkThreadView {
     language_registry: Arc<LanguageRegistry>,
     store: Entity<CoworkStore>,
     workspace: WeakEntity<Workspace>,
+    project: Entity<Project>,
+    tools: ToolRegistry,
     error: Option<SharedString>,
     completion: Option<Task<()>>,
 }
@@ -74,6 +81,8 @@ impl CoworkThreadView {
             .map(|message| MessageView {
                 role: message.role,
                 text: message.text.clone(),
+                tool_calls: message.tool_calls.clone(),
+                tool_results: message.tool_results.clone(),
                 rendered: (message.role == Role::Assistant)
                     .then(|| render_markdown(&message.text, language_registry.clone(), cx)),
             })
@@ -88,6 +97,8 @@ impl CoworkThreadView {
             language_registry,
             store,
             workspace,
+            project,
+            tools: ToolRegistry::read_only(),
             error: None,
             completion: None,
         }
@@ -158,13 +169,16 @@ impl CoworkThreadView {
         let rendered = (role == Role::Assistant)
             .then(|| render_markdown(&text, self.language_registry.clone(), cx));
 
-        self.thread.messages.push(Message {
-            role,
-            text: text.clone(),
+        self.thread.messages.push(match role {
+            Role::User => Message::user(text.clone()),
+            Role::Assistant => Message::assistant(text.clone()),
+            Role::Tool => Message::tool_results(Vec::new()),
         });
         self.messages.push(MessageView {
             role,
             text,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
             rendered,
         });
         self.scroll_handle.scroll_to_bottom();
@@ -190,49 +204,218 @@ impl CoworkThreadView {
         cx.notify();
     }
 
+    /// The number of model round-trips one user message may cause.
+    ///
+    /// A loop that cannot end is the default failure mode of a tool-calling agent: a model that
+    /// keeps re-reading the same file will otherwise spend the user's money until they notice.
+    const MAX_STEPS: usize = 12;
+
     fn start_completion(&mut self, cx: &mut Context<Self>) {
-        let request = match self.build_request(cx) {
-            Ok(request) => request,
-            Err(error) => {
-                self.fail(error, cx);
-                return;
-            }
-        };
-
-        self.push_message(Role::Assistant, String::new(), cx);
-
         let http_client = cx.http_client();
+        let tools = self.tools.clone();
+        let project = self.project.clone();
+        let workspace = self.workspace.clone();
+
         self.completion = Some(cx.spawn(async move |this, cx| {
-            let mut stream = match provider::stream_completion(http_client, request).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    this.update(cx, |this, cx| this.finish_with_error(error, cx))
-                        .log_err();
+            for step in 0..Self::MAX_STEPS {
+                let request = match this.update(cx, |this, cx| this.build_request(cx)) {
+                    Ok(Ok(request)) => request,
+                    Ok(Err(error)) => {
+                        this.update(cx, |this, cx| this.fail(error, cx)).log_err();
+                        return;
+                    }
+                    Err(_) => return,
+                };
+
+                if this
+                    .update(cx, |this, cx| {
+                        this.push_message(Role::Assistant, String::new(), cx)
+                    })
+                    .is_err()
+                {
                     return;
                 }
-            };
 
-            while let Some(event) = stream.next().await {
-                match event {
-                    Ok(CompletionEvent::Text(chunk)) => {
-                        if this
-                            .update(cx, |this, cx| this.extend_last_message(&chunk, cx))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(CompletionEvent::Stop) => break,
+                let outcome = Self::stream_one_step(&this, http_client.clone(), request, cx).await;
+                let (calls, stopped_for_tools) = match outcome {
+                    Ok(outcome) => outcome,
                     Err(error) => {
                         this.update(cx, |this, cx| this.finish_with_error(error, cx))
                             .log_err();
                         return;
                     }
+                };
+
+                if !stopped_for_tools || calls.is_empty() {
+                    this.update(cx, |this, cx| this.finish(cx)).log_err();
+                    return;
+                }
+
+                // Record the calls on the assistant message before running them, so the
+                // conversation stays well-formed even if a tool panics or the turn is cancelled.
+                if this
+                    .update(cx, |this, cx| {
+                        this.attach_tool_calls(calls.clone(), cx);
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+
+                let mut results = Vec::with_capacity(calls.len());
+                for call in &calls {
+                    let result = Self::run_tool(
+                        &tools,
+                        call,
+                        ToolContext {
+                            project: project.clone(),
+                            workspace: workspace.clone(),
+                        },
+                        cx,
+                    )
+                    .await;
+                    results.push(result);
+                }
+
+                if this
+                    .update(cx, |this, cx| this.push_tool_results(results, cx))
+                    .is_err()
+                {
+                    return;
+                }
+
+                if step + 1 == Self::MAX_STEPS {
+                    this.update(cx, |this, cx| {
+                        this.fail(
+                            anyhow!(
+                                "stopped after {} tool calls in one turn. Ask again, more \
+                                 narrowly, to continue.",
+                                Self::MAX_STEPS
+                            ),
+                            cx,
+                        )
+                    })
+                    .log_err();
+                    return;
                 }
             }
-
-            this.update(cx, |this, cx| this.finish(cx)).log_err();
         }));
+    }
+
+    /// Streams one assistant message, returning the tool calls it asked for and whether it stopped
+    /// in order to make them.
+    async fn stream_one_step(
+        this: &WeakEntity<Self>,
+        http_client: Arc<dyn http_client::HttpClient>,
+        request: CompletionRequest,
+        cx: &mut gpui::AsyncApp,
+    ) -> Result<(Vec<ToolCall>, bool)> {
+        let mut stream = provider::stream_completion(http_client, request).await?;
+        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut stopped_for_tools = false;
+
+        while let Some(event) = stream.next().await {
+            match event? {
+                CompletionEvent::Text(chunk) => {
+                    if this
+                        .update(cx, |this, cx| this.extend_last_message(&chunk, cx))
+                        .is_err()
+                    {
+                        return Ok((Vec::new(), false));
+                    }
+                }
+                CompletionEvent::ToolCallStart { id, name } => calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments: String::new(),
+                }),
+                CompletionEvent::ToolCallDelta { id, arguments } => {
+                    // Anthropic scopes argument deltas to the open content block rather than
+                    // naming the call, and sends an empty id; those belong to the most recent one.
+                    let call = if id.is_empty() {
+                        calls.last_mut()
+                    } else {
+                        calls.iter_mut().find(|call| call.id == id)
+                    };
+                    if let Some(call) = call {
+                        call.arguments.push_str(&arguments);
+                    }
+                }
+                CompletionEvent::Stop(reason) => {
+                    stopped_for_tools = reason == StopReason::ToolUse;
+                    break;
+                }
+            }
+        }
+
+        Ok((calls, stopped_for_tools))
+    }
+
+    /// Runs one tool call, turning every failure into a result the model can read and correct.
+    ///
+    /// A tool that errors must not end the turn: the model asked for something it could not have,
+    /// and telling it so is more useful than a dead conversation.
+    async fn run_tool(
+        tools: &ToolRegistry,
+        call: &ToolCall,
+        context: ToolContext,
+        cx: &mut gpui::AsyncApp,
+    ) -> ToolResult {
+        let error = |message: String| ToolResult {
+            call_id: call.id.clone(),
+            content: message,
+            is_error: true,
+        };
+
+        let Some(tool) = tools.get(&call.name) else {
+            return error(format!("there is no tool named `{}`", call.name));
+        };
+
+        let arguments = if call.arguments.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            match serde_json::from_str(&call.arguments) {
+                Ok(arguments) => arguments,
+                Err(parse_error) => {
+                    return error(format!("the arguments were not valid JSON: {parse_error}"));
+                }
+            }
+        };
+
+        let run = cx.update(|cx| tool.run(arguments, context, cx));
+        match run.await {
+            Ok(output) => ToolResult {
+                call_id: call.id.clone(),
+                content: output.content,
+                is_error: false,
+            },
+            Err(failure) => error(format!("{failure:#}")),
+        }
+    }
+
+    fn attach_tool_calls(&mut self, calls: Vec<ToolCall>, cx: &mut Context<Self>) {
+        if let Some(message) = self.thread.messages.last_mut() {
+            message.tool_calls = calls.clone();
+        }
+        if let Some(view) = self.messages.last_mut() {
+            view.tool_calls = calls;
+        }
+        cx.notify();
+    }
+
+    fn push_tool_results(&mut self, results: Vec<ToolResult>, cx: &mut Context<Self>) {
+        self.thread
+            .messages
+            .push(Message::tool_results(results.clone()));
+        self.messages.push(MessageView {
+            role: Role::Tool,
+            text: String::new(),
+            rendered: None,
+            tool_calls: Vec::new(),
+            tool_results: results,
+        });
+        self.scroll_handle.scroll_to_bottom();
+        cx.notify();
     }
 
     fn build_request(&self, cx: &App) -> Result<CompletionRequest> {
@@ -259,7 +442,9 @@ impl CoworkThreadView {
             provider: catalog_provider.clone(),
             model_id: model.model_id.clone(),
             api_key,
+            system: None,
             messages: self.thread.messages.clone(),
+            tools: self.tools.definitions(),
             max_output_tokens: CoworkSettings::get_global(cx).max_output_tokens,
         })
     }
@@ -386,6 +571,32 @@ impl CoworkThreadView {
     }
 }
 
+/// The first non-empty line of a tool's output, for the collapsed row.
+fn first_line(content: &str) -> String {
+    let line = content.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    if line.chars().count() > 120 {
+        format!("{}…", line.chars().take(120).collect::<String>())
+    } else {
+        line.to_owned()
+    }
+}
+
+/// Tool arguments are shown as the values alone: the model already named the tool, and the keys
+/// are noise at this size.
+fn summarize_arguments(arguments: &str) -> String {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(arguments) else {
+        return String::new();
+    };
+    fields
+        .values()
+        .map(|value| match value {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn render_markdown(
     source: &str,
     language_registry: Arc<LanguageRegistry>,
@@ -465,6 +676,50 @@ impl Render for CoworkThreadView {
                     .when_some(message.rendered.clone(), |this, markdown| {
                         this.child(MarkdownElement::new(markdown, markdown_style.clone()))
                     })
+                    .children(message.tool_calls.iter().enumerate().map(|(position, call)| {
+                        h_flex()
+                            .id(("cowork-tool-call", position))
+                            .w_full()
+                            .gap_1p5()
+                            .child(
+                                Icon::new(IconName::PlayOutlined)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Accent),
+                            )
+                            .child(Label::new(call.name.clone()).size(LabelSize::XSmall))
+                            .child(
+                                Label::new(summarize_arguments(&call.arguments))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate_middle(),
+                            )
+                    }))
+                    .into_any_element(),
+                Role::Tool => v_flex()
+                    .id(("cowork-tool-results", index))
+                    .w_full()
+                    .px_3()
+                    .gap_1()
+                    .children(message.tool_results.iter().enumerate().map(
+                        |(position, result)| {
+                            let (icon, color) = if result.is_error {
+                                (IconName::XCircle, Color::Error)
+                            } else {
+                                (IconName::Check, Color::Success)
+                            };
+                            h_flex()
+                                .id(("cowork-tool-result", position))
+                                .w_full()
+                                .gap_1p5()
+                                .child(Icon::new(icon).size(IconSize::XSmall).color(color))
+                                .child(
+                                    Label::new(first_line(&result.content))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate_middle(),
+                                )
+                        },
+                    ))
                     .into_any_element(),
             })
             .collect::<Vec<_>>();

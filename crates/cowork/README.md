@@ -15,7 +15,7 @@ Native AI threads for Wu, split the way the rest of the workspace is:
 
 ## Status
 
-Compiles, lints and unit-tests clean. **It has never been run** — no one has opened the panel, sent a
+Compiles, lints and unit-tests clean. **The tool loop has never been run against a real model** — no one has opened the panel, sent a
 prompt, or watched a response stream in. Every claim below about runtime behaviour is derived from
 the code, not from observation.
 
