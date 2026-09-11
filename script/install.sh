@@ -7,7 +7,7 @@ main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
     channel="${ZED_CHANNEL:-stable}"
-    repo="farshed/wu"
+    repo="Workspaacing/wu"
     ZED_VERSION="${ZED_VERSION:-latest}"
     if [ "$ZED_VERSION" = "latest" ]; then
         download_base="https://github.com/$repo/releases/latest/download"

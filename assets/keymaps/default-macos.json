@@ -499,6 +499,8 @@
       "cmd-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "cmd-shift-d": "debug_panel::ToggleFocus",
+      "cmd-ctrl-a": "cowork::ToggleFocus",
+      "cmd-ctrl-t": "cowork::NewThread",
       "cmd-alt-s": "workspace::SaveAll",
       "cmd-k n": "encoding_selector::Toggle",
       "cmd-k m": "language_selector::Toggle",
@@ -1239,6 +1241,22 @@
     "bindings": {
       "tab": "git_graph::FocusNextTabStop",
       "shift-tab": "git_graph::FocusPreviousTabStop",
+    },
+  },
+  {
+    "context": "CoworkThread > Editor",
+    "bindings": {
+      "enter": "cowork::Submit",
+      "shift-enter": "editor::Newline",
+    },
+  },
+  {
+    "context": "CoworkPanel",
+    "bindings": {
+      "up": "cowork::SelectPreviousThread",
+      "down": "cowork::SelectNextThread",
+      "enter": "cowork::OpenSelectedThread",
+      "delete": "cowork::DeleteSelectedThread",
     },
   },
 ]

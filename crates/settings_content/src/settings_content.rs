@@ -190,6 +190,9 @@ pub struct SettingsContent {
 
     pub call_hierarchy: Option<CallHierarchySettingsContent>,
 
+    /// Settings for the Cowork panel and its AI threads.
+    pub cowork: Option<CoworkSettingsContent>,
+
     pub git_panel: Option<GitPanelSettingsContent>,
 
     pub tabs: Option<ItemSettingsContent>,
@@ -320,7 +323,7 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, file_finder, git_panel, tabs, tab_bar, status_bar, activity_bar, preview_tabs,
+        call_hierarchy, cowork, file_finder, git_panel, tabs, tab_bar, status_bar, activity_bar, preview_tabs,
         auto_update, base_keymap, debugger, diagnostics,
         git,
         global_lsp_settings, image_viewer, markdown_preview, hide_mouse,
@@ -974,6 +977,36 @@ pub struct MarkdownPreviewSettingsContent {
     ///
     /// Default: 800
     pub max_width: Option<PixelSetting>,
+}
+
+/// Settings for the Cowork panel and its AI threads.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct CoworkSettingsContent {
+    /// Whether to show the Cowork panel button in the status bar.
+    ///
+    /// Default: true
+    pub button: Option<bool>,
+    /// The position of the Cowork panel.
+    ///
+    /// Default: left
+    pub dock: Option<DockSide>,
+    /// Customize default width (in pixels) taken by the Cowork panel.
+    ///
+    /// Default: 300
+    pub default_width: Option<PixelSetting>,
+    /// The `provider/model` new threads start on, named with models.dev identifiers.
+    ///
+    /// Default: "anthropic/claude-sonnet-4-5"
+    pub default_model: Option<String>,
+    /// The models.dev catalog Cowork reads its providers and models from.
+    ///
+    /// Default: "https://models.dev/api.json"
+    pub catalog_url: Option<String>,
+    /// The maximum number of tokens a single response may generate.
+    ///
+    /// Default: 4096
+    pub max_output_tokens: Option<u64>,
 }
 
 /// The settings for the image viewer.

@@ -11,14 +11,14 @@ grade: stable
 confinement: classic
 compression: lzo
 website: https://wu.farshed.me/
-source-code: https://github.com/farshed/wu
-issues: https://github.com/farshed/wu/issues
-contact: https://github.com/farshed/wu/issues
+source-code: https://github.com/Workspaacing/wu
+issues: https://github.com/Workspaacing/wu/issues
+contact: https://github.com/Workspaacing/wu/issues
 
 parts:
   wu:
     plugin: dump
-    source: "https://github.com/farshed/wu/releases/download/v$RELEASE_VERSION/wu-linux-x86_64.tar.gz"
+    source: "https://github.com/Workspaacing/wu/releases/download/v$RELEASE_VERSION/wu-linux-x86_64.tar.gz"
 
     organize:
       # These renames seem to not be necessary, but it's tidier.

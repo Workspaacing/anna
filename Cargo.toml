@@ -17,6 +17,7 @@ members = [
     "crates/cloud_api_types",
     "crates/collections",
     "crates/command_palette",
+    "crates/cowork",
     "crates/command_palette_hooks",
     "crates/component",
     "crates/component_preview",
@@ -208,6 +209,7 @@ clock = { path = "crates/clock" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 collections = { path = "crates/collections", version = "0.1.0" }
 command_palette = { path = "crates/command_palette" }
+cowork = { path = "crates/cowork" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
 component = { path = "crates/component" }
 component_preview = { path = "crates/component_preview" }

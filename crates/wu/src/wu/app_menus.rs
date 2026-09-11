@@ -309,7 +309,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action(
                     "Wu Repository",
                     super::OpenBrowser {
-                        url: "https://github.com/farshed/wu".into(),
+                        url: "https://github.com/Workspaacing/wu".into(),
                     },
                 ),
             ],

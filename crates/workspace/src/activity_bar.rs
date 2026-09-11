@@ -16,7 +16,8 @@ pub const ACTIVITY_BAR_WIDTH: Pixels = px(48.);
 
 /// Entries are shown in this order by `Panel::panel_key()`. Panels not listed here
 /// come after, in dock order (left dock first, then right dock).
-const PREFERRED_ORDER: [&str; 4] = ["ProjectPanel", "GitPanel", "OutlinePanel", "DebugPanel"];
+const PREFERRED_ORDER: [&str; 5] =
+    ["ProjectPanel", "GitPanel", "CoworkPanel", "OutlinePanel", "DebugPanel"];
 
 /// A vertical bar on the left edge of the window with one button per left or right
 /// dock panel, like the activity bar in VS Code.

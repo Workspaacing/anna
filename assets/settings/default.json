@@ -103,6 +103,24 @@
     // workspace when the centered layout is used.
     "right_padding": 0.2,
   },
+  // Cowork (native AI threads) settings
+  "cowork": {
+    // Whether to show the Cowork panel button in the status bar.
+    "button": true,
+    // Where to dock the Cowork panel. Can be 'left' or 'right'.
+    "dock": "left",
+    // Default width of the Cowork panel.
+    "default_width": 300,
+    // The `provider/model` new threads start on, using models.dev identifiers.
+    // Cowork reads the provider's API key from the environment variable that
+    // models.dev declares for it (for example ANTHROPIC_API_KEY); keys are
+    // never stored by Wu.
+    "default_model": "anthropic/claude-sonnet-4-5",
+    // The models.dev catalog Cowork reads its providers and models from.
+    "catalog_url": "https://models.dev/api.json",
+    // The maximum number of tokens a single response may generate.
+    "max_output_tokens": 4096,
+  },
   // Image viewer settings
   "image_viewer": {
     // The unit for image file sizes: "binary" (KiB, MiB) or decimal (KB, MB)

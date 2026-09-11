@@ -2075,6 +2075,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "cowork"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "editor",
+ "fs",
+ "futures",
+ "fuzzy",
+ "gpui",
+ "http_client",
+ "language",
+ "log",
+ "markdown",
+ "picker",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "cpp_demangle"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14792,7 +14819,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "wu"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "activity_indicator",
  "anyhow",
@@ -14811,6 +14838,7 @@ dependencies = [
  "collections",
  "command_palette",
  "component_preview",
+ "cowork",
  "dap_adapters",
  "db",
  "debug_adapter_extension",
