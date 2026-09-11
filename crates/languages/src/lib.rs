@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod bash;
+mod biome;
 mod c;
 mod cpp;
 mod css;
@@ -62,6 +63,7 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
     let bash_lsp_adapter = Arc::new(bash::BashLspAdapter::new(node.clone()));
     let c_lsp_adapter = Arc::new(c::CLspAdapter);
     let css_lsp_adapter = Arc::new(css::CssLspAdapter::new(node.clone()));
+    let biome_adapter = Arc::new(biome::BiomeLspAdapter::new(node.clone()));
     let eslint_adapter = Arc::new(eslint::EsLintLspAdapter::new(node.clone(), fs.clone()));
     let go_context_provider = Arc::new(go::GoContextProvider);
     let go_lsp_adapter = Arc::new(go::GoLspAdapter);
@@ -292,6 +294,25 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
     let eslint_languages = ["TSX", "TypeScript", "JavaScript", "Vue.js", "Svelte"];
     for language in eslint_languages {
         languages.register_lsp_adapter(language.into(), eslint_adapter.clone());
+    }
+
+    // Biome covers JSON and CSS as well as the JavaScript family, which is most of where it wins
+    // over the other two. Names that only exist when an extension supplies them are harmless here:
+    // registering an adapter for a language nobody has installed does nothing.
+    let biome_languages = [
+        "TSX",
+        "TypeScript",
+        "JavaScript",
+        "JSON",
+        "JSONC",
+        "CSS",
+        "GraphQL",
+        "Vue.js",
+        "Svelte",
+        "Astro",
+    ];
+    for language in biome_languages {
+        languages.register_lsp_adapter(language.into(), biome_adapter.clone());
     }
 
     let mut subscription = languages.subscribe();

@@ -5646,17 +5646,17 @@ fn cowork_page() -> SettingsPage {
         [
             SettingsPageItem::SectionHeader("Verification"),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Format And Fix With Biome",
-                description: "After the agent writes JavaScript, TypeScript, JSX, JSON or CSS, run the project's own Biome over it and apply what it can fix. Uses the Biome in node_modules or on PATH, so it obeys your biome.json and matches what CI runs. Silent in projects that do not use Biome.",
+                title: "Format The Agent's Edits",
+                description: "Before saving a file the agent changed, run the project's own formatter over it — the same chain your edits go through on save. Which tool that is comes from the `formatter` setting for the language: Biome, ESLint's fix-all action, Prettier, or the language server. Biome and ESLint run as language servers Wu installs itself, and Prettier is built in, so all three obey the project's own config.",
                 field: Box::new(SettingField {
-                    json_path: Some("cowork.verification.biome"),
+                    json_path: Some("cowork.verification.format"),
                     pick: |settings_content| {
                         settings_content
                             .cowork
                             .as_ref()?
                             .verification
                             .as_ref()?
-                            .biome
+                            .format
                             .as_ref()
                     },
                     write: |settings_content, value, _| {
@@ -5665,7 +5665,7 @@ fn cowork_page() -> SettingsPage {
                             .get_or_insert_default()
                             .verification
                             .get_or_insert_default()
-                            .biome = value;
+                            .format = value;
                     },
                 }),
                 metadata: None,

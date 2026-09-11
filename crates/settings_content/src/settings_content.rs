@@ -1016,11 +1016,12 @@ pub struct CoworkSettingsContent {
 #[with_fallible_options]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
 pub struct CoworkVerificationSettingsContent {
-    /// Format and lint JavaScript, TypeScript, JSX, JSON and CSS that the agent writes, using
-    /// Biome. Has no effect on other languages.
+    /// Run the project's own formatter over a file the agent changed, before saving it — the
+    /// same chain your own edits go through on save, whether that is Biome, ESLint's fix-all
+    /// action, Prettier, or the language server.
     ///
     /// Default: true
-    pub biome: Option<bool>,
+    pub format: Option<bool>,
     /// Report the diagnostics the project's own language servers and linters produce for a file
     /// the agent changed. This is the same analysis the editor shows the user.
     ///

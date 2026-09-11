@@ -14,7 +14,7 @@ pub struct CoworkSettings {
 /// Which of the built-in checks run after the agent changes something.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerificationSettings {
-    pub biome: bool,
+    pub format: bool,
     pub diagnostics: bool,
     pub secret_scan: bool,
     pub dependency_audit: bool,
@@ -23,7 +23,7 @@ pub struct VerificationSettings {
 impl VerificationSettings {
     /// Whether any check at all is enabled, so the turn loop can skip the work entirely.
     pub fn any_enabled(&self) -> bool {
-        self.biome || self.diagnostics || self.secret_scan || self.dependency_audit
+        self.format || self.diagnostics || self.secret_scan || self.dependency_audit
     }
 }
 
@@ -39,7 +39,7 @@ impl Settings for CoworkSettings {
             verification: {
                 let verification = cowork.verification.as_ref().unwrap();
                 VerificationSettings {
-                    biome: verification.biome.unwrap(),
+                    format: verification.format.unwrap(),
                     diagnostics: verification.diagnostics.unwrap(),
                     secret_scan: verification.secret_scan.unwrap(),
                     dependency_audit: verification.dependency_audit.unwrap(),

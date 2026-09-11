@@ -119,8 +119,11 @@
     // built into Wu and none of them consults a model, so leaving them on
     // costs nothing per message.
     "verification": {
-      // Format and lint JavaScript, TypeScript, JSX, JSON and CSS with Biome.
-      "biome": true,
+      // Run the project's own formatter over a file the agent changed, before
+      // saving it. Which tool that is comes from your `formatter` setting for
+      // the language: Biome, ESLint's fix-all action, Prettier, or the
+      // language server.
+      "format": true,
       // Report the diagnostics the project's language servers produce for a
       // file the agent changed.
       "diagnostics": true,

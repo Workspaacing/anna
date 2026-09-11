@@ -10,7 +10,6 @@
 //! in `settings.json`.
 
 mod audit;
-mod biome;
 mod catalog;
 mod cowork_panel;
 mod cowork_settings;

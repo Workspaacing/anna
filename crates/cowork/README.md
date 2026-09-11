@@ -27,8 +27,8 @@ Verified on 2026-09-11 (Rust 1.97.1, `x86_64-pc-windows-msvc`):
 | `cargo test -p xtask` | pass — no forbidden crate edge |
 
 What that does **not** cover: the panel rendering, dock persistence, SSE streaming against a real
-provider, a tool call round-tripping through a model, Biome actually running, or an OSV query
-returning an advisory. Those need a human at a running build.
+provider, a tool call round-tripping through a model, the Biome language server starting, or an
+OSV query returning an advisory. Those need a human at a running build.
 
 ## Models
 
@@ -96,7 +96,7 @@ default.
 | Check | Setting | When | What it does |
 | --- | --- | --- | --- |
 | Secrets | `cowork.verification.secret_scan` | **before** the write | Refuses to write an API key, token or private key, and tells the agent to read it from the environment instead |
-| Biome | `cowork.verification.biome` | after the edit, before the save | Runs the project's own Biome over JS/TS/JSX/JSON/CSS and applies what it fixes |
+| Format | `cowork.verification.format` | after the edit, before the save | Runs the project's own formatter chain — the same one your edits go through on save |
 | Diagnostics | `cowork.verification.diagnostics` | after the save | Hands the agent the errors and warnings the language servers report |
 | Dependencies | `cowork.verification.dependency_audit` | after the save | Checks an edited manifest's packages against the OSV advisory database |
 
@@ -106,14 +106,63 @@ Two deliberate design decisions:
 whole file would flag a credential the user put there themselves and lock the agent out of that
 file entirely. The agent is answerable for what it writes.
 
-**Biome is the project's own, not a copy.** The `biome_*` crates are on crates.io and format, lint
-and autofix all work from them — but they are frozen at 0.5.7, which is Biome 1.6.1 from March
-2024, and the code that reads `biome.json` is `pub(crate)` in crates that are not published at all.
-Embedding them would mean a linter that ignores your configuration and disagrees with the Biome
-your CI runs, for roughly +10 MB of binary and 117 extra packages. So Cowork finds the Biome in
-`node_modules/.bin` (or on `PATH`), passes the source on stdin with `--stdin-file-path`, and takes
-the corrected source back on stdout. Your `biome.json` applies, the rules match CI, and it updates
-when you update Biome. In a project without Biome the check is silent.
+**Cowork does not format anything itself.** It calls `Project::format()`, the same path the editor
+uses when you save, so the agent's edits get exactly the treatment your own edits get. A second
+formatter could only disagree with the first, and each would undo the other every turn.
+
+## Biome, ESLint and Prettier
+
+All three are native to Wu, and none of them is spawned per file:
+
+| | How | Where it wins |
+| --- | --- | --- |
+| **Biome** | `crates/languages/src/biome.rs` — `@biomejs/biome` installed by Wu's Node runtime, run as `biome lsp-proxy` | Lint, format and import sorting for JS/TS/JSX/JSON/CSS in one pass, in Rust |
+| **ESLint** | `crates/languages/src/eslint.rs` — the `vscode-eslint` server, downloaded by Wu | **Type-aware** rules (`no-floating-promises`, `require-await`) and the plugin ecosystem. Biome cannot do these |
+| **Prettier** | `crates/prettier` — installed by Wu's Node runtime, run as a long-lived server | The languages Biome does not format at all: Markdown, MDX, YAML, SCSS, Less, Handlebars, Vue and Angular templates |
+
+Each prefers the project's own copy — the version the lockfile pins and CI runs — falling back to
+one Wu installs. Their diagnostics reach the agent through the Diagnostics check above, and their
+fix-all code actions are available to the formatter chain.
+
+They are all long-lived processes rather than per-file CLI invocations, which is not a detail:
+measured on this machine, one `eslint` CLI run costs 3.8–9.0 s against 7–43 ms through a warm
+process. Type-aware linting pays a one-off TypeScript program build that a resident server
+amortises to nothing.
+
+**Do not run two formatters over one language.** They will fight, and the agent will spend a turn
+undoing the previous turn. `"formatter": "auto"` — the default — already resolves this correctly:
+Prettier when the project has it, otherwise the language server, which is Biome where Biome is
+configured.
+
+To have the agent's edits lint-fixed as well as formatted, add the fix-all action for whichever
+linter owns that language:
+
+```jsonc
+{
+  "languages": {
+    "TypeScript": {
+      "code_actions_on_format": {
+        "source.fixAll.biome": true,
+        "source.organizeImports.biome": true
+      }
+    },
+    // Biome formats neither of these, so Prettier keeps them.
+    "Markdown": { "formatter": "prettier" },
+    "YAML": { "formatter": "prettier" }
+  }
+}
+```
+
+In a project that uses ESLint and Prettier rather than Biome, the equivalent is
+`"source.fixAll.eslint": true` with `"formatter": "prettier"`. Adding both linters' fix-all actions
+to one language is the one combination to avoid.
+
+**On the CLI route, which was tried first and abandoned.** Cowork originally shelled out to
+`biome check --write --stdin-file-path`. That mode silently disables `--reporter` entirely: it
+returns the fixed source and nothing else — no diagnostics on stdout, none on stderr, and
+`--reporter-file` never even creates its file. Worse, it applies lint fixes to source that does not
+parse and still exits 0, so `let a = = ;` came back as `const a = = ;` reported as clean. The LSP is
+the only route that gives corrected text *and* diagnostics.
 
 ### On CodeQL and Dependabot
 

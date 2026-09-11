@@ -5,11 +5,15 @@
 //! listings, the language servers for diagnostics — so the agent sees the same state the user does,
 //! including unsaved edits, and so remote projects work without a second code path.
 
-use crate::{biome, cowork_settings::CoworkSettings, verify};
+use crate::{cowork_settings::CoworkSettings, verify};
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{App, AppContext as _, AsyncApp, Entity, Task, WeakEntity};
 use language::Buffer;
-use project::{Project, ProjectPath};
+use collections::HashSet;
+use project::{
+    Project, ProjectPath,
+    lsp_store::{FormatTrigger, LspFormatTarget},
+};
 use serde_json::{Value, json};
 use settings::Settings as _;
 use std::sync::Arc;
@@ -257,11 +261,11 @@ async fn apply(
 
     // Before saving, so the file lands formatted and auto-fixed rather than being rewritten a
     // moment later.
-    let mut findings = if settings.biome {
-        run_biome(&project, &project_path, &buffer, cx).await
-    } else {
-        Vec::new()
-    };
+    if settings.format {
+        format_with_project(&project, &buffer, cx).await;
+    }
+
+    let mut findings = Vec::new();
 
     project
         .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
@@ -286,61 +290,39 @@ async fn apply(
     Ok(ToolOutput::new(content, format!("{path} · {summary}")))
 }
 
-/// Hands the file to the project's own Biome and takes back whatever it corrected.
+/// Hands the change to the project's own formatter chain.
 ///
-/// Silent when the project does not use Biome, which is every project that is not JavaScript and
-/// many that are. Nothing here can fail the write: a formatter that breaks a turn is worse than a
-/// file that is not formatted.
-async fn run_biome(
+/// Whatever is configured for this language — Biome's `source.fixAll`, an ESLint fix-all action,
+/// Prettier, the language server, or several of them in order — is what the agent's edits get, so
+/// the agent's work is treated exactly like the user's own edits on save.
+///
+/// This deliberately replaced a direct `biome --stdin-file-path` call, for two reasons. A second
+/// formatter can only ever disagree with the one the editor runs, and each would undo the other
+/// every turn. And that CLI mode turns out to be unusable for checking anything: Biome silently
+/// disables `--reporter` when reading from stdin, so it returns the fixed source and nothing else —
+/// including for a file that does not parse, which it will happily rewrite and still call clean.
+///
+/// Nothing here can fail the write. A formatter that breaks a turn is worse than an unformatted
+/// file, and whatever it could not fix is reported by the diagnostics check a moment later.
+async fn format_with_project(
     project: &Entity<Project>,
-    project_path: &ProjectPath,
     buffer: &Entity<Buffer>,
     cx: &mut AsyncApp,
-) -> Vec<verify::Finding> {
-    let file_name = project_path.path.file_name().unwrap_or_default();
-    if !biome::applies_to(file_name) {
-        return Vec::new();
-    }
-
-    let root = project.read_with(cx, |project, cx| {
-        project
-            .worktree_for_id(project_path.worktree_id, cx)
-            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+) {
+    let formatted = project.update(cx, |project, cx| {
+        project.format(
+            HashSet::from_iter([buffer.clone()]),
+            LspFormatTarget::Buffers,
+            // Into the undo history, so one ctrl-z takes back the formatting as well as the edit.
+            true,
+            FormatTrigger::Manual,
+            cx,
+        )
     });
-    let Some(root) = root else {
-        return Vec::new();
-    };
 
-    // Looking for the binary touches the filesystem, so it does not happen on the foreground.
-    let found = cx
-        .background_spawn({
-            let root = root.clone();
-            async move { biome::locate(&root) }
-        })
-        .await;
-    let Some(binary) = found else {
-        return Vec::new();
-    };
-
-    let relative = project_path.path.as_unix_str().to_owned();
-    let source = buffer_text(buffer, cx).await;
-    let executor = cx.background_executor().clone();
-
-    let outcome = match biome::check(binary, root, relative, source.clone(), &executor).await {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            log::warn!("cowork: biome could not check {file_name}: {error:#}");
-            return Vec::new();
-        }
-    };
-
-    if let Some(fixed) = outcome.fixed
-        && fixed != source
-        && !fixed.trim().is_empty()
-    {
-        buffer.update(cx, |buffer, cx| buffer.set_text(fixed, cx));
+    if let Err(error) = formatted.await {
+        log::warn!("cowork: could not format the agent's change: {error:#}");
     }
-    outcome.findings
 }
 
 /// Turning a rope into a `String` is real work; it does not belong on the foreground thread.

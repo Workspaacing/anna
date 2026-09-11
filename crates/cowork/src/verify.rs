@@ -575,7 +575,7 @@ mod tests {
 
     fn settings(secret_scan: bool) -> VerificationSettings {
         VerificationSettings {
-            biome: true,
+            format: true,
             diagnostics: true,
             secret_scan,
             dependency_audit: true,
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn no_check_is_enabled_means_no_work() {
         let none = VerificationSettings {
-            biome: false,
+            format: false,
             diagnostics: false,
             secret_scan: false,
             dependency_audit: false,
