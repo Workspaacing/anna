@@ -5577,7 +5577,7 @@ fn cowork_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("Threads"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Default Model",
-                description: "The provider and model new threads start on, named with models.dev identifiers. The provider's API key is read from the environment variable models.dev declares for it, and is never stored by Wu.",
+                description: "The provider and model new threads start on, named with models.dev identifiers. Connect a provider under Catalog > Providers; its API key is kept in the operating system's credential store, never in settings.json.",
                 field: Box::new(SettingField {
                     json_path: Some("cowork.default_model"),
                     pick: |settings_content| {
@@ -5679,6 +5679,116 @@ fn cowork_page() -> SettingsPage {
         ]
     }
 
+    fn verification_section() -> [SettingsPageItem; 5] {
+        [
+            SettingsPageItem::SectionHeader("Verification"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Format And Fix With Biome",
+                description: "After the agent writes JavaScript, TypeScript, JSX, JSON or CSS, run the project's own Biome over it and apply what it can fix. Uses the Biome in node_modules or on PATH, so it obeys your biome.json and matches what CI runs. Silent in projects that do not use Biome.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.verification.biome"),
+                    pick: |settings_content| {
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .verification
+                            .as_ref()?
+                            .biome
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .verification
+                            .get_or_insert_default()
+                            .biome = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Report Diagnostics To The Agent",
+                description: "After the agent changes a file, hand it the errors and warnings your language servers report for that file, so it can correct them on its next step. This is the same analysis the editor already shows you.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.verification.diagnostics"),
+                    pick: |settings_content| {
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .verification
+                            .as_ref()?
+                            .diagnostics
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .verification
+                            .get_or_insert_default()
+                            .diagnostics = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Block Committed Secrets",
+                description: "Refuse to let the agent write an API key, access token or private key into the project, and tell it to read the value from the environment instead. Judges only the text the agent adds, never what was already in the file.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.verification.secret_scan"),
+                    pick: |settings_content| {
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .verification
+                            .as_ref()?
+                            .secret_scan
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .verification
+                            .get_or_insert_default()
+                            .secret_scan = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Check Dependencies For Advisories",
+                description: "When the agent edits a manifest or lockfile (Cargo, npm, PyPI or Go), check its packages against the OSV database — the same RustSec, GitHub Advisory and PyPA data Dependabot draws on — and report anything vulnerable along with the version that fixes it. Sends only package names and versions to osv.dev.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.verification.dependency_audit"),
+                    pick: |settings_content| {
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .verification
+                            .as_ref()?
+                            .dependency_audit
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .verification
+                            .get_or_insert_default()
+                            .dependency_audit = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     fn catalog_section() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::SectionHeader("Catalog"),
@@ -5716,7 +5826,12 @@ fn cowork_page() -> SettingsPage {
 
     SettingsPage {
         title: "Cowork",
-        items: concat_sections![threads_section(), catalog_section(), panel_section()],
+        items: concat_sections![
+            threads_section(),
+            catalog_section(),
+            verification_section(),
+            panel_section()
+        ],
     }
 }
 

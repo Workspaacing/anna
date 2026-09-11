@@ -436,3 +436,4 @@ Deep dives live beside this file in `references/`. Read the one matching your ta
 | `references/07-extensions-dap.md` | Wasm extension host, WIT versioning, capabilities, registry network, grammars, DAP |
 | `references/08-testing.md` | `#[gpui::test]` semantics, `FakeFs`, marked text, 5 copy-paste templates, commands, benchmarks |
 | `references/09-infra-crates.md` | `util`/`collections`/`fs`/`paths`/`db`/`zlog` deep dives, crate reference table, Windows paths |
+| `references/10-agent-apis.md` | Verified signatures for editing buffers, reading diagnostics, running processes and spawning terminals — what `crates/cowork` is built on |

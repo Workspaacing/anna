@@ -122,6 +122,21 @@
     "max_output_tokens": 4096,
     // Models hidden from Cowork's model selector, as "provider/model" identifiers.
     "disabled_models": [],
+    // The checks Cowork runs over its own agents' work. Every one of them is
+    // built into Wu and none of them consults a model, so leaving them on
+    // costs nothing per message.
+    "verification": {
+      // Format and lint JavaScript, TypeScript, JSX, JSON and CSS with Biome.
+      "biome": true,
+      // Report the diagnostics the project's language servers produce for a
+      // file the agent changed.
+      "diagnostics": true,
+      // Refuse to write API keys, tokens and private keys into the project.
+      "secret_scan": true,
+      // Check edited dependency manifests against the RustSec and OSV
+      // advisory databases.
+      "dependency_audit": true,
+    },
   },
   // Image viewer settings
   "image_viewer": {

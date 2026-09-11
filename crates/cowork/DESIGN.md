@@ -28,6 +28,25 @@ several editors already speak. Naming our events after it costs nothing now and 
 The reverse order — a bespoke event model first, ACP bolted on after — is the one sequencing that
 throws work away.
 
+## Where this stands
+
+Phases 1 and 2 are built, minus `glob`, `grep` and `bash`. Phase 3 is the next thing that matters,
+because `bash` cannot ship without it.
+
+| | |
+| --- | --- |
+| 1. The loop | **built** — three wire formats, `MAX_STEPS`, tool calls persisted on the thread |
+| 2. Tools | **partly** — `read`, `list`, `write`, `edit` through `Project` and `Buffer`. No `glob`, `grep` or `bash` |
+| Verification | **built, not in the original plan** — secrets, Biome, diagnostics and dependency advisories after every change, each with a toggle, none costing tokens |
+| 3. Permission broker | not started |
+| 4. The panel | history, search and the model picker exist; tool-call cards and diff review do not |
+| 5. Undo | not started — edits join the buffer's own undo, but there is no turn-granular revert |
+| 6. Extensibility | not started |
+
+The verification pipeline arrived ahead of the plan because it is what makes an agent's edits
+trustworthy without a human reading every one: the model is told what it broke and fixes it on the
+next step, for no tokens. See the README for what it does and what it deliberately does not.
+
 ## Phases
 
 ### 1. The loop

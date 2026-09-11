@@ -5,11 +5,15 @@
 //! listings, the language servers for diagnostics — so the agent sees the same state the user does,
 //! including unsaved edits, and so remote projects work without a second code path.
 
-use anyhow::{Context as _, Result, anyhow};
-use gpui::{App, AppContext as _, Entity, Task, WeakEntity};
-use project::Project;
+use crate::{biome, cowork_settings::CoworkSettings, verify};
+use anyhow::{Context as _, Result, anyhow, bail};
+use gpui::{App, AppContext as _, AsyncApp, Entity, Task, WeakEntity};
+use language::Buffer;
+use project::{Project, ProjectPath};
 use serde_json::{Value, json};
+use settings::Settings as _;
 use std::sync::Arc;
+use util::{paths::PathStyle, rel_path::RelPath};
 use workspace::Workspace;
 
 /// How a tool call reads to the user, and how the permission broker will classify it.
@@ -64,16 +68,36 @@ pub trait Tool: Send + Sync + 'static {
     fn run(&self, input: Value, context: ToolContext, cx: &mut App) -> Task<Result<ToolOutput>>;
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
 }
 
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::default_tools()
+    }
+}
+
 impl ToolRegistry {
-    /// The tools available to a thread today.
+    /// The tools available to a thread.
     ///
-    /// Read-only for now: nothing here can change a file or run a command, so no permission broker
-    /// is needed yet. Anything that mutates the user's project or shell waits for one.
+    /// `write` and `edit` change the user's files. They are safe to offer without a permission
+    /// prompt because every change lands in a buffer the editor owns: it shows up in the open
+    /// editor, in the git gutter, and in the undo history, so nothing happens that the user cannot
+    /// see and reverse. Running commands is a different matter and is not here.
+    pub fn default_tools() -> Self {
+        Self {
+            tools: vec![
+                Arc::new(ReadTool),
+                Arc::new(ListTool),
+                Arc::new(WriteTool),
+                Arc::new(EditTool),
+            ],
+        }
+    }
+
+    /// Only the tools that cannot change anything.
     pub fn read_only() -> Self {
         Self {
             tools: vec![Arc::new(ReadTool), Arc::new(ListTool)],
@@ -120,6 +144,382 @@ fn string_argument(input: &Value, name: &str) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("missing required string argument `{name}`"))
+}
+
+/// What a tool wants to do to a file's text.
+enum Change {
+    /// Replace everything.
+    Whole(String),
+    /// Replace one exact occurrence, or every occurrence.
+    Splice {
+        old: String,
+        new: String,
+        all: bool,
+    },
+}
+
+impl Change {
+    /// The text the agent is introducing, which is what the secret scan judges.
+    ///
+    /// Deliberately not the resulting file: scanning that would flag a credential the user put
+    /// there themselves and lock the agent out of the file entirely. The agent is answerable for
+    /// what it writes, not for what was already there.
+    fn added_text(&self) -> &str {
+        match self {
+            Change::Whole(text) => text,
+            Change::Splice { new, .. } => new,
+        }
+    }
+}
+
+/// Resolves a path that may not exist yet.
+///
+/// `find_project_path` only invents a path for something that is absent when the path carries a
+/// worktree root name, because with several folders open a bare `src/main.rs` is genuinely
+/// ambiguous. With exactly one folder open there is nothing to be ambiguous about, so resolve it.
+fn resolve_for_create(project: &Project, path: &str, cx: &App) -> Result<ProjectPath> {
+    if let Some(project_path) = project.find_project_path(path, cx) {
+        return Ok(project_path);
+    }
+
+    let path_style = project.path_style(cx);
+    let mut worktrees = project.visible_worktrees(cx);
+    let (Some(worktree), None) = (worktrees.next(), worktrees.next()) else {
+        bail!(
+            "`{path}` did not resolve to a file in any open folder. With more than one folder open, \
+             prefix the path with the folder's name."
+        );
+    };
+
+    if matches!(path_style, PathStyle::Windows) && path.contains(':') || path.starts_with('/') {
+        bail!("`{path}` is outside every folder open in this project");
+    }
+
+    let relative = RelPath::new(path.as_ref(), path_style)
+        .with_context(|| format!("`{path}` is not a usable relative path"))?;
+    Ok(ProjectPath {
+        worktree_id: worktree.read(cx).id(),
+        path: relative.into_arc(),
+    })
+}
+
+/// Applies a change to a file, saves it, and reports what the project's own checks make of it.
+///
+/// Everything goes through a `Buffer` rather than the filesystem, so the change appears in an open
+/// editor immediately, joins the undo history, and works the same on a remote project.
+async fn apply(
+    project: Entity<Project>,
+    path: String,
+    change: Change,
+    cx: &mut AsyncApp,
+) -> Result<ToolOutput> {
+    let (settings, http) = cx.update(|cx| {
+        (
+            CoworkSettings::get_global(cx).verification,
+            cx.http_client(),
+        )
+    });
+
+    // Refuse before anything is written. A credential that reaches the buffer is already in the
+    // undo history and moments away from a commit.
+    let blocked = verify::gate(&settings, change.added_text());
+    if !blocked.is_empty() {
+        let report = verify::VerificationReport { findings: blocked };
+        bail!("refused to write to {path}.\n{}", report.to_model(&path));
+    }
+
+    let project_path = project.update(cx, |project, cx| resolve_for_create(project, &path, cx))?;
+    let existed = project.read_with(cx, |project, cx| {
+        project
+            .worktree_for_id(project_path.worktree_id, cx)
+            .and_then(|worktree| worktree.read(cx).entry_for_path(&project_path.path).cloned())
+            .is_some()
+    });
+
+    if !existed {
+        // `Fs::write` creates the parent directories, so a nested path needs no preparation.
+        project
+            .update(cx, |project, cx| {
+                project.create_entry(project_path.clone(), false, cx)
+            })
+            .await
+            .with_context(|| format!("creating {path}"))?;
+    }
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_buffer(project_path.clone(), cx)
+        })
+        .await
+        .with_context(|| format!("opening {path}"))?;
+
+    let summary = edit_buffer(&buffer, &change, cx).await?;
+
+    // Before saving, so the file lands formatted and auto-fixed rather than being rewritten a
+    // moment later.
+    let mut findings = if settings.biome {
+        run_biome(&project, &project_path, &buffer, cx).await
+    } else {
+        Vec::new()
+    };
+
+    project
+        .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+        .await
+        .with_context(|| format!("saving {path}"))?;
+
+    let file_name = project_path
+        .path
+        .file_name()
+        .unwrap_or_default()
+        .to_owned();
+    let saved = buffer_text(&buffer, cx).await;
+    findings.extend(verify::inspect(settings, http, buffer, file_name, saved, cx).await.findings);
+
+    let mut content = format!("{summary} in {path}.");
+    let report = verify::VerificationReport { findings };
+    if !report.is_empty() {
+        content.push('\n');
+        content.push_str(&report.to_model(&path));
+    }
+
+    Ok(ToolOutput::new(content, format!("{path} · {summary}")))
+}
+
+/// Hands the file to the project's own Biome and takes back whatever it corrected.
+///
+/// Silent when the project does not use Biome, which is every project that is not JavaScript and
+/// many that are. Nothing here can fail the write: a formatter that breaks a turn is worse than a
+/// file that is not formatted.
+async fn run_biome(
+    project: &Entity<Project>,
+    project_path: &ProjectPath,
+    buffer: &Entity<Buffer>,
+    cx: &mut AsyncApp,
+) -> Vec<verify::Finding> {
+    let file_name = project_path.path.file_name().unwrap_or_default();
+    if !biome::applies_to(file_name) {
+        return Vec::new();
+    }
+
+    let root = project.read_with(cx, |project, cx| {
+        project
+            .worktree_for_id(project_path.worktree_id, cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+    });
+    let Some(root) = root else {
+        return Vec::new();
+    };
+
+    // Looking for the binary touches the filesystem, so it does not happen on the foreground.
+    let found = cx
+        .background_spawn({
+            let root = root.clone();
+            async move { biome::locate(&root) }
+        })
+        .await;
+    let Some(binary) = found else {
+        return Vec::new();
+    };
+
+    let relative = project_path.path.as_unix_str().to_owned();
+    let source = buffer_text(buffer, cx).await;
+    let executor = cx.background_executor().clone();
+
+    let outcome = match biome::check(binary, root, relative, source.clone(), &executor).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            log::warn!("cowork: biome could not check {file_name}: {error:#}");
+            return Vec::new();
+        }
+    };
+
+    if let Some(fixed) = outcome.fixed
+        && fixed != source
+        && !fixed.trim().is_empty()
+    {
+        buffer.update(cx, |buffer, cx| buffer.set_text(fixed, cx));
+    }
+    outcome.findings
+}
+
+/// Turning a rope into a `String` is real work; it does not belong on the foreground thread.
+async fn buffer_text(buffer: &Entity<Buffer>, cx: &mut AsyncApp) -> String {
+    let snapshot = buffer.read_with(cx, |buffer, _| buffer.snapshot());
+    cx.background_spawn(async move { snapshot.text() }).await
+}
+
+/// Applies the change, returning a description of what it did.
+async fn edit_buffer(
+    buffer: &Entity<Buffer>,
+    change: &Change,
+    cx: &mut AsyncApp,
+) -> Result<String> {
+    match change {
+        Change::Whole(text) => {
+            let lines = text.lines().count();
+            let text = text.clone();
+            buffer.update(cx, |buffer, cx| buffer.set_text(text, cx));
+            Ok(format!("wrote {lines} lines"))
+        }
+        Change::Splice { old, new, all } => {
+            let text = buffer_text(buffer, cx).await;
+            let ranges = occurrences(&text, old);
+
+            // An edit tool is only trustworthy if it refuses to guess. Both of these mean the model
+            // must look again, and saying which is which is what lets it recover in one step.
+            match ranges.len() {
+                0 => bail!(
+                    "the text to replace does not appear in the file. Read it again; it may have \
+                     changed, or the whitespace may differ."
+                ),
+                count if count > 1 && !all => bail!(
+                    "the text to replace appears {count} times. Include enough surrounding lines \
+                     to make it unique, or pass `replace_all`."
+                ),
+                _ => {}
+            }
+
+            let replaced = ranges.len();
+            let edits = ranges
+                .into_iter()
+                .map(|range| (range, new.clone()))
+                .collect::<Vec<_>>();
+            buffer.update(cx, |buffer, cx| buffer.edit(edits, None, cx));
+
+            Ok(match replaced {
+                1 => "replaced 1 occurrence".to_owned(),
+                count => format!("replaced {count} occurrences"),
+            })
+        }
+    }
+}
+
+/// Every byte range in `text` holding `needle`, without overlaps.
+fn occurrences(text: &str, needle: &str) -> Vec<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    text.match_indices(needle)
+        .map(|(start, matched)| start..start + matched.len())
+        .collect()
+}
+
+struct WriteTool;
+
+impl Tool for WriteTool {
+    fn name(&self) -> &'static str {
+        "write"
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::Edit
+    }
+
+    fn description(&self) -> &'static str {
+        "Write a file, creating it if it does not exist and replacing its entire contents if it \
+         does. Parent directories are created as needed. Prefer `edit` for changing part of an \
+         existing file; this replaces everything. The change appears in the editor and can be \
+         undone by the user."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file, absolute or relative to a project folder.",
+                },
+                "contents": {
+                    "type": "string",
+                    "description": "The complete new contents of the file.",
+                },
+            },
+            "required": ["path", "contents"],
+        })
+    }
+
+    fn run(&self, input: Value, context: ToolContext, cx: &mut App) -> Task<Result<ToolOutput>> {
+        let arguments = (
+            string_argument(&input, "path"),
+            string_argument(&input, "contents"),
+        );
+        let (path, contents) = match arguments {
+            (Ok(path), Ok(contents)) => (path, contents),
+            (Err(error), _) | (_, Err(error)) => return Task::ready(Err(error)),
+        };
+
+        let project = context.project;
+        cx.spawn(async move |cx| apply(project, path, Change::Whole(contents), cx).await)
+    }
+}
+
+struct EditTool;
+
+impl Tool for EditTool {
+    fn name(&self) -> &'static str {
+        "edit"
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::Edit
+    }
+
+    fn description(&self) -> &'static str {
+        "Replace an exact run of text in a file. `old_text` must match the file byte for byte, \
+         including indentation, and must appear exactly once unless `replace_all` is set — include \
+         enough surrounding lines to make it unique. Read the file first; editing against \
+         remembered contents is how these edits go wrong."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file, absolute or relative to a project folder.",
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": "The exact text to replace, copied from the file.",
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "The text to put in its place. Empty deletes the old text.",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence rather than requiring exactly one.",
+                },
+            },
+            "required": ["path", "old_text", "new_text"],
+        })
+    }
+
+    fn run(&self, input: Value, context: ToolContext, cx: &mut App) -> Task<Result<ToolOutput>> {
+        let arguments = (
+            string_argument(&input, "path"),
+            string_argument(&input, "old_text"),
+            string_argument(&input, "new_text"),
+        );
+        let (path, old, new) = match arguments {
+            (Ok(path), Ok(old), Ok(new)) => (path, old, new),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                return Task::ready(Err(error));
+            }
+        };
+        let all = input
+            .get("replace_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let project = context.project;
+        cx.spawn(async move |cx| {
+            apply(project, path, Change::Splice { old, new, all }, cx).await
+        })
+    }
 }
 
 struct ReadTool;
@@ -246,8 +646,7 @@ fn list_directory(project: &Project, path: &str, cx: &App) -> Result<ToolOutput>
 
     let shown = project_path.path.display(path_style).to_string();
     let summary = format!("{shown} · {} entries", entries.len());
-    Ok(ToolOutput::new(entries.join("
-"), summary))
+    Ok(ToolOutput::new(entries.join("\n"), summary))
 }
 
 #[cfg(test)]
@@ -282,6 +681,62 @@ mod tests {
         assert!(registry.get("read").is_some());
         assert!(registry.get("list").is_some());
         assert!(registry.get("no-such-tool").is_none());
+    }
+
+    #[test]
+    fn the_default_registry_can_change_files_and_the_read_only_one_cannot() {
+        let default = ToolRegistry::default_tools();
+        assert!(default.get("write").is_some());
+        assert!(default.get("edit").is_some());
+
+        let read_only = ToolRegistry::read_only();
+        assert!(read_only.get("write").is_none());
+        assert!(read_only.get("edit").is_none());
+        assert!(read_only.get("read").is_some());
+    }
+
+    #[test]
+    fn a_change_is_judged_on_what_it_adds_not_on_the_whole_file() {
+        // The user's own credentials are not the agent's to be blamed for; scanning the result
+        // would lock the agent out of any file that ever contained one.
+        let splice = Change::Splice {
+            old: "KEY = \"AKIAIOSFODNN7EXAMPLE\"".into(),
+            new: "KEY = env(\"AWS_KEY\")".into(),
+            all: false,
+        };
+
+        assert_eq!(splice.added_text(), "KEY = env(\"AWS_KEY\")");
+        assert_eq!(Change::Whole("all of it".into()).added_text(), "all of it");
+    }
+
+    #[test]
+    fn occurrences_finds_every_non_overlapping_match() {
+        assert_eq!(occurrences("a b a", "a"), vec![0..1, 4..5]);
+        assert!(occurrences("abc", "z").is_empty());
+        assert!(
+            occurrences("hello", "").is_empty(),
+            "an empty needle matches everywhere and means nothing"
+        );
+    }
+
+    #[test]
+    fn occurrences_are_byte_ranges_that_survive_multibyte_text() {
+        let text = "let a = \"café\";\nlet b = \"café\";\n";
+        let found = occurrences(text, "café");
+
+        assert_eq!(found.len(), 2);
+        for range in found {
+            assert_eq!(&text[range], "café", "a range must land on a char boundary");
+        }
+    }
+
+    #[test]
+    fn the_edit_tool_tells_the_model_how_to_make_a_match_unique() {
+        // The wording is the interface: a model that is told only "failed" retries the same edit.
+        let description = EditTool.description();
+
+        assert!(description.contains("exactly once"), "{description}");
+        assert!(description.contains("Read the file first"), "{description}");
     }
 
     #[test]

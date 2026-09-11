@@ -98,7 +98,7 @@ impl CoworkThreadView {
             store,
             workspace,
             project,
-            tools: ToolRegistry::read_only(),
+            tools: ToolRegistry::default_tools(),
             error: None,
             completion: None,
         }

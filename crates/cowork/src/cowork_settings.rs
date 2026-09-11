@@ -10,6 +10,23 @@ pub struct CoworkSettings {
     pub catalog_url: String,
     pub max_output_tokens: u64,
     pub disabled_models: Vec<String>,
+    pub verification: VerificationSettings,
+}
+
+/// Which of the built-in checks run after the agent changes something.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerificationSettings {
+    pub biome: bool,
+    pub diagnostics: bool,
+    pub secret_scan: bool,
+    pub dependency_audit: bool,
+}
+
+impl VerificationSettings {
+    /// Whether any check at all is enabled, so the turn loop can skip the work entirely.
+    pub fn any_enabled(&self) -> bool {
+        self.biome || self.diagnostics || self.secret_scan || self.dependency_audit
+    }
 }
 
 impl Settings for CoworkSettings {
@@ -23,6 +40,15 @@ impl Settings for CoworkSettings {
             catalog_url: cowork.catalog_url.clone().unwrap(),
             max_output_tokens: cowork.max_output_tokens.unwrap(),
             disabled_models: cowork.disabled_models.clone().unwrap(),
+            verification: {
+                let verification = cowork.verification.as_ref().unwrap();
+                VerificationSettings {
+                    biome: verification.biome.unwrap(),
+                    diagnostics: verification.diagnostics.unwrap(),
+                    secret_scan: verification.secret_scan.unwrap(),
+                    dependency_audit: verification.dependency_audit.unwrap(),
+                }
+            },
         }
     }
 }

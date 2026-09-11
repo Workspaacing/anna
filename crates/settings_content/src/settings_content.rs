@@ -1013,6 +1013,36 @@ pub struct CoworkSettingsContent {
     ///
     /// Default: []
     pub disabled_models: Option<Vec<String>>,
+    /// The checks Cowork runs over the agent's own work.
+    pub verification: Option<CoworkVerificationSettingsContent>,
+}
+
+/// The checks that run after a Cowork agent writes, changes or deletes something.
+///
+/// All of them are compiled into Wu and none of them consults a model, so leaving them on costs
+/// nothing per turn. Findings are handed back to the agent, which fixes them on its next step.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct CoworkVerificationSettingsContent {
+    /// Format and lint JavaScript, TypeScript, JSX, JSON and CSS that the agent writes, using
+    /// Biome. Has no effect on other languages.
+    ///
+    /// Default: true
+    pub biome: Option<bool>,
+    /// Report the diagnostics the project's own language servers and linters produce for a file
+    /// the agent changed. This is the same analysis the editor shows the user.
+    ///
+    /// Default: true
+    pub diagnostics: Option<bool>,
+    /// Refuse to write API keys, tokens and private keys into the project.
+    ///
+    /// Default: true
+    pub secret_scan: Option<bool>,
+    /// Check dependency manifests the agent edits against the RustSec and OSV advisory
+    /// databases, and report known-vulnerable versions.
+    ///
+    /// Default: true
+    pub dependency_audit: Option<bool>,
 }
 
 /// The settings for the image viewer.

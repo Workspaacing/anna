@@ -6,9 +6,11 @@
 //! about.
 //!
 //! Models come exclusively from the [models.dev](https://models.dev) catalog, the same registry the
-//! AI SDK publishes, and provider credentials are read from the environment variables that catalog
-//! declares. Cowork never stores a key.
+//! AI SDK publishes. Provider credentials are kept in the operating system's credential store, never
+//! in `settings.json`.
 
+mod audit;
+mod biome;
 mod catalog;
 mod cowork_panel;
 mod cowork_settings;
@@ -17,13 +19,16 @@ mod provider;
 mod thread;
 mod thread_view;
 mod tool;
+mod verify;
 
+pub use audit::{Advisory, Package};
 pub use catalog::{Catalog, CatalogEntry, ModelRef, POPULAR_PROVIDERS, Support};
 pub use cowork_panel::CoworkPanel;
-pub use cowork_settings::CoworkSettings;
+pub use cowork_settings::{CoworkSettings, VerificationSettings};
 pub use thread::{ApiKeyMode, CatalogState, CoworkStore, ModelRow, ProviderRow};
 pub use thread_view::CoworkThreadView;
 pub use tool::{Tool, ToolKind, ToolOutput, ToolRegistry};
+pub use verify::{Finding, Severity, VerificationReport};
 
 use gpui::{App, actions};
 use workspace::Workspace;
