@@ -13,6 +13,9 @@ mod audit;
 mod catalog;
 mod cowork_panel;
 mod cowork_settings;
+mod image;
+mod inline_calls;
+mod github_tools;
 mod model_selector;
 mod new_thread_dialog;
 mod permission;
@@ -61,6 +64,15 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<CoworkPanel>(window, cx);
         });
+        workspace.register_action(
+            |workspace, action: &wu_actions::StartThreadWith, window, cx| {
+                let Some(panel) = workspace.panel::<CoworkPanel>(cx) else {
+                    return;
+                };
+                let prompt = action.prompt.clone();
+                panel.update(cx, |panel, cx| panel.start_thread_with(prompt, window, cx));
+            },
+        );
         workspace.register_action(|workspace, _: &NewThread, window, cx| {
             let Some(panel) = workspace.panel::<CoworkPanel>(cx) else {
                 return;

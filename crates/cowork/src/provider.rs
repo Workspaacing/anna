@@ -381,13 +381,48 @@ fn anthropic_tools(request: &CompletionRequest) -> Vec<Value> {
         .collect()
 }
 
+/// A user turn's blocks: the pictures first, then the words.
+///
+/// Anthropic documents that an image placed *before* the text referring to it gives better results
+/// than the other order. Neither of the other two formats cares, so all three put images first —
+/// one rule about how a turn is shaped is easier to keep right than three.
+fn anthropic_user_content(message: &Message) -> Vec<Value> {
+    // With more than one picture each is introduced by name, which is what Anthropic's own
+    // guidance asks for: it gives the model something to refer to, so "the second one" in a
+    // follow-up means something. A single image needs no label and reads better without one.
+    let label_them = message.attachments.len() > 1;
+
+    let mut content = Vec::new();
+    for (index, attachment) in message.attachments.iter().enumerate() {
+        if label_them {
+            content.push(json!({ "type": "text", "text": format!("Image {}:", index + 1) }));
+        }
+        content.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": attachment.media_type,
+                "data": attachment.data,
+            },
+        }));
+    }
+
+    // An empty text block is rejected outright, so it is only included when there is something in
+    // it — unless it is all there is, which leaves a message with no attachments shaped exactly as
+    // it was before images existed.
+    if !message.text.is_empty() || content.is_empty() {
+        content.push(json!({ "type": "text", "text": message.text }));
+    }
+    content
+}
+
 fn anthropic_body(request: &CompletionRequest) -> Value {
     let mut messages = Vec::new();
     for message in &request.messages {
         match message.role {
             Role::User => messages.push(json!({
                 "role": "user",
-                "content": [{ "type": "text", "text": message.text }],
+                "content": anthropic_user_content(message),
             })),
             Role::Assistant => {
                 let mut content = Vec::new();
@@ -439,6 +474,31 @@ fn anthropic_body(request: &CompletionRequest) -> Value {
     body
 }
 
+/// A user turn's parts, with any images inlined ahead of the text.
+///
+/// The field names are camelCase to match the rest of this encoder. Gemini is a protobuf service
+/// and its JSON mapping accepts either spelling, which the existing `functionCall` already relies
+/// on — `inline_data` would work equally well, and consistency is the only thing deciding it.
+fn google_user_parts(message: &Message) -> Vec<Value> {
+    let mut parts = message
+        .attachments
+        .iter()
+        .map(|attachment| {
+            json!({
+                "inlineData": {
+                    "mimeType": attachment.media_type,
+                    "data": attachment.data,
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if !message.text.is_empty() || parts.is_empty() {
+        parts.push(json!({ "text": message.text }));
+    }
+    parts
+}
+
 /// Gemini differs from both other formats in three ways that matter: the assistant role is
 /// called `model`, tool calls and their results are *parts* of a message rather than a field on
 /// it, and a result is matched to its call by function name rather than by an id.
@@ -448,7 +508,7 @@ fn google_body(request: &CompletionRequest) -> Value {
         match message.role {
             Role::User => contents.push(json!({
                 "role": "user",
-                "parts": [{ "text": message.text }],
+                "parts": google_user_parts(message),
             })),
             Role::Assistant => {
                 let mut parts = Vec::new();
@@ -512,6 +572,38 @@ fn google_body(request: &CompletionRequest) -> Value {
     body
 }
 
+/// A user turn's content, which stays a plain string until there is a picture in it.
+///
+/// The array form is the one that carries images, and it is also the form the long tail of
+/// OpenAI-compatible servers in the catalog is least likely to have implemented. Sending a message
+/// with no attachments as a bare string, exactly as before, means adding image support cannot
+/// break a provider that never sees an image.
+fn openai_user_content(message: &Message) -> Value {
+    if message.attachments.is_empty() {
+        return json!(message.text);
+    }
+
+    let mut parts = message
+        .attachments
+        .iter()
+        .map(|attachment| {
+            json!({
+                "type": "image_url",
+                // A data URL, not a link: the bytes travel with the request. `image_url` is an
+                // object even though it holds a single field, which is the shape servers check.
+                "image_url": {
+                    "url": format!("data:{};base64,{}", attachment.media_type, attachment.data),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if !message.text.is_empty() {
+        parts.push(json!({ "type": "text", "text": message.text }));
+    }
+    json!(parts)
+}
+
 fn openai_body(request: &CompletionRequest) -> Value {
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
@@ -520,7 +612,10 @@ fn openai_body(request: &CompletionRequest) -> Value {
 
     for message in &request.messages {
         match message.role {
-            Role::User => messages.push(json!({ "role": "user", "content": message.text })),
+            Role::User => messages.push(json!({
+                "role": "user",
+                "content": openai_user_content(message),
+            })),
             Role::Assistant => {
                 let mut entry = json!({ "role": "assistant", "content": message.text });
                 if !message.tool_calls.is_empty() {

@@ -847,9 +847,14 @@ impl CoworkStore {
             messages: Vec::new(),
         };
 
-        self.threads.insert(0, thread.metadata.clone());
-        cx.emit(CoworkStoreEvent::ThreadsChanged);
-        cx.notify();
+        // Written to disk here, rather than when the first reply arrives.
+        //
+        // A thread used to reach the database only through `persist`, which runs on send and when
+        // a turn ends. So a session the user created and then left alone — or closed the window on
+        // before a reply landed — had never been written at all, and was simply gone at the next
+        // launch, with nothing to explain where it went. Creating a session is a deliberate act
+        // that costs a dialog; it should outlive the window it was created in.
+        self.save_thread(thread.clone(), cx);
 
         thread
     }

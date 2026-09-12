@@ -173,6 +173,25 @@ impl CoworkPanel {
     /// Model and folder are both awkward to change after the fact — one is kept for the whole
     /// conversation, the other is where every command runs — so they are asked together, before
     /// anything exists. Cancelling starts nothing.
+    /// Opens a thread that already has something to work on, and starts it.
+    ///
+    /// No dialog: the caller is handing over a specific piece of work, and asking which model and
+    /// which folder at that moment would be asking a question whose answer is already the obvious
+    /// one — the model last used, and the project this window has open.
+    pub fn start_thread_with(
+        &mut self,
+        prompt: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self.store.read(cx).model_for_new_thread() else {
+            self.report_no_model(cx);
+            return;
+        };
+        let folder = self.project_folders(cx).into_iter().next();
+        self.open_thread_in_with(model, folder, Some(prompt), window, cx);
+    }
+
     pub fn start_new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(suggested) = self.store.read(cx).model_for_new_thread() else {
             self.report_no_model(cx);
@@ -214,6 +233,21 @@ impl CoworkPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_thread_in_with(model, project, None, window, cx);
+    }
+
+    /// Opens a thread, optionally with its first message already written and sent.
+    ///
+    /// The message is handed to the view before the item is added to the pane, so the first thing
+    /// the user sees is a thread already working — not an empty box that fills in a frame later.
+    fn open_thread_in_with(
+        &mut self,
+        model: ModelRef,
+        project: Option<String>,
+        opening_message: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -232,6 +266,9 @@ impl CoworkPanel {
             let view = cx.new(|cx| {
                 CoworkThreadView::new(thread, store, workspace_handle, project, fs, window, cx)
             });
+            if let Some(message) = opening_message {
+                view.update(cx, |view, cx| view.send_now(message, window, cx));
+            }
             workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
         });
     }

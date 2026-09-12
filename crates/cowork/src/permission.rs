@@ -38,6 +38,13 @@ pub struct PermissionRequest {
     pub title: SharedString,
     /// The specifics the user judges — for a command, the command itself.
     pub detail: SharedString,
+    /// Whether this must be asked even when the user has turned on approving everything.
+    ///
+    /// Approving everything is a promise about *this project*: the user made it so an agent could
+    /// work without being interrupted about files they had already chosen to open. A command that
+    /// reaches outside those folders is not what they agreed to, so it is asked anyway — the
+    /// blanket approval is deliberately not blanket at the project boundary.
+    pub always_ask: bool,
     /// What "always" would cover.
     ///
     /// For a command this is the program name, so allowing `cargo` once does not also allow `rm`.
@@ -85,13 +92,17 @@ impl PermissionBroker {
     ) -> oneshot::Receiver<Decision> {
         let (sender, receiver) = oneshot::channel();
 
-        if CoworkSettings::get_global(cx).auto_approve {
-            let _ = sender.send(Decision::Always);
-            return receiver;
-        }
-        if self.granted.contains(&request.scope) {
-            let _ = sender.send(Decision::Always);
-            return receiver;
+        // Both shortcuts are skipped for a request that leaves the project: neither the
+        // setting nor an earlier "always" for this program was given with that in view.
+        if !request.always_ask {
+            if CoworkSettings::get_global(cx).auto_approve {
+                let _ = sender.send(Decision::Always);
+                return receiver;
+            }
+            if self.granted.contains(&request.scope) {
+                let _ = sender.send(Decision::Always);
+                return receiver;
+            }
         }
 
         // A request that arrives while another is open replaces it, and the displaced one is

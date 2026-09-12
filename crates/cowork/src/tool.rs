@@ -161,6 +161,12 @@ impl ToolRegistry {
                 Arc::new(WriteTool),
                 Arc::new(EditTool),
                 Arc::new(ShellTool),
+                // Offered whether or not GitHub is connected: a model that can see the tool and
+                // is told to connect gives the user something to do, where a model that cannot
+                // see it just says it has no way to read the issue.
+                Arc::new(crate::github_tools::IssueTool),
+                Arc::new(crate::github_tools::PullRequestTool),
+                Arc::new(crate::github_tools::ChecksTool),
             ],
         }
     }
@@ -545,15 +551,31 @@ impl Tool for ShellTool {
             .and_then(Value::as_str)
             .map(str::to_owned);
 
+        // Collected before spawning: the folders are read from the project entity, which is
+        // only reachable while this still holds `cx`.
+        let folders = context
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+            .collect::<Vec<_>>();
+
         cx.spawn(async move |cx| {
+            let outside = reaches_outside(&command, &folders);
+            let title = match &outside {
+                Some(path) => format!("Run a command that reaches outside this project: {path}"),
+                None => "Run a command".to_owned(),
+            };
+
             let decision = context
                 .permissions
                 .update(cx, |permissions, cx| {
                     permissions.request(
                         PermissionRequest {
                             tool: "shell",
-                            title: "Run a command".into(),
+                            title: title.into(),
                             detail: command.clone().into(),
+                            always_ask: outside.is_some(),
                             scope: command_scope(&command),
                         },
                         cx,
@@ -636,6 +658,100 @@ fn working_directory(
         .read(cx)
         .abs_path()
         .join(project_path.path.as_std_path()))
+}
+
+/// A path in a command that is not inside any folder open in this project.
+///
+/// It is worth being plain about what this is: a heuristic over a string. A shell command is a
+/// program, and no amount of reading its text will catch `eval "$(curl …)"` or a path assembled
+/// from a variable. Anyone treating this as a sandbox would be wrong.
+///
+/// What it does catch is the case that actually happens — a model that means well and writes an
+/// absolute path, or climbs out of the project with `..`, or reaches into the home directory. That
+/// is a mistake rather than an attack, and a mistake is stopped by asking. So a command that trips
+/// this is not refused; it loses the right to be approved in advance, and the user sees it.
+fn reaches_outside(command: &str, folders: &[PathBuf]) -> Option<String> {
+    // Shell metacharacters as well as whitespace, so `rm -rf /tmp/x;ls` is two tokens, not one.
+    for token in command.split(|character: char| {
+        character.is_whitespace() || matches!(character, ';' | '|' | '&' | '(' | ')' | '<' | '>')
+    }) {
+        let token = token.trim_matches(['"', '\'', '`']);
+        if token.is_empty() {
+            continue;
+        }
+
+        // A home-directory shorthand is outside by definition — the project is never `~`.
+        if token == "~"
+            || token.starts_with("~/")
+            || token.starts_with("~\\")
+            || token.starts_with("$HOME")
+            || token.starts_with("${HOME")
+            || token.to_ascii_uppercase().starts_with("%USERPROFILE%")
+            || token.to_ascii_uppercase().starts_with("%APPDATA%")
+            || token.to_ascii_uppercase().starts_with("$ENV:USERPROFILE")
+        {
+            return Some(token.to_owned());
+        }
+
+        // A `..` component may or may not escape, and working out which would mean resolving the
+        // command's own working directory. Treating it as outside asks one extra question in the
+        // rare case it was innocent, which is the right way round to be wrong.
+        if token
+            .split(['/', '\\'])
+            .any(|component| component == "..")
+        {
+            return Some(token.to_owned());
+        }
+
+        if is_absolute_path(token) && !folders.iter().any(|folder| contains(folder, token)) {
+            return Some(token.to_owned());
+        }
+    }
+    None
+}
+
+/// Whether a token is an absolute path in either platform's spelling.
+///
+/// Both spellings are checked whatever this is built for: a model writes `/etc/passwd` on Windows
+/// and `C:\Windows` on Linux often enough, and the answer to either should be to ask.
+fn is_absolute_path(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    // `/usr/bin`, but not the `-rf` of a flag or a bare `/` used as division.
+    if token.starts_with('/') && token.len() > 1 {
+        return true;
+    }
+    // `\\server\share`
+    if token.starts_with("\\\\") {
+        return true;
+    }
+    // `C:\Windows` or `C:/Windows`
+    bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Whether an absolute token names something inside `folder`.
+///
+/// Compared as text rather than through the filesystem, because the path may not exist yet and
+/// because this must not block on disk while the model waits. Separators are unified and Windows
+/// is matched without regard to case, which is how that filesystem actually behaves.
+fn contains(folder: &Path, token: &str) -> bool {
+    let normalize = |path: &str| {
+        let unified = path.replace('\\', "/");
+        let trimmed = unified.trim_end_matches('/').to_owned();
+        if cfg!(windows) {
+            trimmed.to_lowercase()
+        } else {
+            trimmed
+        }
+    };
+
+    let folder = normalize(&folder.to_string_lossy());
+    let token = normalize(token);
+
+    // The separator matters: `/home/a/project-other` must not count as inside `/home/a/project`.
+    token == folder || token.starts_with(&format!("{folder}/"))
 }
 
 /// Runs one command and collects what it said.
@@ -733,7 +849,7 @@ fn describe_run(
 
     match (timed_out, status.map(|status| status.code())) {
         (true, _) => described.push_str(&format!(
-            "The command was still running after {} seconds and was stopped. Its output so far:\n",
+            r"The command was still running after {} seconds and was stopped. Its output so far:\n",
             timeout.as_secs()
         )),
         (false, Some(Some(0))) | (false, None) => {}
@@ -748,7 +864,7 @@ fn describe_run(
         if !described.is_empty() && !described.ends_with('\n') {
             described.push('\n');
         }
-        described.push_str("stderr:\n");
+        described.push_str(r"stderr:\n");
         described.push_str(&tail(err));
     }
 
@@ -1032,6 +1148,109 @@ fn list_directory(project: &Project, path: &str, cx: &App) -> Result<ToolOutput>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn project_folders() -> Vec<PathBuf> {
+        vec![PathBuf::from(if cfg!(windows) {
+            r"C:\Users\USER\Documents\wu-main"
+        } else {
+            "/home/user/wu-main"
+        })]
+    }
+
+    fn inside(relative: &str) -> String {
+        let root = if cfg!(windows) {
+            r"C:\Users\USER\Documents\wu-main"
+        } else {
+            "/home/user/wu-main"
+        };
+        format!("{root}/{relative}")
+    }
+
+    #[test]
+    fn ordinary_work_inside_the_project_is_not_questioned() {
+        // These are what the agent runs all day. If they tripped the check, turning on approving
+        // everything would stop meaning anything and the user would turn the check off.
+        let folders = project_folders();
+        for command in [
+            "cargo build",
+            "npm run test -- --watch=false",
+            "rm -rf target",
+            "git status --short",
+            "node_modules/.bin/biome check src",
+        ] {
+            assert_eq!(reaches_outside(command, &folders), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn an_absolute_path_inside_the_project_is_still_inside() {
+        let folders = project_folders();
+        let command = format!("cat {}", inside("crates/cowork/src/tool.rs"));
+        assert_eq!(reaches_outside(&command, &folders), None, "{command}");
+    }
+
+    #[test]
+    fn deleting_something_outside_the_project_is_caught() {
+        // The thing the user asked about, in the spellings it actually gets written in.
+        let folders = project_folders();
+        for command in [
+            "rm -rf /etc",
+            r"del C:\Windows\System32",
+            "rm -rf ../other-project",
+            "Remove-Item ~/Documents -Recurse",
+            "rm $HOME/.ssh/id_rsa",
+        ] {
+            assert!(
+                reaches_outside(command, &folders).is_some(),
+                "not caught: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sibling_folder_with_a_similar_name_is_outside() {
+        // `/home/user/wu-main-backup` shares a prefix with the project and is a different place.
+        let folders = project_folders();
+        let sibling = if cfg!(windows) {
+            r"rm -rf C:\Users\USER\Documents\wu-main-backup"
+        } else {
+            "rm -rf /home/user/wu-main-backup"
+        };
+        assert!(reaches_outside(sibling, &folders).is_some(), "{sibling}");
+    }
+
+    #[test]
+    fn a_command_hidden_after_a_separator_is_still_read() {
+        // Tokenising on whitespace alone would see `/etc;ls` as one unrecognised word.
+        let folders = project_folders();
+        assert!(reaches_outside("ls;rm -rf /etc", &folders).is_some());
+        assert!(reaches_outside("true && rm -rf /var/log", &folders).is_some());
+    }
+
+    #[test]
+    fn a_quoted_path_is_unwrapped_before_it_is_judged() {
+        let folders = project_folders();
+        assert!(reaches_outside("rm -rf \"/etc/hosts\"", &folders).is_some());
+        assert!(reaches_outside("rm -rf '/etc/hosts'", &folders).is_some());
+    }
+
+    #[test]
+    fn a_flag_is_not_mistaken_for_an_absolute_path() {
+        // `-rf` and a bare `/` in an expression must not read as paths, or everything would ask.
+        let folders = project_folders();
+        assert_eq!(reaches_outside("rm -rf target", &folders), None);
+        assert_eq!(reaches_outside("echo $(( 8 / 2 ))", &folders), None);
+    }
+
+    #[test]
+    fn the_offending_path_is_named_so_the_prompt_can_show_it() {
+        // The user has to see *what* it reaches, not just that it does.
+        let folders = project_folders();
+        assert_eq!(
+            reaches_outside("rm -rf /etc/passwd", &folders).as_deref(),
+            Some("/etc/passwd")
+        );
+    }
 
     #[test]
     fn the_registry_describes_every_tool_to_the_model() {

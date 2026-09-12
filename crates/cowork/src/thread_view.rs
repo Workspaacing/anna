@@ -4,7 +4,8 @@ use crate::{
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
     provider::{
-        self, CompletionEvent, CompletionRequest, Message, Role, StopReason, ToolCall, ToolResult,
+        self, Attachment, CompletionEvent, CompletionRequest, Message, Role, StopReason, ToolCall,
+        ToolResult,
     },
     permission::{Decision, PermissionBroker, PermissionEvent},
     thread::{CoworkStore, Thread, ThreadId},
@@ -43,6 +44,9 @@ struct MessageView {
     reasoning_rendered: Option<Entity<Markdown>>,
     tool_calls: Vec<ToolCall>,
     tool_results: Vec<ToolResult>,
+    /// Pictures sent with this message, shown as chips rather than thumbnails: the transcript is a
+    /// record of what was asked, and a wall of images pushes the conversation off the screen.
+    attachments: Vec<Attachment>,
     /// Assistant prose is rendered as markdown. The entity is built when the message is created or
     /// extended, never during `render`, because updating an entity while rendering panics.
     rendered: Option<Entity<Markdown>>,
@@ -75,6 +79,8 @@ pub struct CoworkThreadView {
     _warm_toolchain: Option<project::lsp_store::OpenLspBufferHandle>,
     _warm_up: Task<()>,
     permissions: Entity<PermissionBroker>,
+    /// Pictures chosen but not yet sent.
+    pending_images: Vec<Attachment>,
     error: Option<SharedString>,
     completion: Option<Task<()>>,
     _permissions: gpui::Subscription,
@@ -112,6 +118,7 @@ impl CoworkThreadView {
                 reasoning_rendered: None,
                 tool_calls: message.tool_calls.clone(),
                 tool_results: message.tool_results.clone(),
+                attachments: message.attachments.clone(),
                 rendered: (message.role == Role::Assistant)
                     .then(|| render_markdown(&message.text, language_registry.clone(), cx)),
             })
@@ -140,6 +147,7 @@ impl CoworkThreadView {
             _warm_toolchain: None,
             _warm_up: Task::ready(()),
             permissions,
+            pending_images: Vec::new(),
             error: None,
             completion: None,
             _permissions: permissions_subscription,
@@ -164,15 +172,37 @@ impl CoworkThreadView {
         }
 
         let prompt = self.input.read(cx).text(cx).trim().to_owned();
-        if prompt.is_empty() {
+        // A picture on its own is a question — "what is wrong with this?" — so an empty box with
+        // something attached still sends.
+        if prompt.is_empty() && self.pending_images.is_empty() {
             return;
         }
 
         self.input.update(cx, |editor, cx| editor.clear(window, cx));
         self.error = None;
+        let images = std::mem::take(&mut self.pending_images);
         self.push_message(Role::User, prompt, cx);
+        if !images.is_empty() {
+            if let Some(stored) = self.thread.messages.last_mut() {
+                stored.attachments = images.clone();
+            }
+            if let Some(shown) = self.messages.last_mut() {
+                shown.attachments = images;
+            }
+        }
         self.start_completion(cx);
         cx.notify();
+    }
+
+    /// Sends a message the user did not type, which is how work arrives from elsewhere.
+    ///
+    /// Goes through the same path as pressing enter rather than a shortcut of its own, so a thread
+    /// opened from GitHub is in every way an ordinary thread from the moment it exists.
+    pub fn send_now(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |editor, cx| {
+            editor.set_text(message, window, cx);
+        });
+        self.submit(&Submit, window, cx);
     }
 
     fn cancel(&mut self, _: &Cancel, _window: &mut Window, cx: &mut Context<Self>) {
@@ -408,6 +438,34 @@ impl CoworkThreadView {
         }
     }
 
+    /// Keeps the newest content in view, but only for a reader who was already there.
+    ///
+    /// The transcript used to scroll to the bottom on every chunk of every token. For someone
+    /// watching a reply arrive that is exactly right, and for someone who has scrolled up to check
+    /// what the agent did four steps ago it is unusable: the view is snatched back to the end
+    /// several times a second, and the harder the agent is working the worse it gets.
+    ///
+    /// So the end is followed only while the reader is at the end. Scrolling up is treated as what
+    /// it is — a decision to read something — and is left alone until they come back down.
+    fn follow_the_end(&mut self) {
+        if self.is_at_the_end() {
+            self.scroll_handle.scroll_to_bottom();
+        }
+    }
+
+    /// Whether the transcript is scrolled to its end, give or take a line.
+    ///
+    /// The offset runs *negative* as the view moves down, so the end is where it reaches the
+    /// negation of the maximum. The tolerance matters: content grows while a reply streams, and a
+    /// reader sitting at the bottom would otherwise be judged to have scrolled up simply because
+    /// a new line arrived between the last frame and this one.
+    fn is_at_the_end(&self) -> bool {
+        const SLACK: gpui::Pixels = px(48.);
+        let offset = self.scroll_handle.offset().y;
+        let max = self.scroll_handle.max_offset().y;
+        (offset + max).abs() <= SLACK
+    }
+
     /// Adds to what the model is working through, which is not part of its answer.
     fn extend_reasoning(&mut self, chunk: &str, cx: &mut Context<Self>) {
         let registry = self.language_registry.clone();
@@ -427,7 +485,7 @@ impl CoworkThreadView {
             }
         }
 
-        self.scroll_handle.scroll_to_bottom();
+        self.follow_the_end();
         cx.notify();
     }
 
@@ -594,9 +652,10 @@ impl CoworkThreadView {
             reasoning_rendered: None,
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
+            attachments: Vec::new(),
             rendered,
         });
-        self.scroll_handle.scroll_to_bottom();
+        self.follow_the_end();
     }
 
     fn extend_last_message(&mut self, chunk: &str, cx: &mut Context<Self>) {
@@ -615,7 +674,7 @@ impl CoworkThreadView {
             rendered.update(cx, |markdown, cx| markdown.append(chunk, cx));
         }
 
-        self.scroll_handle.scroll_to_bottom();
+        self.follow_the_end();
         cx.notify();
     }
 
@@ -824,7 +883,58 @@ impl CoworkThreadView {
             }
         }
 
+        // A model that emitted no structured call may still have asked for one — in the prose.
+        // The text is the only place left to look, and looking costs nothing when it is not there.
+        if calls.is_empty() {
+            let salvaged = this
+                .update(cx, |this, cx| this.salvage_inline_calls(cx))
+                .unwrap_or_default();
+            if !salvaged.is_empty() {
+                return Ok((salvaged, true));
+            }
+        }
+
         Ok((calls, stopped_for_tools))
+    }
+
+    /// Promotes tool calls the model wrote into its answer to real ones.
+    ///
+    /// Returns what it found, and takes the text of the calls out of the message, because leaving
+    /// it would show the user a JSON blob beside the card for the very same call.
+    fn salvage_inline_calls(&mut self, cx: &mut Context<Self>) -> Vec<ToolCall> {
+        let Some(message) = self.messages.last_mut() else {
+            return Vec::new();
+        };
+        let found = crate::inline_calls::find(&message.text);
+        if found.is_empty() {
+            return Vec::new();
+        }
+
+        log::info!(
+            "cowork: recovered {} tool call(s) the model wrote as text",
+            found.len()
+        );
+
+        let calls = found
+            .iter()
+            .map(|inline| inline.call.clone())
+            .collect::<Vec<_>>();
+        let cleaned = crate::inline_calls::strip(&message.text, &found);
+
+        message.text = cleaned.clone();
+        message.tool_calls = calls.clone();
+        message.rendered = (!cleaned.is_empty())
+            .then(|| render_markdown(&cleaned, self.language_registry.clone(), cx));
+
+        // The stored copy has to agree, or the next request sends the raw text back to the model
+        // and it reads its own miswritten call as history.
+        if let Some(stored) = self.thread.messages.last_mut() {
+            stored.text = cleaned;
+            stored.tool_calls = calls.clone();
+        }
+
+        cx.notify();
+        calls
     }
 
     /// Runs the calls a model asked for, concurrently where that is safe.
@@ -955,8 +1065,9 @@ impl CoworkThreadView {
             rendered: None,
             tool_calls: Vec::new(),
             tool_results: results,
+            attachments: Vec::new(),
         });
-        self.scroll_handle.scroll_to_bottom();
+        self.follow_the_end();
         cx.notify();
     }
 
@@ -1372,10 +1483,116 @@ impl CoworkThreadView {
             )
     }
 
+    /// Whether the chosen model can actually look at a picture.
+    ///
+    /// Read from the catalog's `modalities.input` rather than its `attachment` flag, which
+    /// disagrees on hundreds of models. Offering an attachment a model will reject is worse than
+    /// not offering one.
+    fn model_accepts_images(&self, cx: &App) -> bool {
+        self.store
+            .read(cx)
+            .catalog()
+            .model(&self.thread.metadata.model)
+            .is_some_and(|(_, model)| model.accepts_images())
+    }
+
+    /// Asks for files and attaches the ones that are images.
+    ///
+    /// Whatever the user picked is read and checked here rather than at send time, so a file that
+    /// cannot be sent is refused while they are still looking at the picker — not after the
+    /// message has gone.
+    fn choose_images(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        let fs = self.fs.clone();
+
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+
+            let mut attached = Vec::new();
+            let mut refused: Option<String> = None;
+            for path in paths {
+                match fs.load_bytes(&path).await {
+                    Ok(bytes) => match crate::image::attach(&path, bytes) {
+                        Ok(attachment) => attached.push(attachment),
+                        Err(error) => {
+                            // Only the first refusal is reported: picking ten files and being told
+                            // ten times about the same mistake is not ten times as useful.
+                            refused.get_or_insert_with(|| format!("{error}"));
+                        }
+                    },
+                    Err(error) => {
+                        refused
+                            .get_or_insert_with(|| format!("{path:?} could not be read: {error}"));
+                    }
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                this.pending_images.extend(attached);
+                if let Some(refused) = refused {
+                    this.error = Some(refused.into());
+                }
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    /// The pictures waiting to be sent, each with a way to take it back off.
+    fn render_pending_images(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.pending_images.is_empty() {
+            return None;
+        }
+        let colors = cx.theme().colors();
+
+        Some(
+            h_flex()
+                .w_full()
+                .px_3()
+                .pt_2()
+                .gap_1p5()
+                .flex_wrap()
+                .children(self.pending_images.iter().enumerate().map(|(index, image)| {
+                    h_flex()
+                        .px_1p5()
+                        .py_0p5()
+                        .gap_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.element_background)
+                        .child(Icon::new(IconName::Image).size(IconSize::XSmall))
+                        .child(Label::new(image.name.clone()).size(LabelSize::Small))
+                        .child(
+                            IconButton::new(("cowork-unattach", index), IconName::Close)
+                                .icon_size(IconSize::XSmall)
+                                .tooltip(Tooltip::text("Remove"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if index < this.pending_images.len() {
+                                        this.pending_images.remove(index);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                })),
+        )
+    }
+
     fn render_composer(&self, is_streaming: bool, cx: &Context<Self>) -> impl IntoElement {
+        let accepts_images = self.model_accepts_images(cx);
+
         v_flex()
             .w_full()
             .child(Divider::horizontal())
+            .children(self.render_pending_images(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -1383,6 +1600,17 @@ impl CoworkThreadView {
                     .gap_2()
                     .items_end()
                     .bg(cx.theme().colors().panel_background)
+                    .child(
+                        IconButton::new("cowork-attach", IconName::Image)
+                            .icon_size(IconSize::Small)
+                            .disabled(!accepts_images)
+                            .tooltip(Tooltip::text(if accepts_images {
+                                "Attach an image"
+                            } else {
+                                "This model does not accept images"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_images(cx))),
+                    )
                     .child(div().flex_1().child(self.input.clone()))
                     .child(
                         IconButton::new(
