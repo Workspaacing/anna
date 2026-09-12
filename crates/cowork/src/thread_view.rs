@@ -1038,16 +1038,40 @@ impl CoworkThreadView {
             }))
     }
 
-    /// One tool call and whatever it produced, as a single card.
+    /// Everything a turn did with tools, as one table.
     ///
-    /// Its result lives on the next message rather than this one, so it is looked up by position:
-    /// the model asks for calls in order and the loop answers in the same order, which is also how
-    /// several wire formats match the two.
-    fn render_tool_call(
+    /// A card each looked like several unrelated events rather than one turn's work, and each
+    /// carried a line of the result — for `read` that is the first line of the file, which says
+    /// nothing. The outcome is in the tick, what changed is in the `+12 -3`, and neither needs a
+    /// sentence of its own.
+    fn render_tool_calls(
+        &self,
+        message_index: usize,
+        calls: &[ToolCall],
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border_variant)
+            .bg(colors.element_background)
+            .children(calls.iter().enumerate().map(|(position, call)| {
+                self.render_tool_row(message_index, position, call, position > 0, cx)
+            }))
+            .into_any_element()
+    }
+
+    /// One row of that table: what was done, whether it worked, and what it changed.
+    fn render_tool_row(
         &self,
         message_index: usize,
         position: usize,
         call: &ToolCall,
+        divided: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
@@ -1058,27 +1082,32 @@ impl CoworkThreadView {
             .and_then(|next| next.tool_results.get(position));
 
         let (icon, icon_color) = match result {
-            None => (IconName::PlayOutlined, Color::Accent),
+            None => (IconName::ArrowCircle, Color::Accent),
             Some(result) if result.is_error => (IconName::XCircle, Color::Error),
             Some(_) => (IconName::Check, Color::Success),
         };
 
+        let diff = result
+            .map(|result| result.diff.as_str())
+            .filter(|diff| !diff.is_empty());
+        let open = self.expanded_diffs.contains(&(message_index, position));
+
         v_flex()
-            .id(("cowork-tool-call", message_index * 64 + position))
             .w_full()
             .min_w_0()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(colors.border_variant)
-            .bg(colors.element_background)
+            .when(divided, |this| {
+                this.border_t_1().border_color(colors.border_variant)
+            })
             .child(
                 h_flex()
+                    .id(("cowork-tool-row", message_index * 64 + position))
                     .w_full()
                     .min_w_0()
+                    .px_2p5()
+                    .py_1p5()
                     .gap_1p5()
-                    .child(Icon::new(icon).size(IconSize::Small).color(icon_color))
+                    .when(diff.is_some(), |this| this.cursor_pointer())
+                    .child(Icon::new(icon).size(IconSize::XSmall).color(icon_color))
                     .child(
                         div().flex_1().min_w_0().child(
                             Label::new(describe_call(
@@ -1089,46 +1118,42 @@ impl CoworkThreadView {
                             .size(LabelSize::Small)
                             .truncate_middle(),
                         ),
-                    ),
-            )
-            .when_some(result, |this, result| {
-                let open = self.expanded_diffs.contains(&(message_index, position));
-
-                this.child(
-                    Label::new(first_line(&result.content))
-                        .size(LabelSize::XSmall)
-                        .color(if result.is_error {
-                            Color::Error
-                        } else {
-                            Color::Muted
-                        })
-                        .truncate_middle(),
-                )
-                .when(!result.diff.is_empty(), |this| {
-                    this.child(
-                        h_flex()
-                            .id(("cowork-diff-toggle", message_index * 64 + position))
-                            .gap_1()
-                            .cursor_pointer()
-                            .child(
-                                Icon::new(if open {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                            )
-                            .child(render_diff_counts(&result.diff, cx))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                let key = (message_index, position);
-                                if !this.expanded_diffs.remove(&key) {
-                                    this.expanded_diffs.insert(key);
-                                }
-                                cx.notify();
-                            })),
                     )
-                    .when(open, |this| this.child(render_diff(&result.diff, cx)))
+                    // An error has no diff to show, so its message goes where the badge would be —
+                    // it is the one outcome a tick cannot express.
+                    .when_some(
+                        result.filter(|result| result.is_error),
+                        |this, result| {
+                            this.child(
+                                Label::new(first_line(&result.content))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Error)
+                                    .truncate_middle(),
+                            )
+                        },
+                    )
+                    .when_some(diff, |this, diff| {
+                        this.child(render_diff_counts(diff, cx)).child(
+                            Icon::new(if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        let key = (message_index, position);
+                        if !this.expanded_diffs.remove(&key) {
+                            this.expanded_diffs.insert(key);
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(open, |this| {
+                this.when_some(diff, |this, diff| {
+                    this.child(div().px_2p5().pb_2().child(render_diff(diff, cx)))
                 })
             })
             .into_any_element()
@@ -1708,9 +1733,9 @@ impl Render for CoworkThreadView {
                     .when_some(message.rendered.clone(), |this, markdown| {
                         this.child(MarkdownElement::new(markdown, markdown_style.clone()))
                     })
-                    .children(message.tool_calls.iter().enumerate().map(|(position, call)| {
-                        self.render_tool_call(index, position, call, cx)
-                    }))
+                    .when(!message.tool_calls.is_empty(), |this| {
+                        this.child(self.render_tool_calls(index, &message.tool_calls, cx))
+                    })
                     .into_any_element(),
                 // Results are drawn inside the card of the call they answer, so this message
                 // contributes nothing of its own.
