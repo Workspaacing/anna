@@ -125,9 +125,16 @@ impl CoworkPanel {
     }
 
     /// The absolute path of the project's first folder, which is what a thread is scoped to.
-    fn project_key(&self, cx: &App) -> Option<String> {
-        let worktree = self.project.read(cx).visible_worktrees(cx).next()?;
-        Some(worktree.read(cx).abs_path().to_string_lossy().into_owned())
+    /// Every folder of this project, which is what a thread is matched against.
+    ///
+    /// A thread carries the one folder it was started in, but it has to stay visible when the
+    /// project grows another one — see `ThreadMetadata::belongs_to`.
+    fn project_folders(&self, cx: &App) -> Vec<String> {
+        self.project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
+            .collect()
     }
 
     /// Threads are matched on their title and their preview so a search finds a conversation by
@@ -137,12 +144,12 @@ impl CoworkPanel {
     /// that filter a panel would list every conversation the user has ever had, about any project.
     fn refresh_visible_threads(&mut self, cx: &mut Context<Self>) {
         let query = self.query.trim().to_lowercase();
-        let project = self.project_key(cx);
+        let folders = self.project_folders(cx);
         let threads = self.store.read(cx).threads();
 
         self.visible_threads = threads
             .iter()
-            .filter(|thread| thread.belongs_to(project.as_deref()))
+            .filter(|thread| thread.belongs_to(&folders))
             .filter(|thread| {
                 query.is_empty()
                     || thread.title.to_lowercase().contains(&query)

@@ -76,14 +76,20 @@ pub struct ThreadMetadata {
 }
 
 impl ThreadMetadata {
-    /// Whether this thread belongs in the panel of the project rooted at `project`.
-    pub fn belongs_to(&self, project: Option<&str>) -> bool {
-        match (&self.project, project) {
-            (Some(thread_project), Some(project)) => thread_project == project,
+    /// Whether this thread belongs in the panel of a project made of `folders`.
+    ///
+    /// Matched against every folder of the project, not only the one the thread was tagged with.
+    /// A project's folders are a set that grows: adding a second folder must not hide the
+    /// conversations that were had about the first, and which folder counts as "first" is not
+    /// stable across restarts — so comparing against a single path made threads come and go for
+    /// no reason the user could see.
+    pub fn belongs_to(&self, folders: &[String]) -> bool {
+        match &self.project {
             // Written before threads were scoped; shown everywhere rather than lost.
-            (None, _) => true,
+            None => true,
             // A window with no folder open has no project to filter by.
-            (Some(_), None) => true,
+            Some(_) if folders.is_empty() => true,
+            Some(project) => folders.iter().any(|folder| folder == project),
         }
     }
 }
@@ -1102,14 +1108,32 @@ mod tests {
         metadata
     }
 
+    fn folders(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| (*path).to_owned()).collect()
+    }
+
     #[test]
     fn a_thread_is_listed_only_in_the_project_it_was_about() {
         let here = scoped_to(Some("/home/a/project"));
 
-        assert!(here.belongs_to(Some("/home/a/project")));
+        assert!(here.belongs_to(&folders(&["/home/a/project"])));
         assert!(
-            !here.belongs_to(Some("/home/a/other")),
+            !here.belongs_to(&folders(&["/home/a/other"])),
             "the index is shared by every window, so this is the whole point"
+        );
+    }
+
+    #[test]
+    fn adding_a_second_folder_does_not_hide_the_first_folder_s_threads() {
+        // The bug this is here for: the panel used to match on whichever folder came first, so
+        // adding one — or opening the project after the order had changed — made a conversation
+        // vanish from the list while it was still sitting in the database.
+        let here = scoped_to(Some("/home/a/project"));
+
+        assert!(here.belongs_to(&folders(&["/home/a/project", "/home/a/library"])));
+        assert!(
+            here.belongs_to(&folders(&["/home/a/library", "/home/a/project"])),
+            "the order folders happen to be in must not decide what is listed"
         );
     }
 
@@ -1118,15 +1142,15 @@ mod tests {
         // Losing sight of an old conversation is worse than showing it in the wrong place.
         let legacy = scoped_to(None);
 
-        assert!(legacy.belongs_to(Some("/home/a/project")));
-        assert!(legacy.belongs_to(None));
+        assert!(legacy.belongs_to(&folders(&["/home/a/project"])));
+        assert!(legacy.belongs_to(&[]));
     }
 
     #[test]
     fn a_window_with_no_folder_open_hides_nothing() {
         let scoped = scoped_to(Some("/home/a/project"));
 
-        assert!(scoped.belongs_to(None), "there is nothing to filter by");
+        assert!(scoped.belongs_to(&[]), "there is nothing to filter by");
     }
 
     #[test]
