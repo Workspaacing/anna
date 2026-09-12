@@ -5646,13 +5646,13 @@ fn cowork_page() -> SettingsPage {
         [
             SettingsPageItem::SectionHeader("Agent"),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Approve Requests Automatically",
-                description: "Let the agent run commands without asking. It otherwise asks each time, showing the command, and remembers a program you allow until Wu restarts. Reading and writing files never asks either way: those changes land in the editor's own buffers, undo history and git gutter, so you can see and reverse them.",
+                title: "Ask Before Running Commands",
+                description: "How often the agent stops to ask. \"Ask\" questions every command, including ones that only read. \"Standard\" lets reading commands — `ls`, `git status`, `cargo check` — run, and asks before anything that changes something. \"Trusted\" asks only before what cannot be undone: deleting, pushing, publishing. \"Open\" never asks. A command that reaches outside this project asks at every level, including Open. Reading and writing files never asks: those changes land in the editor's own buffers, undo history and git gutter.",
                 field: Box::new(SettingField {
-                    json_path: Some("cowork.auto_approve"),
-                    pick: |settings_content| settings_content.cowork.as_ref()?.auto_approve.as_ref(),
+                    json_path: Some("cowork.permission"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.permission.as_ref(),
                     write: |settings_content, value, _| {
-                        settings_content.cowork.get_or_insert_default().auto_approve = value;
+                        settings_content.cowork.get_or_insert_default().permission = value;
                     },
                 }),
                 metadata: None,

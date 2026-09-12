@@ -572,6 +572,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::ShowIndentGuides>(render_dropdown)
         .add_basic_renderer::<settings::ShellDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::AgentShellDiscriminants>(render_dropdown)
+        .add_basic_renderer::<settings::AgentPermission>(render_permission_dropdown)
         .add_basic_renderer::<settings::RelativeLineNumbers>(render_dropdown)
         .add_basic_renderer::<settings::WindowDecorations>(render_dropdown)
         .add_basic_renderer::<settings::FullscreenMode>(render_dropdown)
@@ -4657,6 +4658,79 @@ where
     })
     .tab_index(0)
     .title_case(should_do_titlecase)
+    .into_any_element()
+}
+
+/// The permission dropdown, which confirms the one choice that cannot be taken back.
+///
+/// Every other level is undone by picking another; `Open` is the one where the cost of being wrong
+/// is paid by something outside this window — a deleted directory, a force-push — before anyone
+/// notices the setting changed. That asymmetry is the whole reason for the interruption, and it is
+/// the same question the button in the chat asks, because the setting is the same setting.
+fn render_permission_dropdown(
+    field: SettingField<settings::AgentPermission>,
+    file: SettingsUiFile,
+    _metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    description: &'static str,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    use settings::AgentPermission;
+
+    let variants = <AgentPermission as strum::VariantArray>::VARIANTS;
+    let labels = <AgentPermission as strum::VariantNames>::VARIANTS;
+    let current_value = get_current_value(&SettingsStore::global(cx), &file, &field)
+        .copied()
+        .unwrap_or_default();
+
+    EnumVariantDropdown::new("dropdown", current_value, variants, labels, {
+        move |value, window, cx| {
+            if value == current_value {
+                return;
+            }
+
+            let file = file.clone();
+            let apply = move |window: &mut Window, cx: &mut App| {
+                update_settings_file(file.clone(), window, cx, move |settings, app| {
+                    (field.write)(settings, Some(value), app);
+                })
+                .log_err();
+            };
+
+            if value != AgentPermission::Open {
+                apply(window, cx);
+                return;
+            }
+
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                "Let the agent run commands without asking?",
+                Some(
+                    "It will be able to run any command in an open project — including ones that \
+                     delete files, push to a remote, or publish — with no further confirmation. \
+                     Nothing in the editor can undo those. Commands that reach outside the \
+                     project will still ask.",
+                ),
+                &["Allow everything", "Cancel"],
+                cx,
+            );
+
+            window
+                .spawn(cx, async move |cx| {
+                    if answer.await.ok() != Some(0) {
+                        return;
+                    }
+                    cx.update(|window, cx| apply(window, cx)).ok();
+                })
+                .detach();
+        }
+    })
+    .aria_label(title)
+    .when(!description.is_empty(), |this| {
+        this.aria_description(description)
+    })
+    .tab_index(0)
     .into_any_element()
 }
 

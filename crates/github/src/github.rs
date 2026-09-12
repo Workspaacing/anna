@@ -12,6 +12,7 @@
 mod api;
 mod auth;
 mod github_window;
+mod repositories;
 mod worklist;
 
 pub use api::{Client, Failure, Identity};

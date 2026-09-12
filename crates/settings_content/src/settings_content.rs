@@ -1019,6 +1019,35 @@ pub struct CoworkSettingsContent {
     ///
     /// Default: false
     pub auto_approve: Option<bool>,
+
+    /// How much the agent asks before doing something.
+    ///
+    /// Default: "standard"
+    pub permission: Option<AgentPermission>,
+}
+
+/// How often the agent stops to ask.
+///
+/// This is a ladder rather than a set of modes, because there is only one thing being traded: how
+/// much is done without a question. What is *reachable* is not on it — a command that leaves the
+/// project asks at every level including the last one, and that is a property rather than a
+/// preference.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, MergeFrom, PartialEq, Eq,
+    strum::VariantArray, strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPermission {
+    /// Ask before every command, including ones that only read.
+    Ask,
+    /// Ask before anything that changes something. Commands that only read — `ls`, `git status`,
+    /// `cargo check` — run without a question.
+    #[default]
+    Standard,
+    /// Ask only before what cannot be undone: deleting, pushing, publishing.
+    Trusted,
+    /// Never ask, except when a command reaches outside this project.
+    Open,
 }
 
 /// Which shell a Cowork agent runs commands in.

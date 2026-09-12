@@ -120,6 +120,12 @@
     // Reading and writing files never asks either way: those changes land in
     // the editor's own buffers, undo history and git gutter.
     "auto_approve": false,
+    // How often the agent stops to ask before running a command.
+    //   "ask"      — before every command, including ones that only read
+    //   "standard" — before anything that changes something; `ls` and `git status` just run
+    //   "trusted"  — only before what cannot be undone: deleting, pushing, publishing
+    //   "open"     — never, except when a command reaches outside this project
+    "permission": "standard",
     // The shell the agent runs commands in. "terminal" follows `terminal.shell`,
     // so a command the agent runs behaves like one you would type yourself.
     // Also accepts "system", a program name, or {"program": ..., "args": [...]}.

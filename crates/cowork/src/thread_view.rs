@@ -25,7 +25,8 @@ use project::Project;
 use settings::Settings as _;
 use std::sync::Arc;
 use gpui::StyledText;
-use ui::{Button, ButtonStyle, CopyButton, Divider, Tooltip, prelude::*};
+use settings::AgentPermission;
+use ui::{Button, ButtonStyle, ContextMenu, CopyButton, Divider, PopoverMenu, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -1407,66 +1408,61 @@ impl CoworkThreadView {
             .into_any_element()
     }
 
-    /// The switch that stops the agent asking before it runs commands.
-    fn render_permission_toggle(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let approving = CoworkSettings::get_global(cx).auto_approve;
-
-        Button::new("cowork-auto-approve", if approving { "Auto" } else { "Ask" })
-            .start_icon(
-                Icon::new(if approving {
-                    IconName::Warning
-                } else {
-                    IconName::Lock
-                })
-                .size(IconSize::Small),
-            )
-            .label_size(LabelSize::Small)
-            .style(if approving {
-                ButtonStyle::Tinted(ui::TintColor::Warning)
-            } else {
-                ButtonStyle::Subtle
-            })
-            .tooltip(Tooltip::text(if approving {
-                "Commands run without asking. Click to require approval again."
-            } else {
-                "You are asked before each command. Click to approve everything automatically."
-            }))
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_auto_approve(window, cx)))
-    }
-
-    /// Turning approval off asks first; turning it back on does not.
+    /// How the current permission level is shown, and changed.
     ///
-    /// The asymmetry is the point. Going from "ask me" to "run anything" is the direction that can
-    /// cost something irreversible, and it is a setting rather than a per-turn choice, so it stays
-    /// off until the user says so in as many words.
-    fn toggle_auto_approve(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let approving = CoworkSettings::get_global(cx).auto_approve;
-        let fs = self.fs.clone();
+    /// A menu rather than a switch because there are four positions and they are a ladder, not an
+    /// on/off: each rung asks about a subset of what the one above it asks about.
+    fn render_permission_toggle(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let level = CoworkSettings::get_global(cx).permission;
+        let open = level == AgentPermission::Open;
 
-        if !approving {
-            let answer = window.prompt(
-                gpui::PromptLevel::Warning,
-                "Let the agent run commands without asking?",
-                Some(
-                    "It will be able to run any command in this project — including ones that \
-                     delete files, push to a remote, or publish — with no further confirmation. \
-                     Nothing in the editor can undo those.",
-                ),
-                &["Allow everything", "Cancel"],
-                cx,
-            );
-
-            cx.spawn(async move |_, cx| {
-                if answer.await.ok() != Some(0) {
-                    return;
+        PopoverMenu::new("cowork-permission")
+            .trigger(
+                Button::new("cowork-permission-trigger", permission_label(&level))
+                    .start_icon(
+                        Icon::new(if open {
+                            IconName::Warning
+                        } else {
+                            IconName::Lock
+                        })
+                        .size(IconSize::Small),
+                    )
+                    .label_size(LabelSize::Small)
+                    .style(if open {
+                        ButtonStyle::Tinted(ui::TintColor::Warning)
+                    } else {
+                        ButtonStyle::Subtle
+                    })
+                    .tooltip(Tooltip::text(permission_detail(&level))),
+            )
+            .menu({
+                let fs = self.fs.clone();
+                move |window, cx| {
+                    let fs = fs.clone();
+                    let current = level;
+                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        for candidate in [
+                            AgentPermission::Ask,
+                            AgentPermission::Standard,
+                            AgentPermission::Trusted,
+                            AgentPermission::Open,
+                        ] {
+                            let chosen = candidate;
+                            let fs = fs.clone();
+                            let selected = candidate == current;
+                            menu = menu.toggleable_entry(
+                                permission_detail(&candidate),
+                                selected,
+                                ui::IconPosition::Start,
+                                None,
+                                move |window, cx| choose_permission(fs.clone(), chosen, window, cx),
+                            );
+                        }
+                        menu
+                    }))
                 }
-                cx.update(|cx| write_auto_approve(fs, true, cx));
             })
-            .detach();
-            return;
-        }
-
-        write_auto_approve(fs, false, cx);
+            .anchor(gpui::Anchor::BottomRight)
     }
 
     fn render_empty_state(&self) -> impl IntoElement {
@@ -2061,6 +2057,64 @@ fn render_reasoning(
         .child(MarkdownElement::new(markdown, style))
 }
 
+/// The two or three words on the button.
+fn permission_label(level: &AgentPermission) -> &'static str {
+    match level {
+        AgentPermission::Ask => "Ask",
+        AgentPermission::Standard => "Standard",
+        AgentPermission::Trusted => "Trusted",
+        AgentPermission::Open => "Open",
+    }
+}
+
+/// The sentence in the menu and the tooltip, which says what the level actually does rather than
+/// what it is called — a name alone does not tell anyone where the line is.
+fn permission_detail(level: &AgentPermission) -> &'static str {
+    match level {
+        AgentPermission::Ask => "Ask before every command",
+        AgentPermission::Standard => "Ask before anything that changes something",
+        AgentPermission::Trusted => "Ask only before what cannot be undone",
+        AgentPermission::Open => "Never ask, except outside this project",
+    }
+}
+
+/// Moves to a level, confirming first when the move is the one that can cost something.
+///
+/// Only the last rung asks. Going from "ask me" to "run anything" is the direction with an
+/// irreversible failure at the end of it, and it is a setting rather than a per-turn choice, so it
+/// is not something to arrive at by a stray click. Every other move is undone by another click.
+fn choose_permission(
+    fs: Arc<dyn fs::Fs>,
+    level: AgentPermission,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if level != AgentPermission::Open {
+        write_permission(fs, level, cx);
+        return;
+    }
+
+    let answer = window.prompt(
+        gpui::PromptLevel::Warning,
+        "Let the agent run commands without asking?",
+        Some(
+            "It will be able to run any command in this project — including ones that delete \
+             files, push to a remote, or publish — with no further confirmation. Nothing in the \
+             editor can undo those. Commands that reach outside this project will still ask.",
+        ),
+        &["Allow everything", "Cancel"],
+        cx,
+    );
+
+    cx.spawn(async move |cx| {
+        if answer.await.ok() != Some(0) {
+            return;
+        }
+        cx.update(|cx| write_permission(fs, AgentPermission::Open, cx));
+    })
+    .detach();
+}
+
 /// A path's extension, which is the key the language cache uses.
 fn extension_of(path: &str) -> Option<SharedString> {
     std::path::Path::new(path)
@@ -2178,9 +2232,9 @@ fn render_diff(
         })
 }
 
-fn write_auto_approve(fs: Arc<dyn fs::Fs>, approve: bool, cx: &mut App) {
+fn write_permission(fs: Arc<dyn fs::Fs>, level: AgentPermission, cx: &mut App) {
     settings::update_settings_file(fs, cx, move |settings, _| {
-        settings.cowork.get_or_insert_default().auto_approve = Some(approve);
+        settings.cowork.get_or_insert_default().permission = Some(level);
     });
 }
 

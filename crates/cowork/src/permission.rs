@@ -14,6 +14,7 @@ use db::kvp::KeyValueStore;
 use gpui::{AppContext as _, TaskExt as _};
 use util::ResultExt as _;
 use crate::cowork_settings::CoworkSettings;
+use settings::AgentPermission;
 use collections::HashSet;
 use futures::channel::oneshot;
 use gpui::{Context, EventEmitter, SharedString};
@@ -62,6 +63,24 @@ pub struct PermissionRequest {
 
 pub enum PermissionEvent {
     Changed,
+}
+
+/// Whether this level stops to ask about a command with this consequence.
+///
+/// The whole policy, as a table. Writing it out means the levels are defined by what they do rather
+/// than by prose in a settings file that the code then approximates.
+///
+/// Note what is *not* here: whether the command reaches outside the project. That is checked
+/// separately and asks at every level including `Open`, because it is a property of the app rather
+/// than a preference — the setting is a promise about this project, and a command leaving it is
+/// outside what was promised.
+fn asks(level: &AgentPermission, consequence: Consequence) -> bool {
+    match level {
+        AgentPermission::Ask => true,
+        AgentPermission::Standard => consequence != Consequence::Harmless,
+        AgentPermission::Trusted => consequence == Consequence::Irreversible,
+        AgentPermission::Open => false,
+    }
 }
 
 /// Whether a grant the user gave should outlive the window it was given in.
@@ -157,24 +176,11 @@ impl PermissionBroker {
     ) -> oneshot::Receiver<Decision> {
         let (sender, receiver) = oneshot::channel();
 
-        // Reading something is not worth an interruption. The prompt exists for changes that
-        // cannot be seen or taken back, and firing it for `ls` and `git status` is how a person
-        // learns to click through the dialog without reading it — which costs exactly the one
-        // that mattered. A command that reaches outside the project is still asked about, whatever
-        // it does, because leaving the project is itself the thing being judged.
-        if request.consequence == Consequence::Harmless && !request.always_ask {
-            let _ = sender.send(Decision::Always);
-            return receiver;
-        }
-
-        // Both shortcuts are skipped for a request that leaves the project: neither the
-        // setting nor an earlier "always" for this program was given with that in view.
+        // A request that leaves the project is asked about whatever the level says and whatever
+        // was allowed before: neither was given with that in view.
         if !request.always_ask {
-            if CoworkSettings::get_global(cx).auto_approve {
-                let _ = sender.send(Decision::Always);
-                return receiver;
-            }
-            if self.granted.contains(&request.scope) {
+            let level = &CoworkSettings::get_global(cx).permission;
+            if !asks(level, request.consequence) || self.is_granted(&request.scope) {
                 let _ = sender.send(Decision::Always);
                 return receiver;
             }
@@ -299,6 +305,62 @@ pub fn command_scope(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_level_asks_about_exactly_what_its_name_says() {
+        use Consequence::*;
+
+        // Ask: everything, including a listing.
+        assert!(asks(&AgentPermission::Ask, Harmless));
+        assert!(asks(&AgentPermission::Ask, Reversible));
+        assert!(asks(&AgentPermission::Ask, Irreversible));
+
+        // Standard: reading is free, changing is not.
+        assert!(!asks(&AgentPermission::Standard, Harmless));
+        assert!(asks(&AgentPermission::Standard, Reversible));
+        assert!(asks(&AgentPermission::Standard, Irreversible));
+
+        // Trusted: only what cannot be taken back.
+        assert!(!asks(&AgentPermission::Trusted, Harmless));
+        assert!(!asks(&AgentPermission::Trusted, Reversible));
+        assert!(asks(&AgentPermission::Trusted, Irreversible));
+
+        // Open: nothing — the project boundary is checked elsewhere and is not on this ladder.
+        assert!(!asks(&AgentPermission::Open, Harmless));
+        assert!(!asks(&AgentPermission::Open, Reversible));
+        assert!(!asks(&AgentPermission::Open, Irreversible));
+    }
+
+    #[test]
+    fn the_ladder_only_ever_relaxes() {
+        // Each rung must ask about a subset of what the one before it asks about. A level that
+        // asked about something a stricter level allowed would make the order meaningless.
+        use Consequence::*;
+        let ladder = [
+            AgentPermission::Ask,
+            AgentPermission::Standard,
+            AgentPermission::Trusted,
+            AgentPermission::Open,
+        ];
+
+        for pair in ladder.windows(2) {
+            for consequence in [Harmless, Reversible, Irreversible] {
+                if asks(&pair[1], consequence) {
+                    assert!(
+                        asks(&pair[0], consequence),
+                        "{:?} asks about {consequence:?} but the stricter {:?} does not",
+                        pair[1],
+                        pair[0]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn standard_is_the_default_because_it_is_the_one_worth_living_with() {
+        assert_eq!(AgentPermission::default(), AgentPermission::Standard);
+    }
 
     #[test]
     fn a_build_is_worth_remembering_and_a_deletion_is_not() {

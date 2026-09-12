@@ -13,7 +13,7 @@ pub struct CoworkSettings {
     /// `None` means "whatever the terminal is set to", which is the default.
     pub shell: Option<Shell>,
     // (resolved from `AgentShell::Terminal` to `None` in `from_settings`)
-    pub auto_approve: bool,
+    pub permission: settings::AgentPermission,
 }
 
 /// Which of the built-in checks run after the agent changes something.
@@ -51,7 +51,7 @@ impl Settings for CoworkSettings {
                 }
             },
             shell: cowork.shell.clone().and_then(agent_shell_to_task_shell),
-            auto_approve: cowork.auto_approve.unwrap(),
+            permission: cowork.permission.unwrap(),
         }
     }
 }
