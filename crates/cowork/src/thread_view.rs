@@ -621,8 +621,11 @@ impl CoworkThreadView {
                     }
                 }
                 CompletionEvent::Stop(reason) => {
+                    // Recorded rather than breaking on. OpenAI-compatible providers send the
+                    // usage chunk *after* the one carrying `finish_reason`, so stopping here
+                    // meant the token counts were never read and the context meter stayed
+                    // empty. The stream ends on its own at `[DONE]`.
                     stopped_for_tools = reason == StopReason::ToolUse;
-                    break;
                 }
             }
         }

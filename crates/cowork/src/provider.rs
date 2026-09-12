@@ -590,7 +590,10 @@ fn parse_arguments(arguments: &str) -> Value {
 #[derive(Default)]
 struct SseState {
     openai_tool_ids: HashMap<u64, String>,
+    /// The stream is over: `[DONE]` arrived, or it failed.
     stopped: bool,
+    /// A stop reason has already been reported, so `[DONE]` must not report a second one.
+    reported_stop: bool,
 }
 
 fn decode_sse(
@@ -631,6 +634,12 @@ fn decode_sse(
                 }
                 if data == "[DONE]" {
                     state.stopped = true;
+                    // Only when the provider has not already said why it stopped. Most send a
+                    // `finish_reason` chunk first, and reporting the end twice would leave the
+                    // turn loop weighing two answers to one question.
+                    if state.reported_stop {
+                        return None;
+                    }
                     return Some((
                         Ok(CompletionEvent::Stop(StopReason::EndTurn)),
                         (lines, wire_api, state, queued),
@@ -654,8 +663,13 @@ fn decode_sse(
                     Ok(events) => {
                         queued = events;
                         let event = queued.remove(0);
+                        // A stop reason is not the end of the stream, and treating it as one cost
+                        // us the token counts: OpenAI-compatible providers send `finish_reason`
+                        // in one chunk and `usage` in the next. The stream ends at `[DONE]`, or
+                        // when the connection closes — which is what every one of the three
+                        // formats actually promises.
                         if matches!(event, CompletionEvent::Stop(_)) {
-                            state.stopped = true;
+                            state.reported_stop = true;
                         }
                         return Some((Ok(event), (lines, wire_api, state, queued)));
                     }
@@ -1221,6 +1235,62 @@ mod tests {
         let bedrock: Provider =
             serde_json::from_str(r#"{"npm":"@ai-sdk/amazon-bedrock"}"#).unwrap();
         assert_eq!(bedrock.api_base(), None);
+    }
+
+    #[test]
+    fn usage_arrives_after_the_finish_reason() {
+        // The real shape, captured from OpenRouter: the chunk carrying `finish_reason` comes
+        // first, and the token counts follow in a chunk of their own. A reader that stops at the
+        // finish reason never sees them.
+        let events = collect(
+            concat!(
+                r#"data: {"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}"#,
+                "
+",
+                r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#,
+                "
+",
+                r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}],"#,
+                r#""usage":{"prompt_tokens":14,"completion_tokens":5,"total_tokens":19}}"#,
+                "
+",
+                "data: [DONE]
+",
+            ),
+            WireApi::OpenAiCompatible,
+        );
+
+        assert!(
+            events.contains(&CompletionEvent::Usage {
+                input: 14,
+                output: 5
+            }),
+            "the counts must survive the stop that precedes them: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_usage_chunk_with_no_choices_is_still_read() {
+        // Some providers send the counts in a chunk with an empty `choices`, which an early
+        // `choices/0` lookup would discard.
+        let events = collect(
+            concat!(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
+                "
+",
+                "data: [DONE]
+",
+            ),
+            WireApi::OpenAiCompatible,
+        );
+
+        assert!(
+            events.contains(&CompletionEvent::Usage {
+                input: 7,
+                output: 3
+            }),
+            "got: {events:?}"
+        );
     }
 
     #[test]
