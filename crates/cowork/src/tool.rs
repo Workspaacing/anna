@@ -179,6 +179,7 @@ impl ToolRegistry {
                 Arc::new(crate::github_tools::AlertsTool),
                 Arc::new(crate::gitleaks::SecretsScanTool),
                 Arc::new(crate::outdated::DependenciesOutdatedTool),
+                Arc::new(crate::fetch::FetchTool),
             ],
         }
     }

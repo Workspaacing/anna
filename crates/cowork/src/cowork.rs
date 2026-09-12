@@ -16,6 +16,7 @@ mod consequence;
 mod cowork_settings;
 mod image;
 mod inline_calls;
+mod fetch;
 mod github_tools;
 mod gitleaks;
 mod outdated;
