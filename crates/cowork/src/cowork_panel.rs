@@ -114,25 +114,35 @@ impl CoworkPanel {
         })
     }
 
+    /// The absolute path of the project's first folder, which is what a thread is scoped to.
+    fn project_key(&self, cx: &App) -> Option<String> {
+        let workspace = self.workspace.upgrade()?;
+        let project = workspace.read(cx).project().read(cx);
+        let worktree = project.visible_worktrees(cx).next()?;
+        Some(worktree.read(cx).abs_path().to_string_lossy().into_owned())
+    }
+
     /// Threads are matched on their title and their preview so a search finds a conversation by
     /// what was said in it, not only by the prompt that named it.
+    ///
+    /// Only this project's threads are listed. The index is shared by every window, so without
+    /// that filter a panel would list every conversation the user has ever had, about any project.
     fn refresh_visible_threads(&mut self, cx: &mut Context<Self>) {
         let query = self.query.trim().to_lowercase();
+        let project = self.project_key(cx);
         let threads = self.store.read(cx).threads();
 
-        self.visible_threads = if query.is_empty() {
-            threads.to_vec()
-        } else {
-            threads
-                .iter()
-                .filter(|thread| {
-                    thread.title.to_lowercase().contains(&query)
-                        || thread.preview.to_lowercase().contains(&query)
-                        || thread.model.qualified().to_lowercase().contains(&query)
-                })
-                .cloned()
-                .collect()
-        };
+        self.visible_threads = threads
+            .iter()
+            .filter(|thread| thread.belongs_to(project.as_deref()))
+            .filter(|thread| {
+                query.is_empty()
+                    || thread.title.to_lowercase().contains(&query)
+                    || thread.preview.to_lowercase().contains(&query)
+                    || thread.model.qualified().to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
 
         self.selected_index = self
             .selected_index
@@ -159,9 +169,10 @@ impl CoworkPanel {
         self.store
             .update(cx, |store, cx| store.remember_model(model.clone(), cx));
 
+        let project = self.project_key(cx);
         let thread = self
             .store
-            .update(cx, |store, cx| store.create_thread(model, cx));
+            .update(cx, |store, cx| store.create_thread(model, project, cx));
         let store = self.store.clone();
         let workspace_handle = self.workspace.clone();
 

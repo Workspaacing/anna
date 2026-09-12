@@ -55,6 +55,27 @@ pub struct ThreadMetadata {
     pub updated_at: u64,
     pub message_count: usize,
     pub preview: String,
+    /// The project this conversation was about, identified by its first folder's absolute path.
+    ///
+    /// The index is one list in a database shared by every window, so without this a thread about
+    /// one project shows up in the panel of every other one. Threads written before this field
+    /// existed have `None` and are shown everywhere, which is what they did before: losing sight
+    /// of an old conversation would be worse than showing it in the wrong place.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+impl ThreadMetadata {
+    /// Whether this thread belongs in the panel of the project rooted at `project`.
+    pub fn belongs_to(&self, project: Option<&str>) -> bool {
+        match (&self.project, project) {
+            (Some(thread_project), Some(project)) => thread_project == project,
+            // Written before threads were scoped; shown everywhere rather than lost.
+            (None, _) => true,
+            // A window with no folder open has no project to filter by.
+            (Some(_), None) => true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -700,7 +721,12 @@ impl CoworkStore {
         });
     }
 
-    pub fn create_thread(&mut self, model: ModelRef, cx: &mut Context<Self>) -> Thread {
+    pub fn create_thread(
+        &mut self,
+        model: ModelRef,
+        project: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Thread {
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let now = now_seconds();
         let thread = Thread {
@@ -712,6 +738,7 @@ impl CoworkStore {
                 updated_at: now,
                 message_count: 0,
                 preview: String::new(),
+                project,
             },
             messages: Vec::new(),
         };
@@ -964,9 +991,43 @@ mod tests {
                 updated_at: 0,
                 message_count: 0,
                 preview: String::new(),
+                project: None,
             },
             messages,
         }
+    }
+
+    fn scoped_to(project: Option<&str>) -> ThreadMetadata {
+        let mut metadata = thread_with(Vec::new()).metadata;
+        metadata.project = project.map(str::to_owned);
+        metadata
+    }
+
+    #[test]
+    fn a_thread_is_listed_only_in_the_project_it_was_about() {
+        let here = scoped_to(Some("/home/a/project"));
+
+        assert!(here.belongs_to(Some("/home/a/project")));
+        assert!(
+            !here.belongs_to(Some("/home/a/other")),
+            "the index is shared by every window, so this is the whole point"
+        );
+    }
+
+    #[test]
+    fn a_thread_written_before_scoping_existed_is_still_shown() {
+        // Losing sight of an old conversation is worse than showing it in the wrong place.
+        let legacy = scoped_to(None);
+
+        assert!(legacy.belongs_to(Some("/home/a/project")));
+        assert!(legacy.belongs_to(None));
+    }
+
+    #[test]
+    fn a_window_with_no_folder_open_hides_nothing() {
+        let scoped = scoped_to(Some("/home/a/project"));
+
+        assert!(scoped.belongs_to(None), "there is nothing to filter by");
     }
 
     #[test]
