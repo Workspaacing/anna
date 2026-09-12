@@ -670,9 +670,360 @@ impl Tool for ChecksTool {
     }
 }
 
+
+// =================================================================================================
+// Security alerts. The deep analysis happens on GitHub; this reads the answer.
+// =================================================================================================
+
+/// How much of a rule's remediation text is worth carrying.
+///
+/// CodeQL ships a full page of markdown per rule — overview, two code examples, a reference list.
+/// The recommendation is the part that says what to do; the rest is a tutorial the model does not
+/// need and the user is not reading in a chat transcript.
+const MAX_REMEDIATION: usize = 600;
+
+/// The "## Recommendation" section of a CodeQL help page, or its first paragraph.
+fn remediation(help: &str) -> String {
+    let body = help
+        .split("## Recommendation")
+        .nth(1)
+        .unwrap_or(help)
+        .split("\n## ")
+        .next()
+        .unwrap_or_default()
+        .trim();
+
+    if body.chars().count() <= MAX_REMEDIATION {
+        return body.to_owned();
+    }
+    let cut: String = body.chars().take(MAX_REMEDIATION).collect();
+    // Cut at a sentence rather than mid-word, when there is one to cut at.
+    match cut.rfind(". ") {
+        Some(end) => format!("{}.", &cut[..end]),
+        None => format!("{cut}…"),
+    }
+}
+
+fn render_code_scanning(alerts: &[Value]) -> String {
+    if alerts.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n--- code scanning ({}) ---\n", alerts.len());
+
+    for alert in alerts {
+        let rule = alert.get("rule").cloned().unwrap_or(Value::Null);
+        let instance = alert
+            .get("most_recent_instance")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let location = instance.get("location").cloned().unwrap_or(Value::Null);
+
+        out.push_str(&format!(
+            "\n{} {} ({})\n",
+            // `security_severity_level` is the one worth sorting by; `severity` is the rule's own
+            // warning/error and says nothing about how much it matters.
+            text(&rule, "security_severity_level")
+                .is_empty()
+                .then(|| text(&rule, "severity"))
+                .unwrap_or_else(|| text(&rule, "security_severity_level")),
+            text(&rule, "id"),
+            text(&alert.get("tool").cloned().unwrap_or(Value::Null), "name"),
+        ));
+
+        let path = text(&location, "path");
+        if !path.is_empty() {
+            out.push_str(&format!(
+                "  {path}:{}\n",
+                location.get("start_line").and_then(Value::as_i64).unwrap_or(0)
+            ));
+        }
+        let message = text(&instance.get("message").cloned().unwrap_or(Value::Null), "text");
+        if !message.is_empty() {
+            out.push_str(&format!("  {message}\n"));
+        }
+        let fix = remediation(&text(&rule, "help"));
+        if !fix.is_empty() {
+            out.push_str(&format!("  Fix: {}\n", fix.replace('\n', "\n       ")));
+        }
+    }
+    out
+}
+
+fn render_dependabot(alerts: &[Value]) -> String {
+    if alerts.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n--- vulnerable dependencies ({}) ---\n", alerts.len());
+
+    for alert in alerts {
+        let advisory = alert
+            .get("security_advisory")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let dependency = alert.get("dependency").cloned().unwrap_or(Value::Null);
+        let package = dependency.get("package").cloned().unwrap_or(Value::Null);
+        let vulnerability = alert
+            .get("security_vulnerability")
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        let scope = text(&dependency, "scope");
+        out.push_str(&format!(
+            "\n{} {} ({}{})\n",
+            text(&advisory, "severity"),
+            text(&package, "name"),
+            text(&package, "ecosystem"),
+            if scope.is_empty() {
+                String::new()
+            } else {
+                format!(", {scope}")
+            },
+        ));
+        out.push_str(&format!("  {}\n", text(&advisory, "summary")));
+
+        let manifest = text(&dependency, "manifest_path");
+        if !manifest.is_empty() {
+            out.push_str(&format!("  declared in {manifest}\n"));
+        }
+
+        // The one line that says how to fix it.
+        let patched = text(
+            &vulnerability
+                .get("first_patched_version")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "identifier",
+        );
+        let range = text(&vulnerability, "vulnerable_version_range");
+        if !patched.is_empty() {
+            out.push_str(&format!("  affected {range} — fixed in {patched}\n"));
+        } else if !range.is_empty() {
+            out.push_str(&format!("  affected {range} — no fixed version published\n"));
+        }
+
+        let identifier = [text(&advisory, "ghsa_id"), text(&advisory, "cve_id")]
+            .into_iter()
+            .filter(|id| !id.is_empty())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        if !identifier.is_empty() {
+            out.push_str(&format!("  {identifier}\n"));
+        }
+    }
+    out
+}
+
+pub struct AlertsTool;
+
+impl Tool for AlertsTool {
+    fn name(&self) -> &'static str {
+        "github_alerts"
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+
+    fn description(&self) -> &'static str {
+        "Read the security alerts GitHub already found for this repository: CodeQL code scanning \
+         results with the file and line they point at, and Dependabot's vulnerable dependencies \
+         with the version that fixes each one. Use this when asked to fix security problems, \
+         rather than searching the code for them — this analysis has already run."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "repo": repository_parameter(),
+                "kind": {
+                    "type": "string",
+                    "enum": ["all", "code", "dependencies"],
+                    "description": "Which alerts to read. Leave this out for both.",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "all"],
+                    "description": "Leave this out for open alerts only, which is nearly always \
+                                    what is wanted.",
+                },
+            },
+        })
+    }
+
+    fn run(&self, input: Value, context: ToolContext, cx: &mut App) -> Task<Result<ToolOutput>> {
+        let resolved = resolve_repository(&input, &context, cx);
+        let token = github::stored_token(cx);
+        let http = cx.http_client();
+
+        cx.background_spawn(async move {
+            let (owner, name) = resolved?;
+            let client = connect(token, http).await?;
+
+            let kind = input.get("kind").and_then(Value::as_str).unwrap_or("all");
+            let state = input.get("state").and_then(Value::as_str).unwrap_or("open");
+            let want_code = matches!(kind, "all" | "code");
+            let want_dependencies = matches!(kind, "all" | "dependencies");
+
+            // Either endpoint 404s when the feature is off for the repository, which is an answer
+            // rather than a failure: "nothing is scanning this" is what the user needs to hear.
+            let mut disabled = Vec::new();
+
+            let code = if want_code {
+                match client
+                    .rest(&format!(
+                        "repos/{owner}/{name}/code-scanning/alerts?state={state}&per_page=50"
+                    ))
+                    .await
+                {
+                    Ok(value) => value.as_array().cloned().unwrap_or_default(),
+                    Err(_) => {
+                        disabled.push("code scanning");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
+            let dependencies = if want_dependencies {
+                match client
+                    .rest(&format!(
+                        "repos/{owner}/{name}/dependabot/alerts?state={state}&per_page=50"
+                    ))
+                    .await
+                {
+                    Ok(value) => value.as_array().cloned().unwrap_or_default(),
+                    Err(_) => {
+                        disabled.push("Dependabot");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
+            let total = code.len() + dependencies.len();
+            let mut content = format!(
+                "{owner}/{name}: {total} {state} alert{}\n",
+                if total == 1 { "" } else { "s" }
+            );
+            content.push_str(&render_code_scanning(&code));
+            content.push_str(&render_dependabot(&dependencies));
+
+            if !disabled.is_empty() {
+                content.push_str(&format!(
+                    "\n{} is not enabled for this repository, or this token may not read it.\n",
+                    disabled.join(" and ")
+                ));
+            }
+            if total == 0 && disabled.is_empty() {
+                content.push_str("\nNothing is open.\n");
+            }
+
+            Ok(ToolOutput::new(
+                content,
+                format!("{owner}/{name}: {total} alerts"),
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_code_scanning_alert_reads_as_a_place_and_a_fix() {
+        // The shape GitHub actually returned, trimmed.
+        let alert = json!({
+            "rule": {
+                "id": "rust/access-invalid-pointer",
+                "severity": "error",
+                "security_severity_level": "high",
+                "help": "# Access of invalid pointer\nDereferencing an invalid pointer...\n\n## Recommendation\nWhen dereferencing a pointer in `unsafe` code, take care that the pointer is valid.\n\n## Example\nlots of markdown"
+            },
+            "tool": { "name": "CodeQL", "version": "2.26.4" },
+            "most_recent_instance": {
+                "message": { "text": "This operation dereferences a pointer that may be invalid." },
+                "location": { "path": "cli/src/tunnels/acl_windows.rs", "start_line": 324 }
+            }
+        });
+
+        let rendered = render_code_scanning(&[alert]);
+        assert!(rendered.contains("high rust/access-invalid-pointer (CodeQL)"), "{rendered}");
+        assert!(rendered.contains("cli/src/tunnels/acl_windows.rs:324"), "{rendered}");
+        assert!(rendered.contains("dereferences a pointer"), "{rendered}");
+        assert!(rendered.contains("Fix: When dereferencing"), "{rendered}");
+        assert!(!rendered.contains("lots of markdown"), "the tutorial is not the fix");
+    }
+
+    #[test]
+    fn the_recommendation_is_taken_rather_than_the_whole_help_page() {
+        let help = "# Title\nOverview prose.\n\n## Recommendation\nDo the thing.\n\n## Example\nCode.\n\n## References\nLinks.";
+        assert_eq!(remediation(help), "Do the thing.");
+    }
+
+    #[test]
+    fn a_help_page_with_no_recommendation_still_yields_something() {
+        assert_eq!(remediation("Just one paragraph."), "Just one paragraph.");
+        assert_eq!(remediation(""), "");
+    }
+
+    #[test]
+    fn a_long_recommendation_is_cut_at_a_sentence() {
+        let long = format!("## Recommendation\n{} End of it.", "Sentence here. ".repeat(80));
+        let cut = remediation(&long);
+
+        assert!(cut.chars().count() <= MAX_REMEDIATION + 1, "{}", cut.len());
+        assert!(cut.ends_with('.'), "{cut}");
+    }
+
+    #[test]
+    fn a_dependency_alert_names_the_version_that_fixes_it() {
+        // Without the patched version the model has to go and look it up, and usually guesses.
+        let alert = json!({
+            "security_advisory": {
+                "severity": "medium",
+                "summary": "SVGO: removeScripts incompletely sanitizes executable HTML",
+                "ghsa_id": "GHSA-4vpr-x523-8j87",
+                "cve_id": "CVE-2026-84369"
+            },
+            "dependency": {
+                "package": { "ecosystem": "npm", "name": "svgo" },
+                "manifest_path": "package-lock.json",
+                "scope": "development"
+            },
+            "security_vulnerability": {
+                "vulnerable_version_range": ">= 1.0.0, < 2.8.4",
+                "first_patched_version": { "identifier": "2.8.4" }
+            }
+        });
+
+        let rendered = render_dependabot(&[alert]);
+        assert!(rendered.contains("medium svgo (npm, development)"), "{rendered}");
+        assert!(rendered.contains("declared in package-lock.json"), "{rendered}");
+        assert!(rendered.contains("affected >= 1.0.0, < 2.8.4 — fixed in 2.8.4"), "{rendered}");
+        assert!(rendered.contains("GHSA-4vpr-x523-8j87 / CVE-2026-84369"), "{rendered}");
+    }
+
+    #[test]
+    fn a_vulnerability_with_no_fix_yet_says_so_rather_than_implying_one() {
+        let alert = json!({
+            "security_advisory": { "severity": "high", "summary": "x" },
+            "dependency": { "package": { "ecosystem": "npm", "name": "y" } },
+            "security_vulnerability": { "vulnerable_version_range": "< 9.9.9" }
+        });
+
+        let rendered = render_dependabot(&[alert]);
+        assert!(rendered.contains("no fixed version published"), "{rendered}");
+    }
+
+    #[test]
+    fn nothing_to_report_renders_as_nothing_rather_than_an_empty_heading() {
+        assert!(render_code_scanning(&[]).is_empty());
+        assert!(render_dependabot(&[]).is_empty());
+    }
 
     #[test]
     fn a_green_run_is_reported_as_green_without_listing_everything() {

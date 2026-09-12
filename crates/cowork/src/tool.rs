@@ -176,6 +176,8 @@ impl ToolRegistry {
                 Arc::new(crate::github_tools::IssueTool),
                 Arc::new(crate::github_tools::PullRequestTool),
                 Arc::new(crate::github_tools::ChecksTool),
+                Arc::new(crate::github_tools::AlertsTool),
+                Arc::new(crate::gitleaks::SecretsScanTool),
             ],
         }
     }

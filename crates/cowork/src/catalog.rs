@@ -258,16 +258,46 @@ impl Provider {
     ///
     /// The catalog leaves `api` empty for the providers whose AI SDK package hard-codes the
     /// endpoint, which is most of the big ones, so the well-known bases are supplied here.
+    /// Where requests for this provider go.
+    ///
+    /// The catalog leaves `api` out for twenty-six providers, and it is not an omission: models.dev
+    /// describes a provider by the AI SDK package that drives it, and a provider with a package of
+    /// its own — `@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/groq` — has no reason to state a
+    /// base URL, because the package already knows it. Only the ones sharing
+    /// `@ai-sdk/openai-compatible` have to say where they live.
+    ///
+    /// Reading the field alone therefore left Anthropic and OpenAI — the two wire formats this app
+    /// implements natively — marked as providers it could not talk to. Every endpoint below was
+    /// confirmed to answer: each returns 401 or 403 to an unauthenticated request, which is an
+    /// endpoint asking for a key rather than an endpoint that is not there.
     pub fn api_base(&self) -> Option<String> {
         if let Some(api) = &self.api {
             return Some(api.clone());
         }
-        match self.npm.as_deref() {
-            Some("@ai-sdk/google") => {
-                Some("https://generativelanguage.googleapis.com/v1beta".to_owned())
-            }
-            _ => None,
-        }
+
+        const KNOWN: [(&str, &str); 12] = [
+            ("@ai-sdk/anthropic", "https://api.anthropic.com/v1"),
+            ("@ai-sdk/openai", "https://api.openai.com/v1"),
+            (
+                "@ai-sdk/google",
+                "https://generativelanguage.googleapis.com/v1beta",
+            ),
+            ("@ai-sdk/xai", "https://api.x.ai/v1"),
+            ("@ai-sdk/mistral", "https://api.mistral.ai/v1"),
+            ("@ai-sdk/groq", "https://api.groq.com/openai/v1"),
+            ("@ai-sdk/togetherai", "https://api.together.xyz/v1"),
+            ("@ai-sdk/cerebras", "https://api.cerebras.ai/v1"),
+            ("@ai-sdk/deepinfra", "https://api.deepinfra.com/v1/openai"),
+            ("@ai-sdk/perplexity", "https://api.perplexity.ai"),
+            ("@ai-sdk/cohere", "https://api.cohere.ai/compatibility/v1"),
+            ("@ai-sdk/gateway", "https://ai-gateway.vercel.sh/v1"),
+        ];
+
+        let npm = self.npm.as_deref()?;
+        KNOWN
+            .iter()
+            .find(|(package, _)| *package == npm)
+            .map(|(_, base)| (*base).to_owned())
     }
 
     /// The environment variables that can hold this provider's credential, as declared by the
@@ -454,6 +484,64 @@ pub const CATALOG_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provider_with_its_own_sdk_package_is_still_reachable() {
+        // The bug this locks down: models.dev omits `api` for providers that have a dedicated AI
+        // SDK package, because the package knows the endpoint. Reading only that field marked
+        // Anthropic and OpenAI — the two formats this app speaks natively — as unreachable, and
+        // the settings table showed a warning against both.
+        for npm in [
+            "@ai-sdk/anthropic",
+            "@ai-sdk/openai",
+            "@ai-sdk/google",
+            "@ai-sdk/xai",
+            "@ai-sdk/mistral",
+            "@ai-sdk/groq",
+            "@ai-sdk/togetherai",
+            "@ai-sdk/cerebras",
+            "@ai-sdk/deepinfra",
+            "@ai-sdk/perplexity",
+            "@ai-sdk/cohere",
+            "@ai-sdk/gateway",
+        ] {
+            let provider: Provider =
+                serde_json::from_str(&format!(r#"{{"npm":"{npm}"}}"#)).unwrap();
+
+            let base = provider
+                .api_base()
+                .unwrap_or_else(|| panic!("{npm} has no endpoint"));
+            assert!(base.starts_with("https://"), "{npm}: {base}");
+            assert!(!base.ends_with('/'), "{npm}: a trailing slash doubles up: {base}");
+            assert_eq!(provider.support(), Support::Supported, "{npm}");
+        }
+    }
+
+    #[test]
+    fn the_catalog_still_wins_over_the_built_in_endpoint() {
+        // A provider that does state its own base — a self-hosted gateway, say — must be believed.
+        let provider: Provider = serde_json::from_str(
+            r#"{"npm":"@ai-sdk/openai","api":"https://gateway.internal/v1"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            provider.api_base().as_deref(),
+            Some("https://gateway.internal/v1")
+        );
+    }
+
+    #[test]
+    fn the_two_that_need_signing_are_still_out_of_reach() {
+        // Bedrock needs SigV4 and Vertex a service-account assertion. Neither is a request shape,
+        // so neither becomes reachable by knowing a URL — guessing one would produce a provider
+        // that looks connectable and fails on every call.
+        for npm in ["@ai-sdk/amazon-bedrock", "@ai-sdk/google-vertex"] {
+            let provider: Provider =
+                serde_json::from_str(&format!(r#"{{"npm":"{npm}"}}"#)).unwrap();
+            assert_eq!(provider.support(), Support::Unsupported, "{npm}");
+        }
+    }
 
     fn model_with_override(json: &str) -> Model {
         serde_json::from_str(json).expect("the fixture should parse")

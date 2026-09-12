@@ -17,6 +17,7 @@ mod cowork_settings;
 mod image;
 mod inline_calls;
 mod github_tools;
+mod gitleaks;
 mod model_selector;
 mod new_thread_dialog;
 mod permission;
