@@ -1,6 +1,7 @@
 use crate::{
     Cancel, SelectModel, Submit,
     catalog::ModelRef,
+    cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
     provider::{
         self, CompletionEvent, CompletionRequest, Message, Role, StopReason, ToolCall, ToolResult,
@@ -19,6 +20,7 @@ use gpui::{
 use language::LanguageRegistry;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
+use settings::Settings as _;
 use std::sync::Arc;
 use ui::{Button, ButtonStyle, CopyButton, Divider, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -51,7 +53,12 @@ pub struct CoworkThreadView {
     store: Entity<CoworkStore>,
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
+    /// Taken at construction: the toggle writes to `settings.json`, and reading the workspace for
+    /// it later would risk the "already being updated" panic the panel hit.
+    fs: Arc<dyn fs::Fs>,
     tools: ToolRegistry,
+    /// `(message index, result index)` for each diff the user has opened.
+    expanded_diffs: collections::HashSet<(usize, usize)>,
     permissions: Entity<PermissionBroker>,
     error: Option<SharedString>,
     completion: Option<Task<()>>,
@@ -64,6 +71,7 @@ impl CoworkThreadView {
         store: Entity<CoworkStore>,
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
+        fs: Arc<dyn fs::Fs>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -108,7 +116,9 @@ impl CoworkThreadView {
             store,
             workspace,
             project,
+            fs,
             tools: ToolRegistry::default_tools(),
+            expanded_diffs: collections::HashSet::default(),
             permissions,
             error: None,
             completion: None,
@@ -240,6 +250,33 @@ impl CoworkThreadView {
 
     fn select_model(&mut self, _: &SelectModel, window: &mut Window, cx: &mut Context<Self>) {
         self.open_model_selector(window, cx);
+    }
+
+    /// Records what the provider said the exchange cost.
+    ///
+    /// Input is the whole conversation as the provider saw it, so it replaces rather than adds to
+    /// the previous figure; output is what was just produced and rides along with it.
+    fn record_usage(&mut self, input: u64, output: u64, cx: &mut Context<Self>) {
+        if input == 0 && output == 0 {
+            return;
+        }
+        self.thread.metadata.context_tokens = Some(input.saturating_add(output));
+        cx.notify();
+    }
+
+    /// How full the context is, when both halves of the answer are known.
+    ///
+    /// `None` until a provider has reported usage: an estimate would be wrong in a way the user
+    /// could not see, and a meter that lies is worse than no meter.
+    fn context_usage(&self, cx: &App) -> Option<(u64, u64)> {
+        let used = self.thread.metadata.context_tokens?;
+        let (_, model) = self
+            .store
+            .read(cx)
+            .catalog()
+            .model(&self.thread.metadata.model)?;
+        let limit = model.limit.and_then(|limit| limit.context)?;
+        (limit > 0).then_some((used, limit))
     }
 
     /// Changes the model this conversation runs on.
@@ -547,6 +584,14 @@ impl CoworkThreadView {
                         call.arguments.push_str(&arguments);
                     }
                 }
+                CompletionEvent::Usage { input, output } => {
+                    if this
+                        .update(cx, |this, cx| this.record_usage(input, output, cx))
+                        .is_err()
+                    {
+                        return Ok((Vec::new(), false));
+                    }
+                }
                 CompletionEvent::Stop(reason) => {
                     stopped_for_tools = reason == StopReason::ToolUse;
                     break;
@@ -571,6 +616,7 @@ impl CoworkThreadView {
             call_id: call.id.clone(),
             content: message,
             is_error: true,
+            diff: String::new(),
         };
 
         let Some(tool) = tools.get(&call.name) else {
@@ -594,6 +640,7 @@ impl CoworkThreadView {
                 call_id: call.id.clone(),
                 content: output.content,
                 is_error: false,
+                diff: output.diff,
             },
             Err(failure) => error(format!("{failure:#}")),
         }
@@ -733,6 +780,12 @@ impl CoworkThreadView {
                             }))
                     }),
             )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .children(self.render_context_meter(cx))
+                    .child(self.render_permission_toggle(cx)),
+            )
             .when(is_streaming, |this| {
                 this.child(
                     Button::new("cowork-stop", "Stop")
@@ -743,6 +796,120 @@ impl CoworkThreadView {
                         ),
                 )
             })
+    }
+
+    /// How much of the model's context the conversation is using.
+    ///
+    /// Only shown once a provider has actually reported usage. Every provider tokenizes
+    /// differently, so a locally computed estimate would be wrong in a way the user could not see
+    /// — and a meter that lies about how close you are to the limit is worse than no meter.
+    fn render_context_meter(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let (used, limit) = self.context_usage(cx)?;
+        let fraction = (used as f32 / limit as f32).clamp(0.0, 1.0);
+        let percent = (fraction * 100.0).round() as u32;
+
+        // Amber past three quarters, red once the next turn may not fit.
+        let colors = cx.theme().colors();
+        let status = cx.theme().status();
+        let fill = match percent {
+            0..=74 => colors.text_accent,
+            75..=89 => status.warning,
+            _ => status.error,
+        };
+
+        Some(
+            h_flex()
+                .id("cowork-context")
+                .gap_1p5()
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
+                .tooltip(Tooltip::text(format!(
+                    "{used} of {limit} tokens used in this conversation"
+                )))
+                .child(
+                    div()
+                        .w(px(48.))
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(colors.element_background)
+                        .child(
+                            div()
+                                .w(relative(fraction))
+                                .h_full()
+                                .rounded_full()
+                                .bg(fill),
+                        ),
+                )
+                .child(
+                    Label::new(format!("{} / {}", compact(used), compact(limit)))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The switch that stops the agent asking before it runs commands.
+    fn render_permission_toggle(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let approving = CoworkSettings::get_global(cx).auto_approve;
+
+        Button::new("cowork-auto-approve", if approving { "Auto" } else { "Ask" })
+            .start_icon(
+                Icon::new(if approving {
+                    IconName::Warning
+                } else {
+                    IconName::Lock
+                })
+                .size(IconSize::Small),
+            )
+            .label_size(LabelSize::Small)
+            .style(if approving {
+                ButtonStyle::Tinted(ui::TintColor::Warning)
+            } else {
+                ButtonStyle::Subtle
+            })
+            .tooltip(Tooltip::text(if approving {
+                "Commands run without asking. Click to require approval again."
+            } else {
+                "You are asked before each command. Click to approve everything automatically."
+            }))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_auto_approve(window, cx)))
+    }
+
+    /// Turning approval off asks first; turning it back on does not.
+    ///
+    /// The asymmetry is the point. Going from "ask me" to "run anything" is the direction that can
+    /// cost something irreversible, and it is a setting rather than a per-turn choice, so it stays
+    /// off until the user says so in as many words.
+    fn toggle_auto_approve(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let approving = CoworkSettings::get_global(cx).auto_approve;
+        let fs = self.fs.clone();
+
+        if !approving {
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                "Let the agent run commands without asking?",
+                Some(
+                    "It will be able to run any command in this project — including ones that \
+                     delete files, push to a remote, or publish — with no further confirmation. \
+                     Nothing in the editor can undo those.",
+                ),
+                &["Allow everything", "Cancel"],
+                cx,
+            );
+
+            cx.spawn(async move |_, cx| {
+                if answer.await.ok() != Some(0) {
+                    return;
+                }
+                cx.update(|cx| write_auto_approve(fs, true, cx));
+            })
+            .detach();
+            return;
+        }
+
+        write_auto_approve(fs, false, cx);
     }
 
     fn render_empty_state(&self) -> impl IntoElement {
@@ -813,18 +980,35 @@ fn first_line(content: &str) -> String {
 
 /// Tool arguments are shown as the values alone: the model already named the tool, and the keys
 /// are noise at this size.
+/// What a tool call is *about*, in one line.
+///
+/// Deliberately a named subset rather than every argument. Joining all of them put the entire
+/// contents of a written file into the transcript — the argument that matters for `write` is the
+/// path, and the file itself is shown afterwards as a diff.
 fn summarize_arguments(arguments: &str) -> String {
+    const SUBJECT: [&str; 3] = ["path", "command", "old_text"];
+
     let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(arguments) else {
         return String::new();
     };
-    fields
-        .values()
-        .map(|value| match value {
-            serde_json::Value::String(text) => text.clone(),
-            other => other.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+
+    let subject = SUBJECT.iter().find_map(|name| {
+        fields
+            .get(*name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+    });
+
+    match subject {
+        Some(subject) => first_line(subject),
+        // An unrecognised tool still says something rather than nothing, but never more than the
+        // first field and never more than one line.
+        None => fields
+            .values()
+            .find_map(serde_json::Value::as_str)
+            .map(first_line)
+            .unwrap_or_default(),
+    }
 }
 
 fn render_markdown(
@@ -867,6 +1051,237 @@ impl Item for CoworkThreadView {
 
     fn show_toolbar(&self) -> bool {
         false
+    }
+}
+
+/// How many diff lines are rendered before the rest is summarised away.
+const MAX_DIFF_LINES: usize = 400;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffKind {
+    Added,
+    Removed,
+    Context,
+    /// A `@@` hunk header — where in the file the next lines are.
+    Header,
+}
+
+/// One line of a diff, with the line numbers a reader needs to place it.
+struct DiffLine {
+    kind: DiffKind,
+    old_number: Option<u32>,
+    new_number: Option<u32>,
+    text: String,
+}
+
+/// Reads a unified diff back into numbered lines.
+///
+/// The line numbers come from the `@@ -old,count +new,count @@` headers and are then advanced per
+/// line: a removed line advances only the old side, an added line only the new, and context both.
+/// That is the whole of what a unified diff encodes, and reconstructing it is what lets the gutter
+/// show real file positions instead of an offset from the top of the hunk.
+fn parse_unified_diff(diff: &str) -> Vec<DiffLine> {
+    let mut lines = Vec::new();
+    let mut old_number = 0u32;
+    let mut new_number = 0u32;
+
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("@@") {
+            (old_number, new_number) = hunk_start(rest).unwrap_or((old_number, new_number));
+            lines.push(DiffLine {
+                kind: DiffKind::Header,
+                old_number: None,
+                new_number: None,
+                text: line.to_owned(),
+            });
+            continue;
+        }
+
+        // `---` and `+++` file headers carry no line of their own.
+        if line.starts_with("---") || line.starts_with("+++") {
+            continue;
+        }
+
+        let (kind, text) = match line.as_bytes().first() {
+            Some(b'+') => (DiffKind::Added, &line[1..]),
+            Some(b'-') => (DiffKind::Removed, &line[1..]),
+            Some(b' ') => (DiffKind::Context, &line[1..]),
+            _ => (DiffKind::Context, line),
+        };
+
+        let (old, new) = match kind {
+            DiffKind::Added => {
+                new_number += 1;
+                (None, Some(new_number))
+            }
+            DiffKind::Removed => {
+                old_number += 1;
+                (Some(old_number), None)
+            }
+            _ => {
+                old_number += 1;
+                new_number += 1;
+                (Some(old_number), Some(new_number))
+            }
+        };
+
+        lines.push(DiffLine {
+            kind,
+            old_number: old,
+            new_number: new,
+            text: text.to_owned(),
+        });
+    }
+
+    lines
+}
+
+/// The two starting line numbers out of `-12,7 +12,9 @@`.
+fn hunk_start(header: &str) -> Option<(u32, u32)> {
+    let mut old = None;
+    let mut new = None;
+
+    for token in header.split_whitespace() {
+        let (sign, rest) = token.split_at(token.char_indices().nth(1).map_or(0, |(i, _)| i));
+        let first = rest.split(',').next()?.parse::<u32>().ok();
+        match sign {
+            "-" => old = first,
+            "+" => new = first,
+            _ => {}
+        }
+    }
+
+    // One before, because the counters are advanced before use.
+    Some((old?.saturating_sub(1), new?.saturating_sub(1)))
+}
+
+/// How many lines a diff adds and removes.
+fn diff_counts(diff: &str) -> (usize, usize) {
+    diff.lines()
+        .filter(|line| !line.starts_with("+++") && !line.starts_with("---"))
+        .fold((0, 0), |(added, removed), line| match line.as_bytes().first() {
+            Some(b'+') => (added + 1, removed),
+            Some(b'-') => (added, removed + 1),
+            _ => (added, removed),
+        })
+}
+
+/// The `+12 -3` badge.
+fn render_diff_counts(diff: &str, cx: &App) -> impl IntoElement + use<> {
+    let (added, removed) = diff_counts(diff);
+    let colors = cx.theme().colors();
+
+    h_flex()
+        .gap_1()
+        .when(added > 0, |this| {
+            this.child(
+                div()
+                    .text_color(colors.version_control_added)
+                    .text_ui_sm(cx)
+                    .child(format!("+{added}")),
+            )
+        })
+        .when(removed > 0, |this| {
+            this.child(
+                div()
+                    .text_color(colors.version_control_deleted)
+                    .text_ui_sm(cx)
+                    .child(format!("-{removed}")),
+            )
+        })
+}
+
+/// The diff itself, with a line-number gutter.
+fn render_diff(diff: &str, cx: &App) -> impl IntoElement + use<> {
+    let colors = cx.theme().colors();
+    let parsed = parse_unified_diff(diff);
+    let shown = parsed.len().min(MAX_DIFF_LINES);
+    let truncated = parsed.len().saturating_sub(shown);
+
+    let rows = parsed
+        .into_iter()
+        .take(shown)
+        .map(|line| {
+            let (text_color, background, marker) = match line.kind {
+                DiffKind::Added => (
+                    colors.version_control_added,
+                    colors.version_control_added.opacity(0.12),
+                    "+",
+                ),
+                DiffKind::Removed => (
+                    colors.version_control_deleted,
+                    colors.version_control_deleted.opacity(0.12),
+                    "-",
+                ),
+                DiffKind::Header => (colors.text_accent, colors.element_background, " "),
+                DiffKind::Context => (colors.text_muted, colors.editor_background, " "),
+            };
+
+            h_flex()
+                .w_full()
+                .bg(background)
+                .child(
+                    // The new-side number, falling back to the old one for a removed line, which
+                    // is the only number that line has.
+                    div()
+                        .w(px(40.))
+                        .px_1()
+                        .flex_shrink_0()
+                        .text_color(colors.text_muted)
+                        .child(
+                            line.new_number
+                                .or(line.old_number)
+                                .map(|number| number.to_string())
+                                .unwrap_or_default(),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(10.))
+                        .flex_shrink_0()
+                        .text_color(text_color)
+                        .child(marker),
+                )
+                .child(div().flex_1().min_w_0().text_color(text_color).child(line.text))
+        })
+        .collect::<Vec<_>>();
+
+    v_flex()
+        .id("cowork-diff")
+        .w_full()
+        .min_w_0()
+        .mt_1()
+        .max_h(px(360.))
+        .overflow_y_scroll()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.border_variant)
+        .bg(colors.editor_background)
+        .font_buffer(cx)
+        .text_ui_sm(cx)
+        .children(rows)
+        .when(truncated > 0, |this| {
+            this.child(
+                div()
+                    .px_2()
+                    .text_color(colors.text_muted)
+                    .child(format!("… {truncated} more lines")),
+            )
+        })
+}
+
+fn write_auto_approve(fs: Arc<dyn fs::Fs>, approve: bool, cx: &mut App) {
+    settings::update_settings_file(fs, cx, move |settings, _| {
+        settings.cowork.get_or_insert_default().auto_approve = Some(approve);
+    });
+}
+
+/// Token counts as a person reads them: `706k`, not `706123`.
+fn compact(tokens: u64) -> String {
+    match tokens {
+        0..=999 => tokens.to_string(),
+        1_000..=999_999 => format!("{}k", tokens / 1_000),
+        _ => format!("{:.1}M", tokens as f64 / 1_000_000.0),
     }
 }
 
@@ -1006,17 +1421,51 @@ impl Render for CoworkThreadView {
                             } else {
                                 (IconName::Check, Color::Success)
                             };
-                            h_flex()
+                            v_flex()
                                 .id(("cowork-tool-result", position))
                                 .w_full()
-                                .gap_1p5()
-                                .child(Icon::new(icon).size(IconSize::XSmall).color(color))
+                                .min_w_0()
                                 .child(
-                                    Label::new(first_line(&result.content))
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate_middle(),
+                                    h_flex()
+                                        .w_full()
+                                        .gap_1p5()
+                                        .child(
+                                            Icon::new(icon).size(IconSize::XSmall).color(color),
+                                        )
+                                        .child(
+                                            Label::new(first_line(&result.content))
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted)
+                                                .truncate_middle(),
+                                        ),
                                 )
+                                .when(!result.diff.is_empty(), |this| {
+                                    let open = self.expanded_diffs.contains(&(index, position));
+                                    this.child(
+                                        h_flex()
+                                            .id(("cowork-diff-toggle", position))
+                                            .gap_1()
+                                            .cursor_pointer()
+                                            .child(
+                                                Icon::new(if open {
+                                                    IconName::ChevronDown
+                                                } else {
+                                                    IconName::ChevronRight
+                                                })
+                                                .size(IconSize::XSmall)
+                                                .color(Color::Muted),
+                                            )
+                                            .child(render_diff_counts(&result.diff, cx))
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                let key = (index, position);
+                                                if !this.expanded_diffs.remove(&key) {
+                                                    this.expanded_diffs.insert(key);
+                                                }
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .when(open, |this| this.child(render_diff(&result.diff, cx)))
+                                })
                         },
                     ))
                     .into_any_element(),
@@ -1051,5 +1500,75 @@ impl Render for CoworkThreadView {
                 this.child(render_error(error, cx))
             })
             .child(self.render_composer(is_streaming, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = concat!(
+        "@@ -3,4 +3,5 @@\n",
+        " fn main() {\n",
+        "-    println!(\"old\");\n",
+        "+    println!(\"new\");\n",
+        "+    println!(\"extra\");\n",
+        " }\n",
+    );
+
+    #[test]
+    fn counts_what_changed() {
+        assert_eq!(diff_counts(SAMPLE), (2, 1));
+        assert_eq!(diff_counts(""), (0, 0));
+    }
+
+    #[test]
+    fn file_headers_are_not_counted_as_changes() {
+        // `+++ b/file` and `--- a/file` start with the same characters as a changed line, and
+        // counting them would report two phantom edits on every diff.
+        let with_headers = concat!("--- a/x.rs\n", "+++ b/x.rs\n", "@@ -1,1 +1,1 @@\n", "+one\n");
+
+        assert_eq!(diff_counts(with_headers), (1, 0));
+    }
+
+    #[test]
+    fn line_numbers_come_from_the_hunk_header() {
+        let lines = parse_unified_diff(SAMPLE);
+
+        // The header itself, then the context line at 3, the removal at 4, two additions at 4 and
+        // 5, and the closing context.
+        assert_eq!(lines[0].kind, DiffKind::Header);
+        assert_eq!(lines[1].new_number, Some(3));
+        assert_eq!(lines[2].old_number, Some(4), "a removal numbers the old side");
+        assert_eq!(lines[2].new_number, None);
+        assert_eq!(lines[3].new_number, Some(4), "an addition numbers the new side");
+        assert_eq!(lines[4].new_number, Some(5));
+    }
+
+    #[test]
+    fn each_side_advances_only_on_its_own_lines() {
+        // This is the whole of what a unified diff encodes; getting it wrong makes the gutter show
+        // positions that exist in neither version of the file.
+        let lines = parse_unified_diff(SAMPLE);
+        let removal = &lines[2];
+        let addition = &lines[3];
+
+        assert_eq!((removal.old_number, removal.new_number), (Some(4), None));
+        assert_eq!((addition.old_number, addition.new_number), (None, Some(4)));
+    }
+
+    #[test]
+    fn the_marker_is_stripped_from_the_text() {
+        let lines = parse_unified_diff(SAMPLE);
+
+        assert_eq!(lines[3].text, "    println!(\"new\");");
+        assert!(!lines[3].text.starts_with('+'));
+    }
+
+    #[test]
+    fn token_counts_read_the_way_a_person_says_them() {
+        assert_eq!(compact(842), "842");
+        assert_eq!(compact(706_123), "706k");
+        assert_eq!(compact(1_048_576), "1.0M");
     }
 }

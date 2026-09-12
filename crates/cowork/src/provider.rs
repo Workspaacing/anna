@@ -45,6 +45,13 @@ pub struct ToolResult {
     pub content: String,
     #[serde(default)]
     pub is_error: bool,
+    /// A unified diff of what the tool changed, for the transcript.
+    ///
+    /// Never sent to a provider: each wire format builds its own request body from `content`, so
+    /// this field simply is not read there. It is persisted with the thread, so reopening a
+    /// conversation still shows what was changed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub diff: String,
 }
 
 /// Fields added after the first release default, so threads stored by an earlier version still load.
@@ -124,6 +131,12 @@ pub enum StopReason {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompletionEvent {
     Text(String),
+    /// How many tokens the exchange cost, as the provider counts them.
+    ///
+    /// Reported at different moments by each format and, for some OpenAI-compatible providers, not
+    /// at all unless asked for. Counting locally is not an alternative: every provider tokenizes
+    /// differently, so an estimate would be wrong in a way the user could not see.
+    Usage { input: u64, output: u64 },
     /// A tool call has begun. Its arguments arrive in later `ToolCallDelta` events.
     ToolCallStart { id: String, name: String },
     ToolCallDelta { id: String, arguments: String },
@@ -514,6 +527,9 @@ fn openai_body(request: &CompletionRequest) -> Value {
     let mut body = json!({
         "model": request.model_id,
         "stream": true,
+        // Without this most OpenAI-compatible providers stream no usage at all, and the context
+        // meter would sit empty for the whole conversation.
+        "stream_options": { "include_usage": true },
         "messages": messages,
     });
     // Optional here too, and an omitted ceiling is the model's own.
@@ -664,11 +680,23 @@ fn decode_google_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
         bail!("{message}");
     }
 
-    let Some(candidate) = chunk.pointer("/candidates/0") else {
-        return Ok(Vec::new());
-    };
-
     let mut events = Vec::new();
+    if let Some(usage) = chunk.get("usageMetadata") {
+        events.push(CompletionEvent::Usage {
+            input: usage
+                .get("promptTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            output: usage
+                .get("candidatesTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        });
+    }
+
+    let Some(candidate) = chunk.pointer("/candidates/0") else {
+        return Ok(events);
+    };
     if let Some(parts) = candidate.pointer("/content/parts").and_then(Value::as_array) {
         for part in parts {
             if let Some(text) = part.get("text").and_then(Value::as_str)
@@ -768,14 +796,19 @@ fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
             }
         }
         Some("message_delta") => {
-            let reason = chunk
-                .pointer("/delta/stop_reason")
-                .and_then(Value::as_str);
-            match reason {
-                Some(reason) => Ok(vec![CompletionEvent::Stop(stop_reason(Some(reason)))]),
-                None => Ok(Vec::new()),
+            let mut events = Vec::new();
+            if let Some(usage) = chunk.get("usage") {
+                events.push(anthropic_usage(usage));
             }
+            if let Some(reason) = chunk.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                events.push(CompletionEvent::Stop(stop_reason(Some(reason))));
+            }
+            Ok(events)
         }
+        Some("message_start") => match chunk.pointer("/message/usage") {
+            Some(usage) => Ok(vec![anthropic_usage(usage)]),
+            None => Ok(Vec::new()),
+        },
         Some("message_stop") => Ok(vec![CompletionEvent::Stop(StopReason::EndTurn)]),
         Some("error") => {
             let message = chunk
@@ -788,16 +821,43 @@ fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
     }
 }
 
+/// Anthropic reports the two counts separately and repeats the input on every delta.
+fn anthropic_usage(usage: &Value) -> CompletionEvent {
+    CompletionEvent::Usage {
+        input: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        output: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    }
+}
+
 fn decode_openai_chunk(chunk: &Value, state: &mut SseState) -> Result<Vec<CompletionEvent>> {
     if let Some(message) = chunk.pointer("/error/message").and_then(Value::as_str) {
         bail!("{message}");
     }
 
-    let Some(choice) = chunk.pointer("/choices/0") else {
-        return Ok(Vec::new());
-    };
-
+    // The usage chunk carries an empty `choices`, so it has to be read before bailing on one.
     let mut events = Vec::new();
+    if let Some(usage) = chunk.get("usage").filter(|usage| !usage.is_null()) {
+        events.push(CompletionEvent::Usage {
+            input: usage
+                .get("prompt_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            output: usage
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        });
+    }
+
+    let Some(choice) = chunk.pointer("/choices/0") else {
+        return Ok(events);
+    };
 
     if let Some(text) = choice.pointer("/delta/content").and_then(Value::as_str)
         && !text.is_empty()
@@ -1107,6 +1167,7 @@ mod tests {
                     call_id: "read".into(),
                     content: "fn main() {}".into(),
                     is_error: false,
+                    diff: String::new(),
                 }]),
             ],
             tools: Vec::new(),
@@ -1214,6 +1275,7 @@ mod tests {
                     call_id: "c1".into(),
                     content: "fn main() {}".into(),
                     is_error: false,
+                    diff: String::new(),
                 }]),
             ],
             tools: Vec::new(),

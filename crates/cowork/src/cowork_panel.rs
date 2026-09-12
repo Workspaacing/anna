@@ -221,8 +221,9 @@ impl CoworkPanel {
 
         workspace.update(cx, |workspace, cx| {
             let project = workspace.project().clone();
+            let fs = workspace.app_state().fs.clone();
             let view = cx.new(|cx| {
-                CoworkThreadView::new(thread, store, workspace_handle, project, window, cx)
+                CoworkThreadView::new(thread, store, workspace_handle, project, fs, window, cx)
             });
             workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
         });
@@ -265,8 +266,17 @@ impl CoworkPanel {
             workspace
                 .update_in(cx, |workspace, window, cx| {
                     let project = workspace.project().clone();
+                    let fs = workspace.app_state().fs.clone();
                     let view = cx.new(|cx| {
-                        CoworkThreadView::new(thread, store, workspace_handle, project, window, cx)
+                        CoworkThreadView::new(
+                            thread,
+                            store,
+                            workspace_handle,
+                            project,
+                            fs,
+                            window,
+                            cx,
+                        )
                     });
                     workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
                 })

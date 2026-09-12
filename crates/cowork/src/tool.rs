@@ -66,6 +66,8 @@ pub struct ToolContext {
 pub struct ToolOutput {
     pub content: String,
     pub summary: String,
+    /// A unified diff, when this tool changed a file.
+    pub diff: String,
 }
 
 impl ToolOutput {
@@ -73,7 +75,13 @@ impl ToolOutput {
         Self {
             content: content.into(),
             summary: summary.into(),
+            diff: String::new(),
         }
+    }
+
+    pub fn with_diff(mut self, diff: String) -> Self {
+        self.diff = diff;
+        self
     }
 }
 
@@ -280,6 +288,7 @@ async fn apply(
         .await
         .with_context(|| format!("opening {path}"))?;
 
+    let before = buffer_text(&buffer, cx).await;
     let summary = edit_buffer(&buffer, &change, cx).await?;
 
     // Before saving, so the file lands formatted and auto-fixed rather than being rewritten a
@@ -301,7 +310,17 @@ async fn apply(
         .unwrap_or_default()
         .to_owned();
     let saved = buffer_text(&buffer, cx).await;
-    findings.extend(verify::inspect(settings, http, buffer, file_name, saved, cx).await.findings);
+
+    // Diffed before the buffer is handed to the checks, which consume it. Three lines of context
+    // either side: enough to see where a change landed without pasting the file back into the
+    // transcript, which is what made an earlier version unreadable.
+    let diff = language::unified_diff_with_context(&before, &saved, 1, 1, 3);
+
+    findings.extend(
+        verify::inspect(settings, http, buffer, file_name, saved, cx)
+            .await
+            .findings,
+    );
 
     let mut content = format!("{summary} in {path}.");
     let report = verify::VerificationReport { findings };
@@ -310,7 +329,7 @@ async fn apply(
         content.push_str(&report.to_model(&path));
     }
 
-    Ok(ToolOutput::new(content, format!("{path} · {summary}")))
+    Ok(ToolOutput::new(content, format!("{path} · {summary}")).with_diff(diff))
 }
 
 /// Hands the change to the project's own formatter chain.

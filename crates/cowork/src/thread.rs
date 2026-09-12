@@ -58,6 +58,13 @@ pub struct ThreadMetadata {
     pub updated_at: u64,
     pub message_count: usize,
     pub preview: String,
+    /// What the most recent exchange cost, as the provider counted it: input plus output.
+    ///
+    /// The next request carries roughly this much again before the new message is added, so it is
+    /// the honest answer to "how full is the context". Absent until a provider reports one —
+    /// counting locally would mean guessing at a tokenizer we do not have.
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
     /// The project this conversation was about, identified by its first folder's absolute path.
     ///
     /// The index is one list in a database shared by every window, so without this a thread about
@@ -828,6 +835,7 @@ impl CoworkStore {
                 updated_at: now,
                 message_count: 0,
                 preview: String::new(),
+                context_tokens: None,
                 project,
             },
             messages: Vec::new(),
@@ -1081,6 +1089,7 @@ mod tests {
                 updated_at: 0,
                 message_count: 0,
                 preview: String::new(),
+                context_tokens: None,
                 project: None,
             },
             messages,
