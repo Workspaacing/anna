@@ -148,7 +148,10 @@ impl NewThreadDialog {
         let on_create = self.on_create.clone();
 
         cx.emit(DismissEvent);
-        cx.defer_in(window, move |_, window, cx| {
+        // Deferred through the window rather than through this entity. Dismissing drops the
+        // dialog, and `Context::defer_in` is owned by the entity it was called on — so the
+        // callback was silently discarded and Create appeared to do nothing at all.
+        window.defer(cx, move |window, cx| {
             on_create(model, folder, window, cx);
         });
     }
