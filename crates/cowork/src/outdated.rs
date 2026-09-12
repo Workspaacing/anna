@@ -240,7 +240,7 @@ impl crate::tool::Tool for DependenciesOutdatedTool {
     }
 
     fn description(&self) -> &'static str {
-        "List this project's dependencies that have newer releases, separated by how far behind          each one is: patch, minor, or major. This is about age, not safety — use it for upgrade          work. Vulnerabilities are a different question and are reported when a manifest changes."
+        "List this project's dependencies that have newer releases, separated by how far behind each one is: patch, minor, or major. This is about age, not safety — use it for upgrade work. Vulnerabilities are a different question and are reported when a manifest changes."
     }
 
     fn parameters(&self) -> serde_json::Value {

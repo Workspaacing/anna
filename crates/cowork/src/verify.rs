@@ -505,7 +505,12 @@ pub fn scan_secrets(text: &str) -> Vec<Finding> {
                     check: "secrets".into(),
                     severity: Severity::Error,
                     line: line_number,
-                    message: format!("looks like a {name}; move it to an environment variable"),
+                    // The family goes in parentheses rather than after an article: "a AWS access
+                    // key" and "a RSA private key" read as mistakes, and the article would have to
+                    // be chosen by how each acronym is pronounced.
+                    message: format!(
+                        "looks like a credential ({name}); move it to an environment variable"
+                    ),
                 });
             }
         }

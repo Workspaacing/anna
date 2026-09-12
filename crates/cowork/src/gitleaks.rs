@@ -287,7 +287,7 @@ impl crate::tool::Tool for SecretsScanTool {
     }
 
     fn description(&self) -> &'static str {
-        "Scan this project for committed credentials with gitleaks, optionally including every          commit ever made. Use this when asked whether any secrets have leaked. The values found          are never reported — only where they are — so a scan cannot copy a key anywhere new."
+        "Scan this project for committed credentials with gitleaks, optionally including every commit ever made. Use this when asked whether any secrets have leaked. The values found are never reported — only where they are — so a scan cannot copy a key anywhere new."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -296,7 +296,7 @@ impl crate::tool::Tool for SecretsScanTool {
             "properties": {
                 "include_history": {
                     "type": "boolean",
-                    "description": "Scan every commit rather than only the current files. Slower,                                     and the only way to find a key that was removed but is still                                     reachable by anyone who clones the repository.",
+                    "description": "Scan every commit rather than only the current files. Slower, and the only way to find a key that was removed but is still reachable by anyone who clones the repository.",
                 },
             },
         })
