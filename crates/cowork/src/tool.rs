@@ -5,8 +5,13 @@
 //! listings, the language servers for diagnostics — so the agent sees the same state the user does,
 //! including unsaved edits, and so remote projects work without a second code path.
 
-use crate::{cowork_settings::CoworkSettings, verify};
+use crate::{
+    cowork_settings::CoworkSettings,
+    permission::{Decision, PermissionBroker, PermissionRequest, command_scope},
+    verify,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
+use futures::FutureExt as _;
 use gpui::{App, AppContext as _, AsyncApp, Entity, Task, WeakEntity};
 use language::Buffer;
 use collections::HashSet;
@@ -16,7 +21,10 @@ use project::{
 };
 use serde_json::{Value, json};
 use settings::Settings as _;
-use std::sync::Arc;
+use task::Shell;
+use terminal::terminal_settings::TerminalSettings;
+use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use task::ShellBuilder;
 use util::{paths::PathStyle, rel_path::RelPath};
 use workspace::Workspace;
 
@@ -36,6 +44,8 @@ pub enum ToolKind {
 pub struct ToolContext {
     pub project: Entity<Project>,
     pub workspace: WeakEntity<Workspace>,
+    /// How a tool asks before doing something the editor cannot undo.
+    pub permissions: Entity<PermissionBroker>,
 }
 
 /// The result of one tool call.
@@ -86,10 +96,12 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     /// The tools available to a thread.
     ///
-    /// `write` and `edit` change the user's files. They are safe to offer without a permission
-    /// prompt because every change lands in a buffer the editor owns: it shows up in the open
-    /// editor, in the git gutter, and in the undo history, so nothing happens that the user cannot
-    /// see and reverse. Running commands is a different matter and is not here.
+    /// `write` and `edit` change the user's files without asking, because every change lands in a
+    /// buffer the editor owns: it shows up in the open editor, in the git gutter, and in the undo
+    /// history, so nothing happens that the user cannot see and reverse.
+    ///
+    /// `shell` is different — nothing here can undo `rm -rf`, a push, or a publish — so it asks
+    /// first, through the permission broker.
     pub fn default_tools() -> Self {
         Self {
             tools: vec![
@@ -97,6 +109,7 @@ impl ToolRegistry {
                 Arc::new(ListTool),
                 Arc::new(WriteTool),
                 Arc::new(EditTool),
+                Arc::new(ShellTool),
             ],
         }
     }
@@ -385,6 +398,304 @@ fn occurrences(text: &str, needle: &str) -> Vec<std::ops::Range<usize>> {
     text.match_indices(needle)
         .map(|(start, matched)| start..start + matched.len())
         .collect()
+}
+
+/// How long a command may run before it is killed, when the model names no limit.
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The longest a command may be given, so a model cannot ask for an hour.
+const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How much of a command's output the model is shown.
+///
+/// A build log can run to megabytes, and sending it would cost more than the command saved. The
+/// tail is kept rather than the head: the error is almost always at the end.
+const MAX_OUTPUT_BYTES: usize = 16 * 1024;
+
+struct ShellTool;
+
+impl Tool for ShellTool {
+    fn name(&self) -> &'static str {
+        "shell"
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::Execute
+    }
+
+    fn description(&self) -> &'static str {
+        "Run a command in the project's shell and return its output. The user is asked to approve \
+         it first, and may decline. Runs in the project's root directory unless `cwd` says \
+         otherwise. Output is truncated to the last few thousand characters, so prefer commands \
+         that report concisely — `cargo test --quiet` over `cargo test`. Not for editing files: \
+         use `edit` and `write`, whose changes the user can see and undo."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The command line to run, as you would type it in a terminal.",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Directory to run in, relative to a project folder. Defaults to \
+                                    the project root.",
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": "How long to wait before giving up. Defaults to 60.",
+                },
+            },
+            "required": ["command"],
+        })
+    }
+
+    fn run(&self, input: Value, context: ToolContext, cx: &mut App) -> Task<Result<ToolOutput>> {
+        let command = match string_argument(&input, "command") {
+            Ok(command) => command,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        if command.trim().is_empty() {
+            return Task::ready(Err(anyhow!("the command was empty")));
+        }
+
+        let requested = input
+            .get("timeout_seconds")
+            .and_then(Value::as_f64)
+            .filter(|seconds| *seconds > 0.0)
+            .map(Duration::from_secs_f64)
+            .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        let timeout = requested.min(MAX_COMMAND_TIMEOUT);
+        let relative_cwd = input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        cx.spawn(async move |cx| {
+            let decision = context
+                .permissions
+                .update(cx, |permissions, cx| {
+                    permissions.request(
+                        PermissionRequest {
+                            tool: "shell",
+                            title: "Run a command".into(),
+                            detail: command.clone().into(),
+                            scope: command_scope(&command),
+                        },
+                        cx,
+                    )
+                })
+                .await;
+
+            // A dropped sender means the thread went away mid-question, which is a refusal.
+            if !decision.map(Decision::is_allowed).unwrap_or(false) {
+                bail!("the user declined to run this command");
+            }
+
+            let (shell, directory) = cx.update(|cx| {
+                let shell = agent_shell(cx);
+                let directory = working_directory(&context.project, relative_cwd.as_deref(), cx);
+                (shell, directory)
+            });
+            let directory = directory?;
+
+            let executor = cx.background_executor().clone();
+            run_command(command.clone(), shell, directory, timeout, &executor).await
+        })
+    }
+}
+
+/// The shell the agent runs commands in.
+///
+/// `cowork.shell` when it is set, and otherwise whatever the terminal is configured to use — so the
+/// agent runs commands in the same shell the user gets when they open a terminal, which is the only
+/// behaviour that will not surprise them.
+fn agent_shell(cx: &App) -> Shell {
+    CoworkSettings::get_global(cx)
+        .shell
+        .clone()
+        .unwrap_or_else(|| TerminalSettings::get_global(cx).shell.clone())
+}
+
+/// Where to run, which must be inside the project.
+fn working_directory(
+    project: &Entity<Project>,
+    relative: Option<&str>,
+    cx: &App,
+) -> Result<PathBuf> {
+    let project = project.read(cx);
+
+    let Some(relative) = relative else {
+        let worktree = project
+            .visible_worktrees(cx)
+            .next()
+            .context("this project has no folder to run a command in")?;
+        return Ok(worktree.read(cx).abs_path().to_path_buf());
+    };
+
+    // Resolving through the project is what keeps `cwd` inside it: a path that names no worktree
+    // is refused rather than run from wherever it happens to point.
+    let project_path = project
+        .find_project_path(relative, cx)
+        .with_context(|| format!("`{relative}` is not inside any folder open in this project"))?;
+    let worktree = project
+        .worktree_for_id(project_path.worktree_id, cx)
+        .context("that folder is no longer open")?;
+
+    Ok(worktree
+        .read(cx)
+        .abs_path()
+        .join(project_path.path.as_std_path()))
+}
+
+/// Runs one command and collects what it said.
+///
+/// The child is spawned through `util::process::Child` rather than plainly, so that on Windows it
+/// joins a job object and on Unix a process group: killing it on timeout then takes the whole tree
+/// with it, instead of leaving a build running forever with nobody watching.
+async fn run_command(
+    command: String,
+    shell: Shell,
+    directory: PathBuf,
+    timeout: Duration,
+    executor: &gpui::BackgroundExecutor,
+) -> Result<ToolOutput> {
+    let label = summarize_command(&command);
+
+    // With no arguments the command line is passed through verbatim, and the builder handles the
+    // difference between `sh -c` and `cmd /C` quoting.
+    let mut process = ShellBuilder::new(&shell, cfg!(windows))
+        .non_interactive()
+        .redirect_stdin_to_dev_null()
+        .build_std_command(Some(command), &[]);
+    process.current_dir(&directory);
+
+    let mut child = util::process::Child::spawn(process, Stdio::null(), Stdio::piped(), Stdio::piped())
+        .context("starting the command")?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let mut reader = Box::pin(
+        futures::future::join(read_pipe(stdout), read_pipe(stderr)).fuse(),
+    );
+    let mut timer = Box::pin(executor.timer(timeout).fuse());
+
+    let mut timed_out = false;
+    let collected = futures::select_biased! {
+        collected = reader => Some(collected),
+        _ = timer => {
+            timed_out = true;
+            None
+        }
+    };
+
+    // Killing closes the pipes, so the readers finish with whatever the command managed to say
+    // before it was stopped — which is usually where it got stuck.
+    let (out, err) = match collected {
+        Some(collected) => collected,
+        None => {
+            let _ = child.kill();
+            reader.await
+        }
+    };
+
+    let status = if timed_out {
+        None
+    } else {
+        child.status().await.ok()
+    };
+
+    Ok(ToolOutput::new(
+        describe_run(&out, &err, status, timed_out, timeout),
+        match status.map(|status| status.success()) {
+            Some(true) => label,
+            Some(false) => format!("{label} · failed"),
+            None => format!("{label} · timed out"),
+        },
+    ))
+}
+
+async fn read_pipe<R: futures::AsyncRead + Unpin>(pipe: Option<R>) -> String {
+    let Some(mut pipe) = pipe else {
+        return String::new();
+    };
+    let mut text = String::new();
+    // A command that writes bytes which are not UTF-8 is not a failure of the command.
+    let mut bytes = Vec::new();
+    if futures::AsyncReadExt::read_to_end(&mut pipe, &mut bytes)
+        .await
+        .is_ok()
+    {
+        text = String::from_utf8_lossy(&bytes).into_owned();
+    }
+    text
+}
+
+/// What the model is told, which has to be enough to act on and no more.
+fn describe_run(
+    out: &str,
+    err: &str,
+    status: Option<std::process::ExitStatus>,
+    timed_out: bool,
+    timeout: Duration,
+) -> String {
+    let mut described = String::new();
+
+    match (timed_out, status.map(|status| status.code())) {
+        (true, _) => described.push_str(&format!(
+            "The command was still running after {} seconds and was stopped. Its output so far:\n",
+            timeout.as_secs()
+        )),
+        (false, Some(Some(0))) | (false, None) => {}
+        (false, Some(Some(code))) => described.push_str(&format!("Exited with status {code}.\n")),
+        (false, Some(None)) => described.push_str("The command was killed by a signal.\n"),
+    }
+
+    if !out.trim().is_empty() {
+        described.push_str(&tail(out));
+    }
+    if !err.trim().is_empty() {
+        if !described.is_empty() && !described.ends_with('\n') {
+            described.push('\n');
+        }
+        described.push_str("stderr:\n");
+        described.push_str(&tail(err));
+    }
+
+    if described.trim().is_empty() {
+        described.push_str("The command produced no output.");
+    }
+    described
+}
+
+/// The last of a long output, on a character boundary.
+fn tail(text: &str) -> String {
+    if text.len() <= MAX_OUTPUT_BYTES {
+        return text.to_owned();
+    }
+
+    let mut start = text.len() - MAX_OUTPUT_BYTES;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[… {} earlier characters omitted …]\n{}",
+        start,
+        &text[start..]
+    )
+}
+
+/// A one-line label for the transcript.
+fn summarize_command(command: &str) -> String {
+    let single_line = command.split('\n').next().unwrap_or(command).trim();
+    if single_line.chars().count() <= 60 {
+        return single_line.to_owned();
+    }
+    let truncated: String = single_line.chars().take(57).collect();
+    format!("{truncated}…")
 }
 
 struct WriteTool;

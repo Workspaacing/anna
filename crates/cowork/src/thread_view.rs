@@ -5,6 +5,7 @@ use crate::{
     provider::{
         self, CompletionEvent, CompletionRequest, Message, Role, StopReason, ToolCall, ToolResult,
     },
+    permission::{Decision, PermissionBroker, PermissionEvent},
     thread::{CoworkStore, Thread, ThreadId},
     tool::{ToolContext, ToolRegistry},
 };
@@ -12,14 +13,14 @@ use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
 use futures::StreamExt as _;
 use gpui::{
-    Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, SharedString, Task, WeakEntity,
-    relative,
+    AnyElement, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, SharedString, Task,
+    WeakEntity, relative,
 };
 use language::LanguageRegistry;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
 use std::sync::Arc;
-use ui::{CopyButton, Divider, Tooltip, prelude::*};
+use ui::{Button, ButtonStyle, CopyButton, Divider, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -51,8 +52,10 @@ pub struct CoworkThreadView {
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     tools: ToolRegistry,
+    permissions: Entity<PermissionBroker>,
     error: Option<SharedString>,
     completion: Option<Task<()>>,
+    _permissions: gpui::Subscription,
 }
 
 impl CoworkThreadView {
@@ -89,6 +92,12 @@ impl CoworkThreadView {
             })
             .collect();
 
+        let permissions = cx.new(|_| PermissionBroker::new());
+        // A question the agent is waiting on has to reach the screen, and it is the broker that
+        // knows when one arrives.
+        let permissions_subscription =
+            cx.subscribe(&permissions, |_, _, _: &PermissionEvent, cx| cx.notify());
+
         Self {
             thread,
             messages,
@@ -100,8 +109,10 @@ impl CoworkThreadView {
             workspace,
             project,
             tools: ToolRegistry::default_tools(),
+            permissions,
             error: None,
             completion: None,
+            _permissions: permissions_subscription,
         }
     }
 
@@ -131,11 +142,100 @@ impl CoworkThreadView {
     }
 
     fn cancel(&mut self, _: &Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        // An outstanding question belongs to the turn being interrupted, so it goes with it rather
+        // than being left on screen asking about work nobody is waiting for any more.
+        self.permissions
+            .update(cx, |permissions, cx| permissions.cancel(cx));
+
         // Dropping the task cancels the request; whatever streamed so far is kept.
         if self.completion.take().is_some() {
             self.persist(cx);
             cx.notify();
         }
+    }
+
+    fn answer_permission(&mut self, decision: Decision, cx: &mut Context<Self>) {
+        self.permissions
+            .update(cx, |permissions, cx| permissions.resolve(decision, cx));
+    }
+
+    /// The card that asks before the agent runs a command.
+    ///
+    /// Deliberately shown between the transcript and the composer rather than as a modal: the user
+    /// needs the conversation above it to judge the request, and a dialog would hide exactly that.
+    fn render_permission(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let request = self.permissions.read(cx).pending()?.clone();
+        let colors = cx.theme().colors();
+
+        Some(
+            v_flex()
+                .w_full()
+                .px_4()
+                .py_3()
+                .gap_2()
+                .bg(colors.element_background)
+                .border_t_1()
+                .border_color(colors.border_variant)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Icon::new(IconName::Warning)
+                                .size(IconSize::Small)
+                                .color(Color::Warning),
+                        )
+                        .child(Label::new(request.title.clone()).size(LabelSize::Small)),
+                )
+                .child(
+                    div()
+                        .id("cowork-permission-detail")
+                        .w_full()
+                        .min_w_0()
+                        .max_h(px(120.))
+                        .overflow_y_scroll()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(colors.editor_background)
+                        .font_buffer(cx)
+                        .text_ui_sm(cx)
+                        .child(request.detail.clone()),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_1p5()
+                        // Declining comes first, and is the plain button: approving is the choice
+                        // that cannot be taken back, so it should not be the one hit by reflex.
+                        .child(
+                            Button::new("cowork-permission-reject", "Don't run")
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.answer_permission(Decision::Reject, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(
+                                "cowork-permission-always",
+                                format!("Always allow {}", request.scope),
+                            )
+                            .tooltip(Tooltip::text(
+                                "Stop asking about this program until Wu restarts",
+                            ))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.answer_permission(Decision::Always, cx)
+                            })),
+                        )
+                        .child(
+                            Button::new("cowork-permission-once", "Run once")
+                                .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.answer_permission(Decision::Once, cx)
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn select_model(&mut self, _: &SelectModel, window: &mut Window, cx: &mut Context<Self>) {
@@ -222,6 +322,7 @@ impl CoworkThreadView {
         let tools = self.tools.clone();
         let project = self.project.clone();
         let workspace = self.workspace.clone();
+        let permissions = self.permissions.clone();
 
         self.completion = Some(cx.spawn(async move |this, cx| {
             for step in 0..Self::MAX_STEPS {
@@ -277,6 +378,7 @@ impl CoworkThreadView {
                         ToolContext {
                             project: project.clone(),
                             workspace: workspace.clone(),
+                            permissions: permissions.clone(),
                         },
                         cx,
                     )
@@ -809,6 +911,7 @@ impl Render for CoworkThreadView {
                     .when(is_empty, |this| this.child(self.render_empty_state()))
                     .children(messages),
             )
+            .children(self.render_permission(cx))
             .when_some(self.error.clone(), |this, error| {
                 this.child(render_error(error, cx))
             })

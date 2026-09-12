@@ -1007,6 +1007,22 @@ pub struct CoworkSettingsContent {
     pub disabled_models: Option<Vec<String>>,
     /// The checks Cowork runs over the agent's own work.
     pub verification: Option<CoworkVerificationSettingsContent>,
+    /// The shell the agent runs commands in.
+    ///
+    /// Left unset, the agent uses whatever `terminal.shell` is set to, so a command it runs
+    /// behaves the same as one you would type in a terminal yourself. Set it to name a different
+    /// program, with or without arguments.
+    ///
+    /// Default: unset, meaning `terminal.shell`
+    pub shell: Option<Shell>,
+    /// Approve every request the agent makes without asking.
+    ///
+    /// The agent asks before running a command, because nothing in the editor can undo one. With
+    /// this on it will not ask. Reading and writing files never asks either way: those changes land
+    /// in the editor's own buffers, undo history and git gutter.
+    ///
+    /// Default: false
+    pub auto_approve: Option<bool>,
 }
 
 /// The checks that run after a Cowork agent writes, changes or deletes something.

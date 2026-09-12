@@ -115,6 +115,15 @@
     "catalog_url": "https://models.dev/api.json",
     // Models hidden from Cowork's model selector, as "provider/model" identifiers.
     "disabled_models": [],
+    // Approve every request the agent makes without asking. The agent asks
+    // before running a command, because nothing in the editor can undo one.
+    // Reading and writing files never asks either way: those changes land in
+    // the editor's own buffers, undo history and git gutter.
+    "auto_approve": false,
+    // The shell the agent runs commands in. Omitted, it uses `terminal.shell`,
+    // so a command the agent runs behaves like one you would type yourself.
+    // Set it to a program name, or to {"program": "...", "args": [...]}.
+    // "shell": "system",
     // The checks Cowork runs over its own agents' work. Every one of them is
     // built into Wu and none of them consults a model, so leaving them on
     // costs nothing per message.
@@ -1858,6 +1867,14 @@
   // and change the value to `false`.
   "auto_install_extensions": {
     "html": true,
+    // Biome, ESLint and Prettier are built into Wu: Biome and ESLint run as
+    // language servers Wu installs and updates itself, and Prettier has its own
+    // integration. The extensions would install a second copy of each and then
+    // lose the race to register anyway, since a built-in language server always
+    // wins the name.
+    "biome": false,
+    "eslint": false,
+    "prettier": false,
   },
   // The capabilities granted to extensions.
   //

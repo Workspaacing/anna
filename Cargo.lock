@@ -2098,6 +2098,8 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "task",
+ "terminal",
  "theme",
  "toml 0.8.23",
  "ui",

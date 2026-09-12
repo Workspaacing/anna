@@ -299,8 +299,12 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
     // Biome covers JSON and CSS as well as the JavaScript family, which is most of where it wins
     // over the other two. Names that only exist when an extension supplies them are harmless here:
     // registering an adapter for a language nobody has installed does nothing.
+    // HTML and XML are left out on purpose: Biome touches HTML only behind an explicit opt-in in
+    // `biome.json` and does not handle XML at all, so attaching the server to those files would
+    // start a process that has nothing to say.
     let biome_languages = [
         "TSX",
+        "JSX",
         "TypeScript",
         "JavaScript",
         "JSON",

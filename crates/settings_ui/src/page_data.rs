@@ -5642,6 +5642,147 @@ fn cowork_page() -> SettingsPage {
         ]
     }
 
+    fn agent_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Agent"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Approve Requests Automatically",
+                description: "Let the agent run commands without asking. It otherwise asks each time, showing the command, and remembers a program you allow until Wu restarts. Reading and writing files never asks either way: those changes land in the editor's own buffers, undo history and git gutter, so you can see and reverse them.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.auto_approve"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.auto_approve.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().auto_approve = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::DynamicItem(DynamicItem {
+                discriminant: SettingItem {
+                    files: USER,
+                    title: "Shell",
+                    description: "The shell the agent runs commands in. Left unset it uses the one configured under Terminal, so a command the agent runs behaves like one you would type yourself — set this only to give the agent a different shell.",
+                    field: Box::new(SettingField {
+                        json_path: Some("cowork.shell$"),
+                        pick: |settings_content| {
+                            Some(
+                                &dynamic_variants::<settings::Shell>()[settings_content
+                                    .cowork
+                                    .as_ref()?
+                                    .shell
+                                    .as_ref()?
+                                    .discriminant()
+                                    as usize],
+                            )
+                        },
+                        write: |settings_content, value, _| {
+                            let Some(value) = value else {
+                                if let Some(cowork) = settings_content.cowork.as_mut() {
+                                    cowork.shell = None;
+                                }
+                                return;
+                            };
+                            let settings_value = settings_content
+                                .cowork
+                                .get_or_insert_default()
+                                .shell
+                                .get_or_insert_with(settings::Shell::default);
+                            let default_shell = if cfg!(target_os = "windows") {
+                                "powershell.exe"
+                            } else {
+                                "sh"
+                            };
+                            *settings_value = match value {
+                                settings::ShellDiscriminants::System => settings::Shell::System,
+                                settings::ShellDiscriminants::Program => {
+                                    let program = match settings_value {
+                                        settings::Shell::Program(program) => program.clone(),
+                                        settings::Shell::WithArguments { program, .. } => {
+                                            program.clone()
+                                        }
+                                        _ => String::from(default_shell),
+                                    };
+                                    settings::Shell::Program(program)
+                                }
+                                settings::ShellDiscriminants::WithArguments => {
+                                    let (program, args) = match settings_value {
+                                        settings::Shell::Program(program) => {
+                                            (program.clone(), vec![])
+                                        }
+                                        settings::Shell::WithArguments { program, args, .. } => {
+                                            (program.clone(), args.clone())
+                                        }
+                                        _ => (String::from(default_shell), vec![]),
+                                    };
+                                    settings::Shell::WithArguments {
+                                        program,
+                                        args,
+                                        // The agent's shell has no tab to title.
+                                        title_override: None,
+                                    }
+                                }
+                            };
+                        },
+                    }),
+                    metadata: None,
+                },
+                pick_discriminant: |settings_content| {
+                    Some(
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .shell
+                            .as_ref()?
+                            .discriminant() as usize,
+                    )
+                },
+                fields: dynamic_variants::<settings::Shell>()
+                    .into_iter()
+                    .map(|variant| match variant {
+                        settings::ShellDiscriminants::System => vec![],
+                        settings::ShellDiscriminants::Program
+                        | settings::ShellDiscriminants::WithArguments => vec![SettingItem {
+                            files: USER,
+                            title: "Program",
+                            description: "The shell program to run. Arguments, if any, are set in settings.json.",
+                            field: Box::new(SettingField {
+                                json_path: Some("cowork.shell"),
+                                pick: |settings_content| {
+                                    match settings_content.cowork.as_ref()?.shell.as_ref()? {
+                                        settings::Shell::Program(program) => Some(program),
+                                        settings::Shell::WithArguments { program, .. } => {
+                                            Some(program)
+                                        }
+                                        settings::Shell::System => None,
+                                    }
+                                },
+                                write: |settings_content, value, _| {
+                                    let Some(value) = value else {
+                                        return;
+                                    };
+                                    match settings_content
+                                        .cowork
+                                        .get_or_insert_default()
+                                        .shell
+                                        .as_mut()
+                                    {
+                                        Some(settings::Shell::Program(program)) => *program = value,
+                                        Some(settings::Shell::WithArguments {
+                                            program, ..
+                                        }) => *program = value,
+                                        _ => return,
+                                    }
+                                },
+                            }),
+                            metadata: None,
+                        }],
+                    })
+                    .collect(),
+            }),
+        ]
+    }
+
     fn verification_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SectionHeader("Verification"),
@@ -5792,6 +5933,7 @@ fn cowork_page() -> SettingsPage {
         items: concat_sections![
             threads_section(),
             catalog_section(),
+            agent_section(),
             verification_section(),
             panel_section()
         ],

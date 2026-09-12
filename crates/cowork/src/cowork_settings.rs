@@ -1,5 +1,6 @@
 use gpui::Pixels;
 use settings::{DockSide, IntoGpui as _, RegisterSetting, Settings};
+use task::Shell;
 
 #[derive(Clone, Debug, RegisterSetting)]
 pub struct CoworkSettings {
@@ -9,6 +10,9 @@ pub struct CoworkSettings {
     pub catalog_url: String,
     pub disabled_models: Vec<String>,
     pub verification: VerificationSettings,
+    /// `None` means "whatever the terminal is set to", which is the default.
+    pub shell: Option<Shell>,
+    pub auto_approve: bool,
 }
 
 /// Which of the built-in checks run after the agent changes something.
@@ -45,6 +49,26 @@ impl Settings for CoworkSettings {
                     dependency_audit: verification.dependency_audit.unwrap(),
                 }
             },
+            shell: cowork.shell.clone().map(settings_shell_to_task_shell),
+            auto_approve: cowork.auto_approve.unwrap(),
         }
+    }
+}
+
+/// The settings enum and the runtime enum describe the same three choices but are separate types,
+/// so that settings can be deserialized without depending on the task crate.
+fn settings_shell_to_task_shell(shell: settings::Shell) -> Shell {
+    match shell {
+        settings::Shell::System => Shell::System,
+        settings::Shell::Program(program) => Shell::Program(program),
+        settings::Shell::WithArguments {
+            program,
+            args,
+            title_override,
+        } => Shell::WithArguments {
+            program,
+            args,
+            title_override,
+        },
     }
 }
