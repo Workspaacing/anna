@@ -3,7 +3,7 @@ use crate::{
     thread::{CoworkStore, credential_is_present},
 };
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
-use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity};
+use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task};
 use picker::{Picker, PickerDelegate};
 use std::sync::Arc;
 use ui::{ListItem, ListItemSpacing, prelude::*};
@@ -24,7 +24,15 @@ impl ModelSelector {
             .map(|store| store.read(cx).catalog_entries())
             .unwrap_or_default();
 
-        let delegate = ModelSelectorDelegate::new(cx.entity().downgrade(), entries, selected, on_confirm);
+        let selector = cx.entity().downgrade();
+        let delegate = ModelSelectorDelegate::new(
+            Arc::new(move |cx: &mut App| {
+                selector.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+            }),
+            entries,
+            selected,
+            on_confirm,
+        );
         let picker = cx.new(|cx| Picker::uniform_list(delegate, window, cx));
         Self { picker }
     }
@@ -46,7 +54,10 @@ impl EventEmitter<DismissEvent> for ModelSelector {}
 impl ModalView for ModelSelector {}
 
 pub struct ModelSelectorDelegate {
-    selector: WeakEntity<ModelSelector>,
+    /// How to close whatever is hosting this picker. A callback rather than a `ModelSelector`
+    /// handle, because the new-thread dialog hosts one too and wants escape to return to its
+    /// fields rather than close the dialog.
+    on_dismiss: Arc<dyn Fn(&mut App) + Send + Sync>,
     entries: Vec<CatalogEntry>,
     matches: Vec<StringMatch>,
     selected: Option<ModelRef>,
@@ -55,8 +66,8 @@ pub struct ModelSelectorDelegate {
 }
 
 impl ModelSelectorDelegate {
-    fn new(
-        selector: WeakEntity<ModelSelector>,
+    pub(crate) fn new(
+        on_dismiss: Arc<dyn Fn(&mut App) + Send + Sync>,
         entries: Vec<CatalogEntry>,
         selected: Option<ModelRef>,
         on_confirm: Arc<dyn Fn(ModelRef, &mut Window, &mut App) + Send + Sync>,
@@ -82,7 +93,7 @@ impl ModelSelectorDelegate {
             .unwrap_or(0);
 
         Self {
-            selector,
+            on_dismiss,
             entries,
             matches,
             selected,
@@ -188,9 +199,7 @@ impl PickerDelegate for ModelSelectorDelegate {
     }
 
     fn dismissed(&mut self, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        self.selector
-            .update(cx, |_, cx| cx.emit(DismissEvent))
-            .ok();
+        (self.on_dismiss)(cx);
     }
 
     fn render_match(

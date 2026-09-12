@@ -3,8 +3,9 @@ use crate::{
     catalog::ModelRef,
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
+    new_thread_dialog::NewThreadDialog,
     thread::{CatalogState, CoworkStore, CoworkStoreEvent, ThreadId, ThreadMetadata, format_age},
-    thread_view::{CoworkThreadView, project_folders as cowork_project_folders},
+    thread_view::CoworkThreadView,
 };
 use editor::{Editor, EditorEvent};
 use fs::Fs;
@@ -160,62 +161,43 @@ impl CoworkPanel {
         self.start_new_thread(window, cx);
     }
 
-    /// Starting a thread asks which model it is for.
+    /// Starting a thread opens the dialog that decides what it is for.
     ///
-    /// A conversation keeps the model it was created with, so this is the one moment the choice
-    /// matters and the one moment it is cheap to make. Escape starts nothing, which is the right
-    /// outcome for a picker opened by mistake.
+    /// Model and folder are both awkward to change after the fact — one is kept for the whole
+    /// conversation, the other is where every command runs — so they are asked together, before
+    /// anything exists. Cancelling starts nothing.
     pub fn start_new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(suggested) = self.store.read(cx).model_for_new_thread() else {
             self.report_no_model(cx);
             return;
         };
-
-        let this = cx.entity().downgrade();
-        self.pick_model(
-            Some(suggested),
-            Arc::new(move |model, window, cx| {
-                this.update(cx, |this, cx| this.open_new_thread(model, window, cx))
-                    .log_err();
-            }),
-            window,
-            cx,
-        );
-    }
-
-    /// Starts the thread, asking which folder it works in when the project has more than one.
-    ///
-    /// With a single folder the answer is that folder, and a prompt would be friction with no
-    /// choice in it. The folder is shown in the thread's header either way, and changed there.
-    fn open_new_thread(&mut self, model: ModelRef, window: &mut Window, cx: &mut Context<Self>) {
-        let folders = cowork_project_folders(&self.project, cx);
-
-        if folders.len() < 2 {
-            self.open_thread_in(model, self.project_key(cx), window, cx);
+        let Some(workspace) = self.workspace.upgrade() else {
             return;
-        }
+        };
 
-        let labels = folders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
-        let answer = window.prompt(
-            PromptLevel::Info,
-            "Which folder should this thread work in?",
-            Some("Commands run here, and paths the agent gives are resolved from here."),
-            &labels,
-            cx,
-        );
+        // A key may have been added since the catalog was last read, and a model whose provider is
+        // not connected is never offered.
+        self.store
+            .update(cx, |store, cx| store.refresh_connections(cx));
 
         let this = cx.entity().downgrade();
-        cx.spawn_in(window, async move |_, cx| {
-            let Ok(chosen) = answer.await else {
-                return;
-            };
-            let folder = folders.get(chosen).map(|(_, path)| path.clone());
-            this.update_in(cx, |this, window, cx| {
-                this.open_thread_in(model, folder, window, cx);
-            })
-            .log_err();
-        })
-        .detach();
+        let project = self.project.clone();
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, move |window, cx| {
+                NewThreadDialog::new(
+                    suggested,
+                    project,
+                    Arc::new(move |model, folder, window, cx| {
+                        this.update(cx, |this, cx| {
+                            this.open_thread_in(model, folder, window, cx);
+                        })
+                        .log_err();
+                    }),
+                    window,
+                    cx,
+                )
+            });
+        });
     }
 
     fn open_thread_in(
