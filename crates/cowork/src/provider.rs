@@ -62,6 +62,14 @@ pub struct ToolResult {
     /// same thing in a shape the model has no use for.
     #[serde(skip)]
     pub checks: Option<crate::verify::CheckReport>,
+    /// What the file this call changed held before it, so rewinding the conversation can put it
+    /// back.
+    ///
+    /// Persisted with the thread, so a conversation reopened later can still be rewound. Never sent
+    /// to a provider, for the same reason as `diff`: each wire format builds its request body from
+    /// `content`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<crate::checkpoint::Checkpoint>,
 }
 
 /// Fields added after the first release default, so threads stored by an earlier version still load.
@@ -1329,6 +1337,7 @@ mod tests {
                 },
                 Message::tool_results(vec![ToolResult {
                     checks: None,
+                    checkpoint: None,
                     call_id: "read".into(),
                     content: "fn main() {}".into(),
                     is_error: false,
@@ -1496,6 +1505,7 @@ mod tests {
                 },
                 Message::tool_results(vec![ToolResult {
                     checks: None,
+                    checkpoint: None,
                     call_id: "c1".into(),
                     content: "fn main() {}".into(),
                     is_error: false,

@@ -73,6 +73,13 @@ pub struct ThreadMetadata {
     /// of an old conversation would be worse than showing it in the wrong place.
     #[serde(default)]
     pub project: Option<String>,
+    /// Whether this thread was started as a fork of another.
+    ///
+    /// Kept as a fact rather than baked into the title once, because the title is re-derived from
+    /// the first prompt on every save — and a fork's first prompt is its source's, so the two would
+    /// otherwise be indistinguishable in the list the moment the fork was saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forked: bool,
 }
 
 impl ThreadMetadata {
@@ -114,7 +121,12 @@ impl Thread {
             .unwrap_or_default();
 
         if !first_prompt.trim().is_empty() {
-            self.metadata.title = summarize(first_prompt, TITLE_LENGTH);
+            let title = summarize(first_prompt, TITLE_LENGTH);
+            self.metadata.title = if self.metadata.forked {
+                format!("{title} (fork)")
+            } else {
+                title
+            };
         }
 
         self.metadata.preview = self
@@ -488,6 +500,14 @@ impl CoworkStore {
         let key = pending.editor.read(cx).text(cx).trim().to_owned();
         let url = credential_url(&provider_id);
 
+        if let Some(problem) = implausible_key(&key) {
+            if let Some(pending) = self.pending_api_key.as_mut() {
+                pending.error = Some(problem.into());
+            }
+            cx.notify();
+            return;
+        }
+
         if key.is_empty() {
             self.stored_keys.remove(&provider_id);
             cx.delete_credentials(&url).detach();
@@ -830,22 +850,7 @@ impl CoworkStore {
         project: Option<String>,
         cx: &mut Context<Self>,
     ) -> Thread {
-        self.next_sequence = self.next_sequence.wrapping_add(1);
-        let now = now_seconds();
-        let thread = Thread {
-            metadata: ThreadMetadata {
-                id: ThreadId::new(self.next_sequence),
-                title: "New thread".to_owned(),
-                model,
-                created_at: now,
-                updated_at: now,
-                message_count: 0,
-                preview: String::new(),
-                context_tokens: None,
-                project,
-            },
-            messages: Vec::new(),
-        };
+        let thread = self.blank_thread(model, project);
 
         // Written to disk here, rather than when the first reply arrives.
         //
@@ -857,6 +862,45 @@ impl CoworkStore {
         self.save_thread(thread.clone(), cx);
 
         thread
+    }
+
+    /// Starts a new thread from a copy of earlier messages, leaving the source thread as it was.
+    pub fn fork_thread(
+        &mut self,
+        source: &ThreadMetadata,
+        messages: Vec<Message>,
+        cx: &mut Context<Self>,
+    ) -> Thread {
+        let mut thread = self.blank_thread(source.model.clone(), source.project.clone());
+        thread.messages = messages;
+        thread.metadata.forked = true;
+        // A fork taken at the very first message has no prompt to be titled from yet.
+        thread.metadata.title = format!("{} (fork)", source.title);
+        thread.refresh_metadata();
+
+        self.save_thread(thread.clone(), cx);
+
+        thread
+    }
+
+    fn blank_thread(&mut self, model: ModelRef, project: Option<String>) -> Thread {
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let now = now_seconds();
+        Thread {
+            metadata: ThreadMetadata {
+                id: ThreadId::new(self.next_sequence),
+                title: "New thread".to_owned(),
+                model,
+                created_at: now,
+                updated_at: now,
+                message_count: 0,
+                preview: String::new(),
+                context_tokens: None,
+                project,
+                forked: false,
+            },
+            messages: Vec::new(),
+        }
     }
 
     pub fn load_thread(&self, id: ThreadId, cx: &App) -> Task<Result<Thread>> {
@@ -1026,6 +1070,25 @@ fn credential_url(provider_id: &str) -> String {
     format!("cowork://{provider_id}")
 }
 
+/// Why a pasted value cannot be an API key, if it cannot.
+///
+/// Deliberately narrow: providers disagree on prefixes and lengths, so the only rules are ones no
+/// key anywhere breaks. What they catch is the common accident — the clipboard held something else,
+/// an error message or a sentence, when the key was pasted — which otherwise surfaces much later as
+/// a provider's 401 that says nothing about the key being the problem.
+fn implausible_key(key: &str) -> Option<&'static str> {
+    if key.chars().any(char::is_whitespace) {
+        Some(
+            "An API key never contains spaces or line breaks. Something else may have been on the \
+             clipboard.",
+        )
+    } else if !key.is_ascii() {
+        Some("An API key is plain ASCII. Something else may have been on the clipboard.")
+    } else {
+        None
+    }
+}
+
 /// Reads a credential from the environment. They are read from the environment variable the
 /// catalog declares for the provider, which is the same contract the AI SDK uses.
 pub fn credential(env_var: &str) -> Option<String> {
@@ -1102,9 +1165,27 @@ mod tests {
                 preview: String::new(),
                 context_tokens: None,
                 project: None,
+                forked: false,
             },
             messages,
         }
+    }
+
+    #[test]
+    fn a_fork_still_says_so_after_it_is_saved() {
+        let mut thread = thread_with(vec![Message::user("Fix the parser")]);
+        thread.metadata.forked = true;
+        thread.refresh_metadata();
+        assert_eq!(thread.metadata.title, "Fix the parser (fork)");
+    }
+
+    #[test]
+    fn a_pasted_sentence_is_not_taken_for_an_api_key() {
+        // The value that was actually saved once: error text copied a moment before the key dialog.
+        assert!(implausible_key("openrouter has no API key. Add one from Settings").is_some());
+        assert!(implausible_key("sk-or-v1-abc\u{2192}").is_some());
+        assert!(implausible_key("sk-or-v1-0123456789abcdef").is_none());
+        assert!(implausible_key("AIzaSyD-0123456789_abcdef").is_none());
     }
 
     fn scoped_to(project: Option<&str>) -> ThreadMetadata {

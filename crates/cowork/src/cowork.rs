@@ -11,6 +11,7 @@
 
 mod audit;
 mod catalog;
+pub mod checkpoint;
 mod cowork_panel;
 mod consequence;
 mod cowork_settings;

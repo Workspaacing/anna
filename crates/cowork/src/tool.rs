@@ -6,6 +6,7 @@
 //! including unsaved edits, and so remote projects work without a second code path.
 
 use crate::{
+    checkpoint,
     cowork_settings::CoworkSettings,
     permission::{Decision, PermissionBroker, PermissionRequest, command_scope},
     verify,
@@ -73,6 +74,9 @@ pub struct ToolOutput {
     /// What Biome, ESLint, Prettier and the rest made of it — `None` for a tool that changed
     /// nothing and therefore had nothing checked.
     pub checks: Option<verify::CheckReport>,
+    /// What the changed file held before this call, so rewinding the conversation can put it back —
+    /// `None` for a tool that changed no file.
+    pub checkpoint: Option<checkpoint::Checkpoint>,
 }
 
 impl ToolOutput {
@@ -83,11 +87,17 @@ impl ToolOutput {
             diff: String::new(),
             path: String::new(),
             checks: None,
+            checkpoint: None,
         }
     }
 
     pub fn with_checks(mut self, checks: verify::CheckReport) -> Self {
         self.checks = Some(checks);
+        self
+    }
+
+    pub fn with_checkpoint(mut self, checkpoint: checkpoint::Checkpoint) -> Self {
+        self.checkpoint = Some(checkpoint);
         self
     }
 
@@ -322,6 +332,7 @@ async fn apply(
             .and_then(|worktree| worktree.read(cx).entry_for_path(&project_path.path).cloned())
             .is_some()
     });
+    let abs_path = project.read_with(cx, |project, cx| project.absolute_path(&project_path, cx));
 
     if !existed {
         // `Fs::write` creates the parent directories, so a nested path needs no preparation.
@@ -387,6 +398,20 @@ async fn apply(
     // handed to the checks, which take it.
     let formatted = before != saved;
 
+    // Hashed on the background for the reason `buffer_text` stringifies there, and before the
+    // checks take `saved`.
+    let (saved, after_digest) = cx
+        .background_spawn(async move {
+            let after_digest = checkpoint::digest(&saved);
+            (saved, after_digest)
+        })
+        .await;
+    let checkpoint = abs_path.map(|abs_path| checkpoint::Checkpoint {
+        abs_path: abs_path.to_string_lossy().into_owned(),
+        before: checkpoint::Before::recorded(existed, before),
+        after_digest,
+    });
+
     findings.extend(
         verify::inspect(settings, http, buffer, wait, file_name, saved, cx)
             .await
@@ -400,15 +425,17 @@ async fn apply(
         content.push_str(&report.to_model(&path));
     }
 
-    Ok(
-        ToolOutput::new(content, format!("{path} · {summary}"))
-            .with_diff(diff, path.clone())
-            .with_checks(verify::CheckReport {
-                attached,
-                findings: report.findings,
-                formatted,
-            }),
-    )
+    let mut output = ToolOutput::new(content, format!("{path} · {summary}"))
+        .with_diff(diff, path.clone())
+        .with_checks(verify::CheckReport {
+            attached,
+            findings: report.findings,
+            formatted,
+        });
+    if let Some(checkpoint) = checkpoint {
+        output = output.with_checkpoint(checkpoint);
+    }
+    Ok(output)
 }
 
 /// The language servers that were actually running for this buffer.

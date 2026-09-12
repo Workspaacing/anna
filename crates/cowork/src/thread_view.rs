@@ -1,6 +1,7 @@
 use crate::{
     Cancel, SelectModel, Submit,
     catalog::ModelRef,
+    checkpoint,
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
     provider::{
@@ -26,11 +27,15 @@ use settings::Settings as _;
 use std::sync::Arc;
 use gpui::StyledText;
 use settings::AgentPermission;
-use ui::{Button, ButtonStyle, ContextMenu, CopyButton, Divider, PopoverMenu, Tooltip, prelude::*};
+use ui::{
+    Button, ButtonStyle, ContextMenu, ContextMenuEntry, CopyButton, Divider, PopoverMenu, Tooltip,
+    prelude::*,
+};
 use util::ResultExt as _;
 use workspace::{
-    Workspace,
+    Toast, Workspace,
     item::{Item, ItemEvent},
+    notifications::NotificationId,
 };
 
 pub enum CoworkThreadEvent {
@@ -220,6 +225,227 @@ impl CoworkThreadView {
         }
     }
 
+    /// Puts a message in the composer without sending it, with the pictures it carried.
+    fn prefill(
+        &mut self,
+        text: String,
+        attachments: Vec<Attachment>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_images = attachments;
+        self.input
+            .update(cx, |editor, cx| editor.set_text(text, window, cx));
+        window.focus(&self.input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Goes back to one of the user's messages, as Claude Code's rewind does.
+    ///
+    /// The message itself is removed and put back in the composer, because the usual reason to go
+    /// back is to ask the same thing differently. Files are restored only as far as the agent's own
+    /// `write` and `edit` calls reach: what a shell command changed was never recorded, and a file
+    /// the user has touched since is left alone rather than overwritten.
+    fn rewind(
+        &mut self,
+        index: usize,
+        scope: RewindScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Never while a turn runs. The agent is still changing the files and the transcript, so a
+        // rewind underneath it would undo work it is about to build on. The button is disabled for
+        // the same reason; this holds even for a menu that was opened before the turn started.
+        if self.is_streaming() {
+            return;
+        }
+
+        let Some(message) = self
+            .thread
+            .messages
+            .get(index)
+            .filter(|message| message.role == Role::User)
+        else {
+            return;
+        };
+        let text = message.text.clone();
+        let attachments = message.attachments.clone();
+        let checkpoints = checkpoints_from(self.thread.messages.get(index..).unwrap_or_default());
+
+        if scope.restores_code() {
+            let plan = checkpoint::plan(checkpoints);
+            let project = self.project.clone();
+            let workspace = self.workspace.clone();
+            cx.spawn(async move |_, cx| {
+                let outcome = checkpoint::restore(project, plan, cx).await;
+                let notice = describe_restore(&outcome);
+                workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.show_toast(
+                            Toast::new(NotificationId::unique::<RewindNotice>(), notice),
+                            cx,
+                        );
+                    })
+                    .log_err();
+            })
+            .detach();
+        }
+
+        if scope.rewinds_conversation() {
+            self.thread.messages.truncate(index);
+            self.messages.truncate(index);
+            // Keyed by message index, so an entry past the cut would open the diff of whatever
+            // message takes that place next.
+            self.expanded_diffs
+                .retain(|(message_index, _)| *message_index < index);
+            // It described the longer conversation; the next reply reports the real figure.
+            self.thread.metadata.context_tokens = None;
+            self.error = None;
+            self.prefill(text, attachments, window, cx);
+            self.persist(cx);
+            cx.emit(CoworkThreadEvent::TitleChanged);
+        }
+        cx.notify();
+    }
+
+    /// Starts a new thread from everything before one of the user's messages, with that message
+    /// waiting in its composer.
+    ///
+    /// The thread it came from is left exactly as it was, and so are the files: both threads work in
+    /// the same folder, so a fork is a second line of conversation, not a second copy of the code.
+    fn fork(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .thread
+            .messages
+            .get(index)
+            .filter(|message| message.role == Role::User)
+        else {
+            return;
+        };
+        let text = message.text.clone();
+        let attachments = message.attachments.clone();
+        let earlier = self
+            .thread
+            .messages
+            .get(..index)
+            .unwrap_or_default()
+            .to_vec();
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+
+        let source = self.thread.metadata.clone();
+        let thread = self
+            .store
+            .update(cx, |store, cx| store.fork_thread(&source, earlier, cx));
+        let store = self.store.clone();
+        let workspace_handle = self.workspace.clone();
+        let project = self.project.clone();
+        let fs = self.fs.clone();
+
+        workspace.update(cx, |workspace, cx| {
+            let view = cx.new(|cx| {
+                CoworkThreadView::new(thread, store, workspace_handle, project, fs, window, cx)
+            });
+            workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            // After the item is added, which focuses the item itself; the composer is where the
+            // user is about to type.
+            view.update(cx, |view, cx| view.prefill(text, attachments, window, cx));
+        });
+    }
+
+    /// Copy, rewind and fork, under one of the user's messages.
+    ///
+    /// Shown on hover, so a long conversation is not a column of buttons. Each button hides itself,
+    /// the way the debugger's session list does, rather than a hidden row wrapping them: the rewind
+    /// menu is drawn deferred, apart from the button that opened it, so it stays open when the
+    /// pointer leaves the message to reach it.
+    fn render_user_message_actions(
+        &self,
+        index: usize,
+        text: &str,
+        group: SharedString,
+        has_file_changes: bool,
+        is_streaming: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.weak_entity();
+
+        h_flex()
+            .gap_0p5()
+            .child(
+                CopyButton::new(("cowork-copy-message", index), text.to_owned())
+                    .icon_size(IconSize::XSmall)
+                    .tooltip_label("Copy message")
+                    .visible_on_hover(group.clone()),
+            )
+            .child(if is_streaming {
+                IconButton::new(("cowork-rewind-trigger", index), IconName::RotateCcw)
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .disabled(true)
+                    .tooltip(Tooltip::text("Rewind is available once the agent has stopped"))
+                    .visible_on_hover(group.clone())
+                    .into_any_element()
+            } else {
+                PopoverMenu::new(("cowork-rewind", index))
+                    .trigger(
+                        IconButton::new(("cowork-rewind-trigger", index), IconName::RotateCcw)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Rewind to this message"))
+                            .visible_on_hover(group.clone()),
+                    )
+                    .menu(move |window, cx| {
+                        let view = view.clone();
+                        Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                            let rewind = |scope: RewindScope| {
+                                let view = view.clone();
+                                move |window: &mut Window, cx: &mut App| {
+                                    view.update(cx, |view, cx| {
+                                        view.rewind(index, scope, window, cx)
+                                    })
+                                    .log_err();
+                                }
+                            };
+
+                            menu.header("Rewind to this message")
+                                .item(
+                                    ContextMenuEntry::new("Conversation and code")
+                                        .icon(IconName::RotateCcw)
+                                        .disabled(!has_file_changes)
+                                        .handler(rewind(RewindScope::ConversationAndCode)),
+                                )
+                                .item(
+                                    ContextMenuEntry::new("Conversation only")
+                                        .icon(IconName::Return)
+                                        .handler(rewind(RewindScope::Conversation)),
+                                )
+                                .item(
+                                    ContextMenuEntry::new("Code only")
+                                        .icon(IconName::Undo)
+                                        .disabled(!has_file_changes)
+                                        .handler(rewind(RewindScope::Code)),
+                                )
+                                .separator()
+                                .label("Files changed by shell commands are not restored.")
+                        }))
+                    })
+                    .anchor(gpui::Anchor::TopRight)
+                    .into_any_element()
+            })
+            .child(
+                IconButton::new(("cowork-fork", index), IconName::GitBranch)
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .visible_on_hover(group)
+                    .tooltip(Tooltip::text(
+                        "Fork: a new thread with everything before this message",
+                    ))
+                    .on_click(cx.listener(move |this, _, window, cx| this.fork(index, window, cx))),
+            )
+    }
+
     fn answer_permission(&mut self, decision: Decision, cx: &mut Context<Self>) {
         self.permissions
             .update(cx, |permissions, cx| permissions.resolve(decision, cx));
@@ -317,18 +543,23 @@ impl CoworkThreadView {
                                     this.answer_permission(Decision::Reject, cx)
                                 })),
                         )
-                        .child(
-                            Button::new(
-                                "cowork-permission-always",
-                                format!("Always allow {}", request.scope),
+                        // Not offered for a request that is always asked, such as a command that
+                        // leaves the project: the broker asks about those whatever was granted, so
+                        // the button would promise to stop asking and then not stop.
+                        .when(!request.always_ask, |this| {
+                            this.child(
+                                Button::new(
+                                    "cowork-permission-always",
+                                    format!("Always allow {}", request.scope),
+                                )
+                                .tooltip(Tooltip::text(
+                                    "Stop asking about this program until Wu restarts",
+                                ))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.answer_permission(Decision::Always, cx)
+                                })),
                             )
-                            .tooltip(Tooltip::text(
-                                "Stop asking about this program until Wu restarts",
-                            ))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.answer_permission(Decision::Always, cx)
-                            })),
-                        )
+                        })
                         .child(
                             Button::new("cowork-permission-once", "Run once")
                                 .style(ButtonStyle::Tinted(ui::TintColor::Accent))
@@ -1016,6 +1247,7 @@ impl CoworkThreadView {
             path: String::new(),
             diff: String::new(),
             checks: None,
+            checkpoint: None,
         };
 
         let Some(tool) = tools.get(&call.name) else {
@@ -1042,6 +1274,7 @@ impl CoworkThreadView {
                 path: output.path,
                 diff: output.diff,
                 checks: output.checks,
+                checkpoint: output.checkpoint,
             },
             Err(failure) => error(format!("{failure:#}")),
         }
@@ -1088,7 +1321,8 @@ impl CoworkThreadView {
 
         let api_key = store.api_key(&model.provider_id).ok_or_else(|| {
             anyhow!(
-                "{} has no API key. Add one from Settings → Cowork → Providers, or set {} in the                  environment.",
+                "{} has no API key. Add one from Settings → Cowork → Providers, or set {} in the \
+                 environment.",
                 model.provider_id,
                 catalog_provider.primary_env_var().unwrap_or("its API key variable"),
             )
@@ -2309,6 +2543,60 @@ fn render_error(error: SharedString, cx: &App) -> impl IntoElement {
         )
 }
 
+/// How far a rewind reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RewindScope {
+    ConversationAndCode,
+    Conversation,
+    Code,
+}
+
+impl RewindScope {
+    fn rewinds_conversation(self) -> bool {
+        self != RewindScope::Code
+    }
+
+    fn restores_code(self) -> bool {
+        self != RewindScope::Conversation
+    }
+}
+
+/// Names the toast a rewind leaves, so a second rewind replaces it rather than stacking another.
+struct RewindNotice;
+
+/// Every file checkpoint recorded in these messages, oldest first.
+fn checkpoints_from(messages: &[Message]) -> Vec<checkpoint::Checkpoint> {
+    messages
+        .iter()
+        .flat_map(|message| &message.tool_results)
+        .filter_map(|result| result.checkpoint.clone())
+        .collect()
+}
+
+/// The toast after a rewind that restored code: the outcome's sentence and, when several files were
+/// left alone, which ones and why, which the sentence alone has no room for.
+fn describe_restore(outcome: &checkpoint::RestoreOutcome) -> String {
+    let summary = outcome.summary();
+    if outcome.skipped.len() < 2 {
+        return summary;
+    }
+
+    let details = outcome
+        .skipped
+        .iter()
+        .map(|(path, reason)| {
+            let name = std::path::Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            format!("{name} {reason}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    // The summary is a finished sentence; the details belong inside it, before its full stop.
+    format!("{} ({details}).", summary.trim_end_matches('.'))
+}
+
 impl Render for CoworkThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Before anything borrows the theme, because asking for a language needs `cx` mutably.
@@ -2319,6 +2607,21 @@ impl Render for CoworkThreadView {
         let markdown_style = MarkdownStyle::themed(MarkdownFont::Preview, window, cx);
         let model_label = self.thread.metadata.model.model_id.clone();
 
+        // For each message, whether it or anything after it changed a file: what rewinding the code
+        // to that message would have to undo. One pass from the end rather than a scan per message
+        // per frame.
+        let mut changes_after = vec![false; self.thread.messages.len()];
+        let mut seen_change = false;
+        for (index, message) in self.thread.messages.iter().enumerate().rev() {
+            seen_change |= message
+                .tool_results
+                .iter()
+                .any(|result| result.checkpoint.is_some());
+            if let Some(slot) = changes_after.get_mut(index) {
+                *slot = seen_change;
+            }
+        }
+
         let messages = self
             .messages
             .iter()
@@ -2326,21 +2629,46 @@ impl Render for CoworkThreadView {
             .map(|(index, message)| match message.role {
                 // The user's own turns are right-aligned and the model's are full width, so the
                 // two are told apart by position before a single word is read.
-                Role::User => h_flex()
-                    .id(("cowork-user-message", index))
-                    .w_full()
-                    .justify_end()
-                    .child(
-                        v_flex()
-                            .max_w(relative(0.75))
-                            .p_3()
-                            .gap_1()
-                            .rounded_md()
-                            .bg(colors.element_background)
-                            .child(Label::new("You").size(LabelSize::XSmall).color(Color::Muted))
-                            .child(div().child(message.text.clone())),
-                    )
-                    .into_any_element(),
+                Role::User => {
+                    let group = SharedString::from(format!("cowork-user-message-{index}"));
+                    let has_file_changes = changes_after.get(index).copied().unwrap_or(false);
+
+                    // Each row is right-aligned by its own `justify_end`, the layout the bubble had
+                    // before these actions existed. Aligning the column's children with `items_end`
+                    // instead drew the bubble on the first frame and lost it on a later repaint.
+                    v_flex()
+                        .id(("cowork-user-message", index))
+                        .group(group.clone())
+                        .w_full()
+                        .gap_0p5()
+                        .child(
+                            h_flex().w_full().justify_end().child(
+                                v_flex()
+                                    .max_w(relative(0.75))
+                                    .p_3()
+                                    .gap_1()
+                                    .rounded_md()
+                                    .bg(colors.element_background)
+                                    .child(
+                                        Label::new("You")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(div().child(message.text.clone())),
+                            ),
+                        )
+                        .child(h_flex().w_full().justify_end().child(
+                            self.render_user_message_actions(
+                                index,
+                                &message.text,
+                                group,
+                                has_file_changes,
+                                is_streaming,
+                                cx,
+                            ),
+                        ))
+                        .into_any_element()
+                }
                 Role::Assistant => v_flex()
                     .id(("cowork-assistant-message", index))
                     .w_full()
@@ -2403,6 +2731,70 @@ impl Render for CoworkThreadView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn written(abs_path: &str, before: checkpoint::Before) -> ToolResult {
+        ToolResult {
+            call_id: abs_path.to_owned(),
+            content: String::new(),
+            is_error: false,
+            path: String::new(),
+            diff: String::new(),
+            checks: None,
+            checkpoint: Some(checkpoint::Checkpoint {
+                abs_path: abs_path.to_owned(),
+                before,
+                after_digest: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn each_rewind_scope_touches_only_what_it_names() {
+        assert!(RewindScope::ConversationAndCode.rewinds_conversation());
+        assert!(RewindScope::ConversationAndCode.restores_code());
+        assert!(RewindScope::Conversation.rewinds_conversation());
+        assert!(!RewindScope::Conversation.restores_code());
+        assert!(!RewindScope::Code.rewinds_conversation());
+        assert!(RewindScope::Code.restores_code());
+    }
+
+    #[test]
+    fn a_rewind_collects_the_checkpoints_after_the_message_in_order() {
+        let messages = vec![
+            Message::user("first"),
+            Message::tool_results(vec![written("/p/a.ts", checkpoint::Before::Missing)]),
+            Message::user("second"),
+            Message::tool_results(vec![
+                written("/p/b.ts", checkpoint::Before::Text("b0".into())),
+                written("/p/a.ts", checkpoint::Before::Text("a1".into())),
+            ]),
+        ];
+
+        let from_second = checkpoints_from(messages.get(2..).unwrap_or_default());
+        let paths = from_second
+            .iter()
+            .map(|checkpoint| checkpoint.abs_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["/p/b.ts", "/p/a.ts"]);
+        assert_eq!(checkpoints_from(&messages).len(), 3);
+    }
+
+    #[test]
+    fn a_restore_that_skipped_several_files_says_which_and_why() {
+        let outcome = checkpoint::RestoreOutcome {
+            restored: vec!["/p/a.ts".into()],
+            removed: Vec::new(),
+            skipped: vec![
+                ("/p/b.ts".into(), "has unsaved edits".into()),
+                ("/p/c.ts".into(), "changed since the agent wrote it".into()),
+            ],
+        };
+        assert_eq!(
+            describe_restore(&outcome),
+            "Restored 1 file, left 2 files alone \
+             (b.ts has unsaved edits; c.ts changed since the agent wrote it)."
+        );
+    }
 
     const SAMPLE: &str = concat!(
         "@@ -3,4 +3,5 @@\n",
