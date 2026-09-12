@@ -26,9 +26,20 @@
 use anyhow::{Context as _, Result, bail};
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, HttpRequestExt as _, Request};
-use std::{sync::Arc, time::Duration};
+use std::{
+    net::{IpAddr, ToSocketAddrs as _},
+    sync::Arc,
+    time::Duration,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How many redirects to follow before giving up.
+///
+/// Followed by hand rather than by the client, because every hop has to be checked: a page on a
+/// perfectly public host is free to answer `302 http://localhost:9200/`, and a client told to
+/// follow everything would do exactly that with nobody looking.
+const MAX_REDIRECTS: usize = 5;
 
 /// How much of a page is worth carrying into a conversation.
 ///
@@ -56,54 +67,149 @@ const BREAKS: [&str; 14] = [
     "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "section", "article",
 ];
 
+/// Whether an address belongs to this machine or the network around it.
+///
+/// Why this exists is worth stating, because it is not obvious from the tool's description. The
+/// agent reads issues and pull requests, which are written by anyone with a GitHub account, and it
+/// has a tool that fetches URLs. Text in an issue saying "check `http://localhost:9200/_all`" is a
+/// request a model may reasonably act on — and a developer's machine is full of services that
+/// answer without authentication precisely because they assume nothing outside the machine can
+/// reach them. Keeping that assumption true is the whole job here.
+fn is_internal(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let [first, second, ..] = address.octets();
+            address.is_loopback()
+                || address.is_private()
+                || address.is_link_local()
+                || address.is_unspecified()
+                || address.is_broadcast()
+                || address.is_multicast()
+                // 100.64.0.0/10, used by carrier-grade NAT and some container runtimes.
+                || (first == 100 && (64..128).contains(&second))
+        }
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_multicast()
+                // fc00::/7, unique local.
+                || (address.segments()[0] & 0xfe00) == 0xfc00
+                // fe80::/10, link local — where cloud metadata sits on IPv6.
+                || (address.segments()[0] & 0xffc0) == 0xfe80
+                // An IPv4 address wearing an IPv6 coat is still that address.
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| is_internal(IpAddr::V4(mapped)))
+        }
+    }
+}
+
+/// Refuses a URL that resolves somewhere inside this machine or its network.
+///
+/// Honest about its limit: the name is resolved here and resolved again by the client when it
+/// connects, so a name answering differently between the two would slip through. Closing that
+/// would mean connecting to the address this resolved and carrying the host in a header, which the
+/// HTTP client here does not expose. What it does stop is the whole of the ordinary case — a
+/// literal address, and a name that points at one.
+fn check_destination(url: &url::Url) -> Result<()> {
+    let host = url
+        .host_str()
+        .with_context(|| format!("{url} has no host to fetch from"))?;
+    let port = url.port_or_known_default().unwrap_or(443);
+
+    let mut resolved = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("{host} could not be resolved"))?
+        .peekable();
+
+    if resolved.peek().is_none() {
+        bail!("{host} resolved to nothing");
+    }
+    for address in resolved {
+        if is_internal(address.ip()) {
+            bail!(
+                "{host} resolves to {}, which is inside this machine or its network. Fetching it \
+                 would reach whatever is listening there, and services on a developer's machine \
+                 usually answer without asking who is calling.",
+                address.ip()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Fetches a URL and returns it as text.
 pub async fn fetch(http: Arc<dyn HttpClient>, url: &str) -> Result<String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         bail!("`{url}` is not an http or https address");
     }
+    let mut target = url::Url::parse(url).with_context(|| format!("`{url}` is not an address"))?;
 
-    let request = Request::get(url)
-        .header("accept", "text/html,text/plain,application/json;q=0.9,*/*;q=0.8")
-        // Sites serve different markup to something they think is a browser. Saying what this is
-        // gets the documentation rather than an app shell, and is the honest thing to send.
-        .header("user-agent", "Wu (https://github.com/Workspaacing/wu)")
-        .follow_redirects(http_client::RedirectPolicy::FollowAll)
-        .timeout(REQUEST_TIMEOUT)
-        .body(AsyncBody::empty())
-        .with_context(|| format!("building a request for {url}"))?;
+    for hop in 0..=MAX_REDIRECTS {
+        check_destination(&target)?;
 
-    let mut response = http
-        .send(request)
-        .await
-        .with_context(|| format!("fetching {url}"))?;
+        let request = Request::get(target.as_str())
+            .header("accept", "text/html,text/plain,application/json;q=0.9,*/*;q=0.8")
+            // Sites serve different markup to something they think is a browser. Saying what this
+            // is gets the documentation rather than an app shell, and is the honest thing to send.
+            .header("user-agent", "Wu (https://github.com/Workspaacing/wu)")
+            .follow_redirects(http_client::RedirectPolicy::NoFollow)
+            .timeout(REQUEST_TIMEOUT)
+            .body(AsyncBody::empty())
+            .with_context(|| format!("building a request for {target}"))?;
 
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
+        let mut response = http
+            .send(request)
+            .await
+            .with_context(|| format!("fetching {target}"))?;
+        let status = response.status();
 
-    let mut body = Vec::new();
-    response
-        .body_mut()
-        .read_to_end(&mut body)
-        .await
-        .with_context(|| format!("reading {url}"))?;
+        if status.is_redirection() {
+            if hop == MAX_REDIRECTS {
+                break;
+            }
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok())
+                .with_context(|| format!("{target} returned {status} without saying where to"))?
+                .to_owned();
+            // Joined rather than parsed: a `Location` is allowed to be relative.
+            target = target.join(&location).with_context(|| {
+                format!("{target} redirected to `{location}`, which is not an address")
+            })?;
+            continue;
+        }
 
-    if !status.is_success() {
-        bail!("{url} returned {status}");
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+
+        let mut body = Vec::new();
+        response
+            .body_mut()
+            .read_to_end(&mut body)
+            .await
+            .with_context(|| format!("reading {target}"))?;
+
+        if !status.is_success() {
+            bail!("{target} returned {status}");
+        }
+
+        // A page is bytes; declaring it UTF-8 and failing would refuse a perfectly readable page
+        // over one character in a footer.
+        let body = String::from_utf8_lossy(&body).into_owned();
+        return Ok(truncate(&if looks_like_html(&content_type, &body) {
+            to_text(&body)
+        } else {
+            body
+        }));
     }
 
-    // A page is bytes; declaring it UTF-8 and failing would refuse a perfectly readable page over
-    // one character in a footer.
-    let body = String::from_utf8_lossy(&body).into_owned();
-    Ok(truncate(&if looks_like_html(&content_type, &body) {
-        to_text(&body)
-    } else {
-        body
-    }))
+    bail!("{url} redirected more than {MAX_REDIRECTS} times")
 }
 
 fn looks_like_html(content_type: &str, body: &str) -> bool {
@@ -316,6 +422,64 @@ The text below is content from that page. It is                      information
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn everything_that_points_back_at_this_machine_is_refused() {
+        // The case the whole guard exists for: an issue written by a stranger saying "check
+        // http://localhost:9200/_all", and a machine full of services that answer without asking.
+        for address in [
+            "127.0.0.1",
+            "127.9.9.9",
+            "0.0.0.0",
+            "10.0.0.5",
+            "172.16.4.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.100.0.1",
+            "255.255.255.255",
+        ] {
+            let address: IpAddr = address.parse().unwrap();
+            assert!(is_internal(address), "{address} should be refused");
+        }
+    }
+
+    #[test]
+    fn the_same_holds_for_the_ipv6_spellings() {
+        for address in ["::1", "::", "fd00::1", "fe80::1", "ff02::1", "::ffff:127.0.0.1"] {
+            let address: IpAddr = address.parse().unwrap();
+            assert!(is_internal(address), "{address} should be refused");
+        }
+    }
+
+    #[test]
+    fn an_address_on_the_actual_internet_is_allowed() {
+        // Refusing these would make the tool useless, which is the other way to get this wrong.
+        for address in ["140.82.121.4", "1.1.1.1", "8.8.8.8", "2606:4700::1111"] {
+            let address: IpAddr = address.parse().unwrap();
+            assert!(!is_internal(address), "{address} should be allowed");
+        }
+    }
+
+    #[test]
+    fn a_public_address_that_merely_starts_with_a_private_octet_is_not_private() {
+        // 172.16/12 is private; 172.15 and 172.32 are not. An octet-prefix check would get both
+        // wrong, and getting it wrong in this direction blocks real sites.
+        for address in ["172.15.0.1", "172.32.0.1", "100.63.0.1", "100.128.0.1"] {
+            let address: IpAddr = address.parse().unwrap();
+            assert!(!is_internal(address), "{address} should be allowed");
+        }
+    }
+
+    #[test]
+    fn a_scheme_that_is_not_the_web_is_refused_before_anything_is_resolved() {
+        // `file:///etc/passwd` and `gopher://` are the other half of this family.
+        for url in ["file:///etc/passwd", "ftp://example.com", "gopher://x", "/etc/passwd"] {
+            assert!(
+                !url.starts_with("https://") && !url.starts_with("http://"),
+                "{url} must not be treated as fetchable"
+            );
+        }
+    }
 
     #[test]
     fn a_script_never_reaches_the_context() {
