@@ -308,16 +308,6 @@ impl Model {
             .is_some_and(|shape| !shape.eq_ignore_ascii_case("completions"))
     }
 
-    /// Whether the provider publishes a price of zero for both directions.
-    ///
-    /// An absent `cost` means the price is not published, which is not the same thing and is left
-    /// out: 437 models in the catalog have no cost block, and calling them free would be a guess
-    /// about someone else's billing.
-    pub fn is_free(&self) -> bool {
-        self.cost
-            .is_some_and(|cost| cost.input == Some(0.0) && cost.output == Some(0.0))
-    }
-
     pub fn is_deprecated(&self) -> bool {
         self.status
             .as_deref()
@@ -364,7 +354,6 @@ impl Catalog {
                     env_var: provider.primary_env_var().map(str::to_owned),
                     reasoning: model.reasoning,
                     tool_call: model.tool_call,
-                    free: model.is_free(),
                     context_limit: model.limit.and_then(|limit| limit.context),
                     output_limit: model.limit.and_then(|limit| limit.output),
                 });
@@ -389,12 +378,6 @@ pub struct CatalogEntry {
     pub reasoning: bool,
     pub tool_call: bool,
     pub context_limit: Option<u64>,
-    /// The provider publishes a price of zero for this model.
-    ///
-    /// Not the same as "costs nothing to run": several providers report zero because usage comes
-    /// out of a flat subscription. And a model with no published price at all is not free, it is
-    /// unpriced — which is why this is driven by an explicit zero rather than by a missing cost.
-    pub free: bool,
     /// The most tokens this model will produce in one response, as models.dev declares it. Cowork
     /// asks for exactly this much: the point of a limit published per model is that there is no
     /// reason to guess a smaller one.
