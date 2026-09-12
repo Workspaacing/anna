@@ -8,7 +8,7 @@ use crate::{
     },
     permission::{Decision, PermissionBroker, PermissionEvent},
     thread::{CoworkStore, Thread, ThreadId},
-    tool::{ToolContext, ToolRegistry},
+    tool::{ToolContext, ToolKind, ToolRegistry},
 };
 use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
@@ -503,22 +503,13 @@ impl CoworkThreadView {
                     return;
                 }
 
-                let mut results = Vec::with_capacity(calls.len());
-                for call in &calls {
-                    let result = Self::run_tool(
-                        &tools,
-                        call,
-                        ToolContext {
-                            project: project.clone(),
-                            workspace: workspace.clone(),
-                            permissions: permissions.clone(),
-                            working_folder: working_folder.clone(),
-                        },
-                        cx,
-                    )
-                    .await;
-                    results.push(result);
-                }
+                let context = || ToolContext {
+                    project: project.clone(),
+                    workspace: workspace.clone(),
+                    permissions: permissions.clone(),
+                    working_folder: working_folder.clone(),
+                };
+                let results = Self::run_tools(&tools, &calls, context, cx).await;
 
                 if this
                     .update(cx, |this, cx| this.push_tool_results(results, cx))
@@ -600,6 +591,66 @@ impl CoworkThreadView {
         }
 
         Ok((calls, stopped_for_tools))
+    }
+
+    /// Runs the calls a model asked for, concurrently where that is safe.
+    ///
+    /// A model that wants four files reads them one after another otherwise, paying a full round
+    /// trip of latency for each, when nothing about them depends on the others.
+    ///
+    /// Only reads and searches go in parallel, and the reason is not caution for its own sake:
+    ///
+    /// - Two edits can touch the same file. Running them together means the second reads a buffer
+    ///   the first has already changed, and whichever finishes last wins — silently.
+    /// - Commands have order-dependent effects. `npm install` then `npm test` is not the same as
+    ///   both at once.
+    /// - The permission broker holds one question at a time, and a second request displaces the
+    ///   first, which is refused. Two commands asking together would mean one denied for no reason
+    ///   the user could see.
+    ///
+    /// Results come back in the order the model asked for them, whatever order they finished in,
+    /// because a tool result is matched to its call by position in some formats.
+    async fn run_tools(
+        tools: &ToolRegistry,
+        calls: &[ToolCall],
+        context: impl Fn() -> ToolContext,
+        cx: &mut gpui::AsyncApp,
+    ) -> Vec<ToolResult> {
+        let concurrent = |call: &ToolCall| {
+            tools
+                .get(&call.name)
+                .is_some_and(|tool| matches!(tool.kind(), ToolKind::Read | ToolKind::Search))
+        };
+
+        let mut results: Vec<Option<ToolResult>> = (0..calls.len()).map(|_| None).collect();
+
+        // Everything that only reads, at once.
+        let reads = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| concurrent(call))
+            .map(|(index, call)| {
+                let context = context();
+                // `AsyncApp` is a handle, so each concurrent read gets its own rather than
+                // sharing one mutable borrow.
+                let mut cx = cx.clone();
+                async move { (index, Self::run_tool(tools, call, context, &mut cx).await) }
+            })
+            .collect::<Vec<_>>();
+
+        for (index, result) in futures::future::join_all(reads).await {
+            results[index] = Some(result);
+        }
+
+        // Everything else in the order it was asked for.
+        for (index, call) in calls.iter().enumerate() {
+            if results[index].is_some() {
+                continue;
+            }
+            results[index] = Some(Self::run_tool(tools, call, context(), cx).await);
+        }
+
+        results.into_iter().flatten().collect()
     }
 
     /// Runs one tool call, turning every failure into a result the model can read and correct.

@@ -1021,6 +1021,50 @@ mod tests {
         assert!(registry.get("no-such-tool").is_none());
     }
 
+    /// The rule the turn loop uses to decide what may run at the same time.
+    ///
+    /// Mirrored here rather than imported so that a tool whose kind changes trips this test as
+    /// well as changing behaviour.
+    fn runs_concurrently(kind: ToolKind) -> bool {
+        matches!(kind, ToolKind::Read | ToolKind::Search)
+    }
+
+    #[test]
+    fn only_tools_that_change_nothing_run_at_the_same_time() {
+        let registry = ToolRegistry::default_tools();
+
+        for name in ["read", "list"] {
+            let tool = registry.get(name).expect("should exist");
+            assert!(
+                runs_concurrently(tool.kind()),
+                "`{name}` only reads, so waiting for it in turn is latency for nothing"
+            );
+        }
+
+        for name in ["write", "edit", "shell"] {
+            let tool = registry.get(name).expect("should exist");
+            assert!(
+                !runs_concurrently(tool.kind()),
+                "`{name}` must stay sequential"
+            );
+        }
+    }
+
+    #[test]
+    fn editing_tools_are_never_concurrent_because_they_can_collide() {
+        // Two edits to the same file run together means the second reads a buffer the first has
+        // already changed, and whichever finishes last wins — silently.
+        assert!(!runs_concurrently(ToolKind::Edit));
+    }
+
+    #[test]
+    fn commands_are_never_concurrent_because_order_is_their_meaning() {
+        // `npm install` then `npm test` is not the same as both at once. And the permission broker
+        // holds one question at a time, so two commands asking together would mean one denied for
+        // no reason the user could see.
+        assert!(!runs_concurrently(ToolKind::Execute));
+    }
+
     #[test]
     fn the_default_registry_can_change_files_and_the_read_only_one_cannot() {
         let default = ToolRegistry::default_tools();
