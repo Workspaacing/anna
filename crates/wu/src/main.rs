@@ -662,6 +662,7 @@ fn main() {
         cowork::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
+    github::init(cx);
         keymap_editor::init(cx);
         extensions_ui::init(cx);
         inspector_ui::init(app_state.clone(), cx);

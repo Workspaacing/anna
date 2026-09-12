@@ -2079,14 +2079,19 @@ name = "cowork"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "collections",
  "db",
  "editor",
  "fs",
  "futures",
  "fuzzy",
+ "git",
+ "git_hosting_providers",
+ "github",
  "gpui",
  "http_client",
+ "image",
  "language",
  "log",
  "lsp",
@@ -4195,6 +4200,28 @@ dependencies = [
  "zeroize",
  "zlog",
  "ztracing",
+]
+
+[[package]]
+name = "github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "db",
+ "editor",
+ "futures",
+ "gpui",
+ "http_client",
+ "log",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+ "wu_actions",
 ]
 
 [[package]]
@@ -14868,6 +14895,7 @@ dependencies = [
  "git_hosting_providers",
  "git_ui",
  "git_ui_core",
+ "github",
  "go_to_line",
  "gpui",
  "gpui_platform",

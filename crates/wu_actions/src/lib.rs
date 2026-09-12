@@ -41,6 +41,8 @@ actions!(
         /// Opens the settings editor.
         #[action(deprecated_aliases = ["wu_actions::OpenSettingsEditor"])]
         OpenSettings,
+        /// Opens the GitHub window.
+        OpenGitHub,
         /// Opens the settings JSON file.
         #[action(deprecated_aliases = ["wu_actions::OpenSettings"])]
         OpenSettingsFile,
@@ -119,6 +121,18 @@ pub struct DecreaseBufferFontSize {
 pub struct IncreaseBufferFontSize {
     #[serde(default)]
     pub persist: bool,
+}
+
+/// Starts a Cowork thread with something already to work on.
+///
+/// This exists so a window outside the workspace — GitHub's — can hand work to Cowork without
+/// either crate depending on the other. Both can see an action; neither can see the other's types.
+#[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = cowork)]
+#[serde(deny_unknown_fields)]
+pub struct StartThreadWith {
+    /// What the thread opens with, as though the user had typed it and pressed enter.
+    pub prompt: String,
 }
 
 /// Opens the settings editor at a specific path.
