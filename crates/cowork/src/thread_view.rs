@@ -784,6 +784,7 @@ impl CoworkThreadView {
                 h_flex()
                     .gap_1()
                     .children(self.render_context_meter(cx))
+                    .child(self.render_changes_button(cx))
                     .child(self.render_permission_toggle(cx)),
             )
             .when(is_streaming, |this| {
@@ -848,6 +849,31 @@ impl CoworkThreadView {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Opens the editor's own diff view, showing every uncommitted change in the project.
+    ///
+    /// Deliberately not a diff viewer of its own. Wu already has one — a multibuffer with staging,
+    /// per-hunk revert and the whole editor behind it — and the agent's edits land in the same
+    /// buffers as the user's, so they show up there without anything being tracked twice.
+    ///
+    /// Dispatched by name rather than by type. `git_ui` is a large crate that the workspace
+    /// deliberately keeps out of feature crates — `tooling/xtask` bans five separate edges into it
+    /// to stop the build serializing — and an action name costs no dependency at all.
+    fn render_changes_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        Button::new("cowork-changes", "Changes")
+            .start_icon(Icon::new(IconName::Diff).size(IconSize::Small))
+            .label_size(LabelSize::Small)
+            .style(ButtonStyle::Subtle)
+            .tooltip(Tooltip::text(
+                "Show every uncommitted change in this project, including the agent's",
+            ))
+            .on_click(cx.listener(|_, _, window, cx| {
+                match cx.build_action("git::Diff", None) {
+                    Ok(action) => window.dispatch_action(action, cx),
+                    Err(error) => log::warn!("cowork: could not open the diff view: {error}"),
+                }
+            }))
     }
 
     /// The switch that stops the agent asking before it runs commands.
