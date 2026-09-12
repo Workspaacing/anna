@@ -23,7 +23,12 @@ use serde_json::{Value, json};
 use settings::Settings as _;
 use task::Shell;
 use terminal::terminal_settings::TerminalSettings;
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 use task::ShellBuilder;
 use util::{paths::PathStyle, rel_path::RelPath};
 use workspace::Workspace;
@@ -46,6 +51,11 @@ pub struct ToolContext {
     pub workspace: WeakEntity<Workspace>,
     /// How a tool asks before doing something the editor cannot undo.
     pub permissions: Entity<PermissionBroker>,
+    /// Where the thread runs commands, when the model names no directory of its own.
+    ///
+    /// `None` falls back to the project's first folder, which is what a thread created before the
+    /// choice existed has.
+    pub working_folder: Option<PathBuf>,
 }
 
 /// The result of one tool call.
@@ -497,7 +507,12 @@ impl Tool for ShellTool {
 
             let (shell, directory) = cx.update(|cx| {
                 let shell = agent_shell(cx);
-                let directory = working_directory(&context.project, relative_cwd.as_deref(), cx);
+                let directory = working_directory(
+                    &context.project,
+                    context.working_folder.as_deref(),
+                    relative_cwd.as_deref(),
+                    cx,
+                );
                 (shell, directory)
             });
             let directory = directory?;
@@ -523,12 +538,23 @@ fn agent_shell(cx: &App) -> Shell {
 /// Where to run, which must be inside the project.
 fn working_directory(
     project: &Entity<Project>,
+    thread_folder: Option<&Path>,
     relative: Option<&str>,
     cx: &App,
 ) -> Result<PathBuf> {
     let project = project.read(cx);
 
     let Some(relative) = relative else {
+        // The thread's own folder, when it still names one of the project's — a folder closed
+        // since the thread was created must not send the agent somewhere outside the project.
+        if let Some(folder) = thread_folder
+            && project
+                .visible_worktrees(cx)
+                .any(|worktree| worktree.read(cx).abs_path().as_ref() == folder)
+        {
+            return Ok(folder.to_path_buf());
+        }
+
         let worktree = project
             .visible_worktrees(cx)
             .next()

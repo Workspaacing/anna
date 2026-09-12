@@ -4,10 +4,11 @@ use crate::{
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
     thread::{CatalogState, CoworkStore, CoworkStoreEvent, ThreadId, ThreadMetadata, format_age},
-    thread_view::CoworkThreadView,
+    thread_view::{CoworkThreadView, project_folders as cowork_project_folders},
 };
 use editor::{Editor, EditorEvent};
 use fs::Fs;
+use project::Project;
 use gpui::{
     Action, AsyncWindowContext, App, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
     PromptLevel, Subscription, WeakEntity, actions, uniform_list,
@@ -40,6 +41,12 @@ actions!(
 pub struct CoworkPanel {
     store: Entity<CoworkStore>,
     workspace: WeakEntity<Workspace>,
+    /// Held directly rather than reached through the workspace.
+    ///
+    /// The panel is built inside `workspace.update_in`, so reading the `Workspace` entity from the
+    /// constructor — or from anything the constructor calls — panics with "already being updated".
+    /// The project handle is taken once, from the `&mut Workspace` we are handed.
+    project: Entity<Project>,
     fs: Arc<dyn Fs>,
     focus_handle: FocusHandle,
     search_editor: Entity<Editor>,
@@ -63,6 +70,7 @@ impl CoworkPanel {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let fs = workspace.app_state().fs.clone();
+        let project = workspace.project().clone();
         let workspace_handle = cx.entity().downgrade();
         let store = CoworkStore::global(cx).unwrap_or_else(|| {
             let store = cx.new(CoworkStore::new);
@@ -101,6 +109,7 @@ impl CoworkPanel {
             let mut this = Self {
                 store,
                 workspace: workspace_handle,
+                project,
                 fs,
                 focus_handle: cx.focus_handle(),
                 search_editor,
@@ -116,9 +125,7 @@ impl CoworkPanel {
 
     /// The absolute path of the project's first folder, which is what a thread is scoped to.
     fn project_key(&self, cx: &App) -> Option<String> {
-        let workspace = self.workspace.upgrade()?;
-        let project = workspace.read(cx).project().read(cx);
-        let worktree = project.visible_worktrees(cx).next()?;
+        let worktree = self.project.read(cx).visible_worktrees(cx).next()?;
         Some(worktree.read(cx).abs_path().to_string_lossy().into_owned())
     }
 
@@ -176,15 +183,54 @@ impl CoworkPanel {
         );
     }
 
+    /// Starts the thread, asking which folder it works in when the project has more than one.
+    ///
+    /// With a single folder the answer is that folder, and a prompt would be friction with no
+    /// choice in it. The folder is shown in the thread's header either way, and changed there.
     fn open_new_thread(&mut self, model: ModelRef, window: &mut Window, cx: &mut Context<Self>) {
+        let folders = cowork_project_folders(&self.project, cx);
+
+        if folders.len() < 2 {
+            self.open_thread_in(model, self.project_key(cx), window, cx);
+            return;
+        }
+
+        let labels = folders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "Which folder should this thread work in?",
+            Some("Commands run here, and paths the agent gives are resolved from here."),
+            &labels,
+            cx,
+        );
+
+        let this = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(chosen) = answer.await else {
+                return;
+            };
+            let folder = folders.get(chosen).map(|(_, path)| path.clone());
+            this.update_in(cx, |this, window, cx| {
+                this.open_thread_in(model, folder, window, cx);
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn open_thread_in(
+        &mut self,
+        model: ModelRef,
+        project: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
 
         self.store
             .update(cx, |store, cx| store.remember_model(model.clone(), cx));
-
-        let project = self.project_key(cx);
         let thread = self
             .store
             .update(cx, |store, cx| store.create_thread(model, project, cx));

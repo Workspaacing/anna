@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
 use futures::StreamExt as _;
 use gpui::{
-    AnyElement, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, SharedString, Task,
+    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, SharedString, Task,
     WeakEntity, relative,
 };
 use language::LanguageRegistry;
@@ -255,6 +255,61 @@ impl CoworkThreadView {
         cx.notify();
     }
 
+    /// The folder's own name, which is what identifies it to the user — the full path is too long
+    /// for a header and its last component is what they called the project.
+    fn working_folder_label(&self) -> SharedString {
+        self.thread
+            .metadata
+            .project
+            .as_deref()
+            .and_then(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .map(SharedString::from)
+            .unwrap_or_else(|| SharedString::new_static("No folder"))
+    }
+
+    /// Asks which of the project's folders this thread should work in.
+    ///
+    /// Only worth asking when there is more than one; with a single folder the answer is that
+    /// folder and a prompt would be friction with no choice in it.
+    fn choose_working_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let folders = project_folders(&self.project, cx);
+        if folders.len() < 2 {
+            return;
+        }
+
+        let labels = folders
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let answer = window.prompt(
+            gpui::PromptLevel::Info,
+            "Which folder should this thread work in?",
+            Some("Commands run here, and paths the agent gives are resolved from here."),
+            &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+            cx,
+        );
+
+        cx.spawn(async move |this, cx| {
+            let Ok(chosen) = answer.await else {
+                return;
+            };
+            let Some((_, path)) = folders.get(chosen) else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.thread.metadata.project = Some(path.clone());
+                this.persist(cx);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
     fn open_model_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
@@ -331,6 +386,12 @@ impl CoworkThreadView {
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         let permissions = self.permissions.clone();
+        let working_folder = self
+            .thread
+            .metadata
+            .project
+            .as_ref()
+            .map(std::path::PathBuf::from);
 
         self.completion = Some(cx.spawn(async move |this, cx| {
             for step in 0..Self::MAX_STEPS {
@@ -387,6 +448,7 @@ impl CoworkThreadView {
                             project: project.clone(),
                             workspace: workspace.clone(),
                             permissions: permissions.clone(),
+                            working_folder: working_folder.clone(),
                         },
                         cx,
                     )
@@ -615,12 +677,27 @@ impl CoworkThreadView {
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
             .child(
-                Button::new("cowork-model", self.thread.metadata.model.qualified())
-                    .start_icon(Icon::new(IconName::Sparkle).size(IconSize::Small))
-                    .label_size(LabelSize::Small)
-                    .tooltip(Tooltip::text("Change the model for this thread"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.open_model_selector(window, cx)),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("cowork-model", self.thread.metadata.model.qualified())
+                            .start_icon(Icon::new(IconName::Sparkle).size(IconSize::Small))
+                            .label_size(LabelSize::Small)
+                            .tooltip(Tooltip::text("Change the model for this thread"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_model_selector(window, cx)
+                            })),
+                    )
+                    // Where the agent runs. Always visible, because "which folder is this editing"
+                    // is not something the user should have to infer from the output.
+                    .child(
+                        Button::new("cowork-folder", self.working_folder_label())
+                            .start_icon(Icon::new(IconName::Folder).size(IconSize::Small))
+                            .label_size(LabelSize::Small)
+                            .tooltip(Tooltip::text("Change the folder this thread works in"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_working_folder(window, cx)
+                            })),
                     ),
             )
             .when(is_streaming, |this| {
@@ -758,6 +835,22 @@ impl Item for CoworkThreadView {
     fn show_toolbar(&self) -> bool {
         false
     }
+}
+
+/// The project's open folders, as the name the user knows and the path a command runs in.
+pub fn project_folders(project: &Entity<Project>, cx: &App) -> Vec<(String, String)> {
+    project
+        .read(cx)
+        .visible_worktrees(cx)
+        .map(|worktree| {
+            let path = worktree.read(cx).abs_path();
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            (name, path.to_string_lossy().into_owned())
+        })
+        .collect()
 }
 
 /// The whole failure, wrapped, with a button that takes it away.
