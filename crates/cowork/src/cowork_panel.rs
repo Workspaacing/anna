@@ -532,7 +532,8 @@ impl CoworkPanel {
         cx: &Context<Self>,
     ) -> ListItem {
         let id = thread.id.clone();
-        let delete_id = thread.id.clone();
+        // The whole record, because the confirmation names the thread being deleted.
+        let to_delete = thread.clone();
 
         ListItem::new(("cowork-thread", index))
             .inset(true)
@@ -571,9 +572,8 @@ impl CoworkPanel {
                 IconButton::new(("cowork-delete-thread", index), IconName::Trash)
                     .icon_size(IconSize::Small)
                     .tooltip(Tooltip::text("Delete thread"))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        let id = delete_id.clone();
-                        this.store.update(cx, |store, cx| store.delete_thread(id, cx));
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_delete(to_delete.clone(), window, cx);
                     })),
             )
             .on_click(cx.listener(move |this, _, window, cx| {

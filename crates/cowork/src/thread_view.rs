@@ -271,43 +271,70 @@ impl CoworkThreadView {
             .unwrap_or_else(|| SharedString::new_static("No folder"))
     }
 
-    /// Asks which of the project's folders this thread should work in.
+    /// Sets which of the project's folders this thread works in.
     ///
-    /// Only worth asking when there is more than one; with a single folder the answer is that
-    /// folder and a prompt would be friction with no choice in it.
+    /// With several folders it asks. With one it simply adopts it, which is not a no-op: a thread
+    /// created before the folder was recorded — or in another window — shows "No folder" and needs
+    /// exactly this to repair it. Doing nothing at all was the bug: the button offered an action
+    /// and then declined to perform it.
     fn choose_working_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let folders = project_folders(&self.project, cx);
-        if folders.len() < 2 {
+
+        match folders.len() {
+            0 => {}
+            1 => {
+                let (_, path) = &folders[0];
+                self.set_working_folder(path.clone(), cx);
+            }
+            _ => {
+                let labels = folders
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>();
+                let answer = window.prompt(
+                    gpui::PromptLevel::Info,
+                    "Which folder should this thread work in?",
+                    Some("Commands run here, and paths the agent gives are resolved from here."),
+                    &labels,
+                    cx,
+                );
+
+                cx.spawn(async move |this, cx| {
+                    let Ok(chosen) = answer.await else {
+                        return;
+                    };
+                    let Some((_, path)) = folders.get(chosen) else {
+                        return;
+                    };
+                    let path = path.clone();
+                    this.update(cx, |this, cx| this.set_working_folder(path, cx))
+                        .log_err();
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn set_working_folder(&mut self, folder: String, cx: &mut Context<Self>) {
+        if self.thread.metadata.project.as_deref() == Some(folder.as_str()) {
             return;
         }
+        self.thread.metadata.project = Some(folder);
+        self.persist(cx);
+        cx.notify();
+    }
 
-        let labels = folders
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let answer = window.prompt(
-            gpui::PromptLevel::Info,
-            "Which folder should this thread work in?",
-            Some("Commands run here, and paths the agent gives are resolved from here."),
-            &labels.iter().map(String::as_str).collect::<Vec<_>>(),
-            cx,
-        );
-
-        cx.spawn(async move |this, cx| {
-            let Ok(chosen) = answer.await else {
-                return;
-            };
-            let Some((_, path)) = folders.get(chosen) else {
-                return;
-            };
-            this.update(cx, |this, cx| {
-                this.thread.metadata.project = Some(path.clone());
-                this.persist(cx);
-                cx.notify();
-            })
-            .log_err();
-        })
-        .detach();
+    /// Whether there is anything for the folder button to do.
+    ///
+    /// A button that cannot change anything is disabled rather than silently inert, and its
+    /// tooltip says which case it is in.
+    fn can_change_working_folder(&self, cx: &App) -> bool {
+        let folders = project_folders(&self.project, cx);
+        match folders.len() {
+            0 => false,
+            1 => self.thread.metadata.project.as_deref() != Some(folders[0].1.as_str()),
+            _ => true,
+        }
     }
 
     fn open_model_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -690,15 +717,21 @@ impl CoworkThreadView {
                     )
                     // Where the agent runs. Always visible, because "which folder is this editing"
                     // is not something the user should have to infer from the output.
-                    .child(
+                    .child({
+                        let changeable = self.can_change_working_folder(cx);
                         Button::new("cowork-folder", self.working_folder_label())
                             .start_icon(Icon::new(IconName::Folder).size(IconSize::Small))
                             .label_size(LabelSize::Small)
-                            .tooltip(Tooltip::text("Change the folder this thread works in"))
+                            .disabled(!changeable)
+                            .tooltip(Tooltip::text(if changeable {
+                                "Change the folder this thread works in"
+                            } else {
+                                "The only folder open in this project"
+                            }))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.choose_working_folder(window, cx)
-                            })),
-                    ),
+                            }))
+                    }),
             )
             .when(is_streaming, |this| {
                 this.child(
