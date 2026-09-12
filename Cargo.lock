@@ -2100,6 +2100,7 @@ dependencies = [
  "picker",
  "project",
  "regex",
+ "release_channel",
  "semver",
  "serde",
  "serde_json",

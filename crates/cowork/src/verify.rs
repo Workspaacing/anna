@@ -11,12 +11,18 @@
 
 use crate::{audit, cowork_settings::VerificationSettings};
 use collections::HashSet;
-use futures::channel::oneshot;
-use gpui::{AsyncApp, Entity, FutureExt as _, SharedString};
+use gpui::{AsyncApp, Entity, SharedString};
 use http_client::HttpClient;
-use language::{Buffer, BufferEvent, Point};
+use lsp::LanguageServerId;
+use project::{Project, ProjectPath};
+use language::{Buffer, Point};
 use regex::Regex;
-use std::{sync::Arc, sync::LazyLock, time::Duration};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    sync::{Arc, LazyLock},
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -95,12 +101,109 @@ impl VerificationReport {
     }
 }
 
-/// How long to wait for the language servers to react to an edit before reporting what they have.
+/// The shortest a write waits before its diagnostics are read.
 ///
-/// Diagnostics arrive asynchronously, so reading them the instant a write lands would report the
-/// state before the change. Waiting forever is worse: a project with no language server for the file
-/// would hang the turn.
-const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_millis(2500);
+/// The old rule was "stop at the first report from any server", and with Biome, ESLint and the
+/// TypeScript server all attached that meant stopping at whichever answered first — never the type
+/// checker, which is the slowest and the only one that knows a `string` was passed where a `number`
+/// belongs. A type error could be written and the report come back clean. This window is the time
+/// the slow server gets before silence is believed.
+const MIN_WAIT: Duration = Duration::from_millis(1200);
+
+/// How long no new report has to go by before the servers are taken to be done.
+const QUIET: Duration = Duration::from_millis(700);
+
+/// The most a write ever waits. Reached only when a server keeps working or keeps reporting.
+const CAP: Duration = Duration::from_secs(10);
+
+/// How often the wait looks again.
+const TICK: Duration = Duration::from_millis(150);
+
+/// Watches the language servers attached to one file until they have had their say.
+///
+/// There is no "finished" signal to wait for. Only rust-analyzer declares disk-based diagnostics,
+/// and a server that republishes an unchanged, empty set produces no event at all — so waiting for
+/// every attached server to report would hold every clean write to the cap. What is observable is
+/// activity: a report for this file, or work a server has announced and not yet finished (loading a
+/// project, for the TypeScript server). The wait ends once neither has happened for a moment.
+///
+/// It is started before the edit lands, so a report that arrives while the file is still being
+/// formatted and saved is not missed.
+pub struct DiagnosticsWait {
+    project: Entity<Project>,
+    servers: HashSet<LanguageServerId>,
+    last_report: Rc<Cell<Option<Instant>>>,
+    _subscription: gpui::Subscription,
+}
+
+impl DiagnosticsWait {
+    pub fn start(
+        project: &Entity<Project>,
+        path: ProjectPath,
+        servers: HashSet<LanguageServerId>,
+        cx: &mut AsyncApp,
+    ) -> Self {
+        let last_report = Rc::new(Cell::new(None));
+        let subscription = {
+            let last_report = last_report.clone();
+            cx.subscribe(project, move |_, event: &project::Event, cx| {
+                if let project::Event::DiagnosticsUpdated { paths, .. } = event
+                    && paths.contains(&path)
+                {
+                    last_report.set(Some(cx.background_executor().now()));
+                }
+            })
+        };
+
+        Self {
+            project: project.clone(),
+            servers,
+            last_report,
+            _subscription: subscription,
+        }
+    }
+
+    /// Returns once the attached servers have gone quiet about this file, or at the cap.
+    async fn until_settled(self, cx: &mut AsyncApp) {
+        // Nothing attached means nothing will ever report; what is on the buffer is the answer.
+        if self.servers.is_empty() {
+            return;
+        }
+
+        // Measured from here rather than from `start`: formatting and saving happen in between,
+        // and the slow server's window has to begin after the last change, not before it.
+        // The executor's clock rather than `Instant::now`: the same wall time in the app, and time
+        // a test can move forward, which is the only way the timing this exists for gets tested.
+        let executor = cx.background_executor().clone();
+        let started = executor.now();
+
+        loop {
+            let busy = self.project.read_with(cx, |project, cx| {
+                project
+                    .language_server_statuses(cx)
+                    .any(|(id, status)| self.servers.contains(&id) && !status.pending_work.is_empty())
+            });
+            let now = executor.now();
+            let since_last_report = self.last_report.get().map(|at| now.duration_since(at));
+
+            if settled(now.duration_since(started), since_last_report, busy) {
+                return;
+            }
+            executor.timer(TICK).await;
+        }
+    }
+}
+
+/// Whether the language servers have had their say.
+fn settled(elapsed: Duration, since_last_report: Option<Duration>, busy: bool) -> bool {
+    if elapsed >= CAP {
+        return true;
+    }
+    if elapsed < MIN_WAIT || busy {
+        return false;
+    }
+    since_last_report.is_none_or(|quiet| quiet >= QUIET)
+}
 
 /// Checks that must pass before the agent's text is allowed to reach the project.
 ///
@@ -122,6 +225,7 @@ pub async fn inspect(
     settings: VerificationSettings,
     http: Arc<dyn HttpClient>,
     buffer: Entity<Buffer>,
+    wait: DiagnosticsWait,
     file_name: String,
     contents: String,
     cx: &mut AsyncApp,
@@ -129,7 +233,7 @@ pub async fn inspect(
     let mut findings = Vec::new();
 
     if settings.diagnostics {
-        findings.extend(diagnostics(&buffer, cx).await);
+        findings.extend(diagnostics(&buffer, wait, cx).await);
     }
 
     if settings.dependency_audit {
@@ -148,28 +252,18 @@ pub async fn inspect(
 }
 
 /// Waits for the language servers to catch up with the edit, then reports what they found.
-async fn diagnostics(buffer: &Entity<Buffer>, cx: &mut AsyncApp) -> Vec<Finding> {
+async fn diagnostics(
+    buffer: &Entity<Buffer>,
+    wait: DiagnosticsWait,
+    cx: &mut AsyncApp,
+) -> Vec<Finding> {
     // Nothing will ever analyse a file whose language Wu does not know, so there is nothing to
-    // wait for. Without this every write to a `.txt` or a `.env` would stall for the full timeout.
+    // wait for. Without this every write to a `.txt` or a `.env` would stall for the full window.
     if buffer.read_with(cx, |buffer, _| buffer.language().is_none()) {
         return Vec::new();
     }
 
-    let (sender, receiver) = oneshot::channel();
-    let mut sender = Some(sender);
-    let subscription = cx.subscribe(buffer, move |_, event: &BufferEvent, _| {
-        if matches!(event, BufferEvent::DiagnosticsUpdated)
-            && let Some(sender) = sender.take()
-        {
-            let _ = sender.send(());
-        }
-    });
-
-    let executor = cx.background_executor().clone();
-    // Either outcome is fine: the servers answered, or there are none and what is already on the
-    // buffer is the whole truth.
-    let _ = receiver.with_timeout(DIAGNOSTICS_TIMEOUT, &executor).await;
-    drop(subscription);
+    wait.until_settled(cx).await;
 
     buffer.read_with(cx, |buffer, _| {
         let snapshot = buffer.snapshot();
@@ -447,6 +541,220 @@ pub fn scan_secrets(text: &str) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A TypeScript project with one open file, and nothing attached but what a test injects.
+    async fn typescript_project(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<Project>, Entity<Buffer>, ProjectPath) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/project"),
+            serde_json::json!({ "calculator.ts": "const result = calc.calculate(a, op, b);\n" }),
+        )
+        .await;
+
+        let project = Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        project.read_with(cx, |project, _| {
+            project.languages().add(Arc::new(language::Language::new(
+                language::LanguageConfig {
+                    name: "TypeScript".into(),
+                    matcher: language::LanguageMatcher {
+                        path_suffixes: vec!["ts".to_owned()],
+                        ..Default::default()
+                    }
+                    .into(),
+                    ..Default::default()
+                },
+                None,
+            )));
+        });
+        cx.executor().run_until_parked();
+
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project
+                .worktrees(cx)
+                .next()
+                .expect("the project has its folder")
+                .read(cx)
+                .id()
+        });
+        let path = ProjectPath {
+            worktree_id,
+            path: util::rel_path::rel_path("calculator.ts").into_arc(),
+        };
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(path.clone(), cx))
+            .await
+            .expect("the file opens");
+        cx.executor().run_until_parked();
+
+        (project, buffer, path)
+    }
+
+    /// What a language server does when it has something to say about the file.
+    fn publish(
+        project: &Entity<Project>,
+        server: LanguageServerId,
+        source: &str,
+        message: &str,
+        severity: lsp::DiagnosticSeverity,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+        lsp_store.update(cx, |lsp_store, cx| {
+            lsp_store
+                .update_diagnostics(
+                    server,
+                    lsp::PublishDiagnosticsParams {
+                        uri: lsp::Uri::from_file_path(util::path!("/project/calculator.ts"))
+                            .expect("a file path is a URI"),
+                        version: None,
+                        diagnostics: vec![lsp::Diagnostic {
+                            range: lsp::Range::new(
+                                lsp::Position::new(0, 0),
+                                lsp::Position::new(0, 5),
+                            ),
+                            severity: Some(severity),
+                            source: Some(source.to_owned()),
+                            message: lsp::DiagnosticMessage::from(message),
+                            ..Default::default()
+                        }],
+                    },
+                    None,
+                    language::DiagnosticSourceKind::Pushed,
+                    &[],
+                    cx,
+                )
+                .expect("the diagnostics apply");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_slow_type_checker_is_still_heard_after_a_fast_linter(cx: &mut gpui::TestAppContext) {
+        // The failure that let a type error through: three servers attached, Biome answering in a
+        // few hundred milliseconds, and the wait ending at that first answer — before the TypeScript
+        // server, the only one that knows `string` is not `number`, had said anything.
+        let (project, buffer, path) = typescript_project(cx).await;
+        let biome = LanguageServerId(0);
+        let typescript = LanguageServerId(1);
+
+        let wait = DiagnosticsWait::start(
+            &project,
+            path,
+            [biome, typescript].into_iter().collect(),
+            &mut cx.to_async(),
+        );
+        let findings = cx.spawn(|mut cx| async move { diagnostics(&buffer, wait, &mut cx).await });
+        cx.executor().run_until_parked();
+
+        cx.executor().advance_clock(Duration::from_millis(300));
+        publish(&project, biome, "biome", "Use const.", lsp::DiagnosticSeverity::WARNING, cx);
+        cx.executor().run_until_parked();
+
+        cx.executor().advance_clock(Duration::from_millis(700));
+        publish(
+            &project,
+            typescript,
+            "ts",
+            "Argument of type 'string' is not assignable to parameter of type 'number'.",
+            lsp::DiagnosticSeverity::ERROR,
+            cx,
+        );
+        cx.executor().run_until_parked();
+
+        for _ in 0..40 {
+            cx.executor().advance_clock(TICK);
+            cx.executor().run_until_parked();
+        }
+
+        let findings = findings.await;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.message.contains("not assignable")),
+            "the type error never reached the report: {findings:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_write_nobody_reports_on_is_read_at_the_minimum_not_the_cap(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The other way to get this wrong: a server that republishes an unchanged, empty set emits
+        // nothing, so a wait that insisted on hearing from everyone would hold every clean write
+        // for the full ten seconds.
+        let (project, buffer, path) = typescript_project(cx).await;
+        let wait = DiagnosticsWait::start(
+            &project,
+            path,
+            [LanguageServerId(0)].into_iter().collect(),
+            &mut cx.to_async(),
+        );
+
+        let finished = Rc::new(Cell::new(false));
+        let findings = cx.spawn({
+            let finished = finished.clone();
+            |mut cx| async move {
+                let findings = diagnostics(&buffer, wait, &mut cx).await;
+                finished.set(true);
+                findings
+            }
+        });
+        cx.executor().run_until_parked();
+
+        let mut waited = Duration::ZERO;
+        while waited < MIN_WAIT + TICK * 3 {
+            cx.executor().advance_clock(TICK);
+            cx.executor().run_until_parked();
+            waited += TICK;
+        }
+
+        assert!(
+            finished.get(),
+            "a write with nothing to report was still waiting after {waited:?}; the cap is {CAP:?}"
+        );
+        assert!(findings.await.is_empty());
+    }
+
+    #[test]
+    fn the_first_fast_report_does_not_end_the_wait() {
+        // The bug this replaces: Biome answers within a few hundred milliseconds, and stopping
+        // there meant the TypeScript server's type error was never read.
+        let biome_just_reported = Some(Duration::ZERO);
+        assert!(!settled(Duration::from_millis(300), biome_just_reported, false));
+    }
+
+    #[test]
+    fn silence_is_not_believed_before_the_slow_server_has_had_its_window() {
+        assert!(!settled(Duration::from_millis(900), None, false));
+        assert!(settled(Duration::from_millis(1300), None, false));
+    }
+
+    #[test]
+    fn a_server_still_working_holds_the_wait_open() {
+        // The TypeScript server announces project loading as work in progress; reading the buffer
+        // before it finishes reads diagnostics from before the edit.
+        assert!(!settled(Duration::from_secs(4), None, true));
+    }
+
+    #[test]
+    fn a_report_that_just_arrived_means_more_may_follow() {
+        assert!(!settled(Duration::from_secs(2), Some(Duration::from_millis(200)), false));
+        assert!(settled(Duration::from_secs(2), Some(Duration::from_millis(800)), false));
+    }
+
+    #[test]
+    fn nothing_waits_past_the_cap() {
+        // A server stuck reporting progress forever must not stall the turn.
+        assert!(settled(CAP, None, true));
+        assert!(settled(CAP, Some(Duration::ZERO), true));
+    }
 
     fn messages(text: &str) -> Vec<String> {
         scan_secrets(text)

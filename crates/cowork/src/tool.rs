@@ -348,7 +348,13 @@ async fn apply(
     let _language_servers = project.update(cx, |project, cx| {
         project.register_buffer_with_language_servers(&buffer, cx)
     });
-    let attached = attached_servers(&project, &buffer, cx);
+    let running = attached_servers(&project, &buffer, cx);
+    let server_ids = running.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
+    let attached = running.into_iter().map(|(_, name)| name).collect::<Vec<_>>();
+
+    // Watching starts before the edit, so a report that lands while the file is being formatted
+    // and saved still counts.
+    let wait = verify::DiagnosticsWait::start(&project, project_path.clone(), server_ids, cx);
 
     let before = buffer_text(&buffer, cx).await;
     let summary = edit_buffer(&buffer, &change, cx).await?;
@@ -382,7 +388,7 @@ async fn apply(
     let formatted = before != saved;
 
     findings.extend(
-        verify::inspect(settings, http, buffer, file_name, saved, cx)
+        verify::inspect(settings, http, buffer, wait, file_name, saved, cx)
             .await
             .findings,
     );
@@ -418,14 +424,19 @@ fn attached_servers(
     project: &Entity<Project>,
     buffer: &Entity<Buffer>,
     cx: &mut AsyncApp,
-) -> Vec<SharedString> {
+) -> Vec<(lsp::LanguageServerId, SharedString)> {
     let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
 
     buffer.update(cx, |buffer, cx| {
         lsp_store.update(cx, |lsp_store, cx| {
             lsp_store
                 .running_language_servers_for_local_buffer(buffer, cx)
-                .map(|(adapter, _)| SharedString::from(adapter.name.0.to_string()))
+                .map(|(adapter, server)| {
+                    (
+                        server.server_id(),
+                        SharedString::from(adapter.name.0.to_string()),
+                    )
+                })
                 .collect()
         })
     })

@@ -53,4 +53,12 @@ workspace.workspace = true
 wu_actions.workspace = true
 
 [dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+language = { workspace = true, features = ["test-support"] }
+lsp = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+release_channel.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+util = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }
