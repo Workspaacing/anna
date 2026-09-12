@@ -49,6 +49,14 @@ impl BiomeLspAdapter {
     const SERVER_NAME: LanguageServerName = LanguageServerName::new_static("biome");
     const PACKAGE_NAME: &str = "@biomejs/biome";
 
+    /// The version every Wu installs.
+    ///
+    /// Pinned rather than "latest" so the version is a fact about this repository: two people on
+    /// the same commit run the same linter and get the same diagnostics, and a Biome release
+    /// cannot change what Wu does to your code without a commit here saying so. The same reason
+    /// `eslint.rs` pins its server.
+    const VERSION: &str = "2.5.13";
+
     pub fn new(node: NodeRuntime) -> Self {
         Self { node }
     }
@@ -63,9 +71,7 @@ impl LspInstaller for BiomeLspAdapter {
         _: bool,
         _: &mut AsyncApp,
     ) -> Result<Self::BinaryVersion> {
-        self.node
-            .npm_package_latest_version(Self::PACKAGE_NAME)
-            .await
+        Ok(Self::VERSION.parse()?)
     }
 
     async fn check_if_user_installed(
@@ -108,7 +114,7 @@ impl LspInstaller for BiomeLspAdapter {
         async move {
             let server_path = container_dir.join(SERVER_PATH);
 
-            node.npm_install_latest_packages(&container_dir, &[Self::PACKAGE_NAME])
+            node.npm_install_packages(&container_dir, &[(Self::PACKAGE_NAME, Self::VERSION)])
                 .await?;
 
             Ok(LanguageServerBinary {
@@ -137,7 +143,7 @@ impl LspInstaller for BiomeLspAdapter {
                     Self::PACKAGE_NAME,
                     &server_path,
                     &container_dir,
-                    VersionStrategy::Latest(&version),
+                    VersionStrategy::Pin(&version),
                 )
                 .await;
 
@@ -247,6 +253,17 @@ async fn get_cached_server_binary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_version_is_a_fact_about_this_repository() {
+        // Pinned rather than "latest", so two people on the same commit run the same linter. A
+        // version that will not parse would install nothing at all, silently.
+        let version: Version = BiomeLspAdapter::VERSION
+            .parse()
+            .expect("the pinned version must be valid semver");
+
+        assert!(version.major >= 2, "Biome 1.x spells its config differently");
+    }
 
     #[test]
     fn the_server_is_started_as_an_lsp_proxy() {
