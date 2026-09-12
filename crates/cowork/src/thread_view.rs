@@ -59,6 +59,11 @@ pub struct CoworkThreadView {
     tools: ToolRegistry,
     /// `(message index, result index)` for each diff the user has opened.
     expanded_diffs: collections::HashSet<(usize, usize)>,
+    /// Keeps the JavaScript toolchain's servers running while this thread is open.
+    ///
+    /// Dropping it unregisters the buffer that started them, so it is held rather than discarded.
+    _warm_toolchain: Option<project::lsp_store::OpenLspBufferHandle>,
+    _warm_up: Task<()>,
     permissions: Entity<PermissionBroker>,
     error: Option<SharedString>,
     completion: Option<Task<()>>,
@@ -106,7 +111,7 @@ impl CoworkThreadView {
         let permissions_subscription =
             cx.subscribe(&permissions, |_, _, _: &PermissionEvent, cx| cx.notify());
 
-        Self {
+        let mut view = Self {
             thread,
             messages,
             input,
@@ -119,11 +124,17 @@ impl CoworkThreadView {
             fs,
             tools: ToolRegistry::default_tools(),
             expanded_diffs: collections::HashSet::default(),
+            _warm_toolchain: None,
+            _warm_up: Task::ready(()),
             permissions,
             error: None,
             completion: None,
             _permissions: permissions_subscription,
-        }
+        };
+
+        // Once the view exists, because the warm-up stores its handle back onto it.
+        view.warm_up_toolchain(cx);
+        view
     }
 
     pub fn thread_id(&self) -> &ThreadId {
@@ -287,6 +298,66 @@ impl CoworkThreadView {
 
     fn select_model(&mut self, _: &SelectModel, window: &mut Window, cx: &mut Context<Self>) {
         self.open_model_selector(window, cx);
+    }
+
+    /// Starts the JavaScript toolchain before the agent needs it.
+    ///
+    /// Biome, ESLint and the TypeScript server are what make Cowork's formatting and checks work
+    /// on a JavaScript project, and they install themselves on first use. Left to the agent's
+    /// first edit, that means its opening move waits minutes on an npm install nobody asked for —
+    /// a poor showing for the feature this is meant to be good at.
+    ///
+    /// So a file is opened for them the moment a thread does, which is the same thing that happens
+    /// when a person opens one in the editor: the real installer runs, through the real adapters,
+    /// with no duplicated path logic to drift.
+    ///
+    /// Nothing at all happens in a project with no JavaScript in it. A Rust-only user should not
+    /// spend 300 MB and several minutes on a toolchain they will never run — which is why this
+    /// looks for a file rather than installing unconditionally.
+    fn warm_up_toolchain(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.first_javascript_file(cx) else {
+            return;
+        };
+
+        let project = self.project.clone();
+        self._warm_up = cx.spawn(async move |this, cx| {
+            let opened = project.update(cx, |project, cx| project.open_buffer(path, cx));
+            let Ok(buffer) = opened.await else {
+                return;
+            };
+
+            let handle = project.update(cx, |project, cx| {
+                project.register_buffer_with_language_servers(&buffer, cx)
+            });
+            this.update(cx, |this, _| this._warm_toolchain = Some(handle))
+                .log_err();
+        });
+    }
+
+    /// Any file in the project that the JavaScript toolchain would act on.
+    ///
+    /// The first one found is enough: the servers are started per worktree, not per file.
+    fn first_javascript_file(&self, cx: &App) -> Option<project::ProjectPath> {
+        const EXTENSIONS: [&str; 8] = ["ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "css"];
+
+        let project = self.project.read(cx);
+        for worktree in project.visible_worktrees(cx) {
+            let worktree = worktree.read(cx);
+            let found = worktree.files(false, 0).find(|entry| {
+                entry
+                    .path
+                    .extension()
+                    .is_some_and(|extension| EXTENSIONS.contains(&extension))
+            });
+
+            if let Some(entry) = found {
+                return Some(project::ProjectPath {
+                    worktree_id: worktree.id(),
+                    path: entry.path.clone(),
+                });
+            }
+        }
+        None
     }
 
     /// Records what the provider said the exchange cost.
