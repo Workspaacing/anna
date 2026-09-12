@@ -68,6 +68,8 @@ pub struct ToolOutput {
     pub summary: String,
     /// A unified diff, when this tool changed a file.
     pub diff: String,
+    /// The file it changed, for highlighting that diff.
+    pub path: String,
 }
 
 impl ToolOutput {
@@ -76,13 +78,44 @@ impl ToolOutput {
             content: content.into(),
             summary: summary.into(),
             diff: String::new(),
+            path: String::new(),
         }
     }
 
-    pub fn with_diff(mut self, diff: String) -> Self {
+    pub fn with_diff(mut self, diff: String, path: String) -> Self {
         self.diff = diff;
+        self.path = path;
         self
     }
+}
+
+/// The parameter every tool takes, asking the model to say what the call is for.
+///
+/// A transcript built from tool names reads as mechanics — `read`, `read`, `edit` — and leaves the
+/// reader to reconstruct the intent. The model already knows why it is making each call, so it is
+/// asked, and its own sentence is what the transcript shows.
+fn intent_parameter() -> (&'static str, Value) {
+    (
+        "intent",
+        json!({
+            "type": "string",
+            "description": "A short sentence, in the past tense, saying what this call is for — \
+                            \"Checked how the picker is wired\", \"Added the missing import\". \
+                            Shown to the user in place of the tool's name.",
+        }),
+    )
+}
+
+/// Adds the shared `intent` parameter to a tool's own schema.
+fn with_intent(mut parameters: Value) -> Value {
+    let (name, schema) = intent_parameter();
+    if let Some(properties) = parameters
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+    {
+        properties.insert(name.to_owned(), schema);
+    }
+    parameters
 }
 
 pub trait Tool: Send + Sync + 'static {
@@ -145,7 +178,7 @@ impl ToolRegistry {
             .map(|tool| crate::provider::ToolDefinition {
                 name: tool.name().to_owned(),
                 description: tool.description().to_owned(),
-                parameters: tool.parameters(),
+                parameters: with_intent(tool.parameters()),
             })
             .collect()
     }
@@ -338,7 +371,7 @@ async fn apply(
         content.push_str(&report.to_model(&path));
     }
 
-    Ok(ToolOutput::new(content, format!("{path} · {summary}")).with_diff(diff))
+    Ok(ToolOutput::new(content, format!("{path} · {summary}")).with_diff(diff, path.clone()))
 }
 
 /// Hands the change to the project's own formatter chain.

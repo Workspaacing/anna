@@ -45,6 +45,9 @@ pub struct ToolResult {
     pub content: String,
     #[serde(default)]
     pub is_error: bool,
+    /// The file the tool changed, so the transcript can highlight its diff as that language.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
     /// A unified diff of what the tool changed, for the transcript.
     ///
     /// Never sent to a provider: each wire format builds its own request body from `content`, so
@@ -152,6 +155,12 @@ pub enum StopReason {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompletionEvent {
     Text(String),
+    /// The model's own reasoning, which is not part of its answer.
+    ///
+    /// Reasoning models stream this while `content` stays empty, which is why a turn can look
+    /// frozen for several seconds before the first word appears. Shown as what the agent is
+    /// working through, separately from what it decided.
+    Reasoning(String),
     /// How many tokens the exchange cost, as the provider counts them.
     ///
     /// Reported at different moments by each format and, for some OpenAI-compatible providers, not
@@ -800,6 +809,17 @@ fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
         Some("content_block_delta") => {
             let delta = chunk.get("delta");
             match delta.and_then(|delta| delta.get("type")).and_then(Value::as_str) {
+                Some("thinking_delta") => {
+                    let thinking = delta
+                        .and_then(|delta| delta.get("thinking"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if thinking.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(vec![CompletionEvent::Reasoning(thinking.to_owned())])
+                    }
+                }
                 Some("text_delta") => {
                     let text = delta
                         .and_then(|delta| delta.get("text"))
@@ -893,6 +913,12 @@ fn decode_openai_chunk(chunk: &Value, state: &mut SseState) -> Result<Vec<Comple
     let Some(choice) = chunk.pointer("/choices/0") else {
         return Ok(events);
     };
+
+    if let Some(text) = choice.pointer("/delta/reasoning").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        events.push(CompletionEvent::Reasoning(text.to_owned()));
+    }
 
     if let Some(text) = choice.pointer("/delta/content").and_then(Value::as_str)
         && !text.is_empty()
@@ -1203,7 +1229,8 @@ mod tests {
                     call_id: "read".into(),
                     content: "fn main() {}".into(),
                     is_error: false,
-                    diff: String::new(),
+                    path: String::new(),
+                diff: String::new(),
                 }]),
             ],
             tools: Vec::new(),
@@ -1368,7 +1395,8 @@ mod tests {
                     call_id: "c1".into(),
                     content: "fn main() {}".into(),
                     is_error: false,
-                    diff: String::new(),
+                    path: String::new(),
+                diff: String::new(),
                 }]),
             ],
             tools: Vec::new(),

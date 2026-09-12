@@ -22,6 +22,7 @@ use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
 use settings::Settings as _;
 use std::sync::Arc;
+use gpui::StyledText;
 use ui::{Button, ButtonStyle, CopyButton, Divider, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
@@ -36,6 +37,8 @@ pub enum CoworkThreadEvent {
 struct MessageView {
     role: Role,
     text: String,
+    /// What the model worked through before answering, when it reports any.
+    reasoning: String,
     tool_calls: Vec<ToolCall>,
     tool_results: Vec<ToolResult>,
     /// Assistant prose is rendered as markdown. The entity is built when the message is created or
@@ -59,6 +62,11 @@ pub struct CoworkThreadView {
     tools: ToolRegistry,
     /// `(message index, result index)` for each diff the user has opened.
     expanded_diffs: collections::HashSet<(usize, usize)>,
+    /// Languages already resolved for diffs, keyed by file extension.
+    ///
+    /// Loading one is asynchronous, so the first frame of a diff is unhighlighted and repaints.
+    /// `None` records a language that was looked for and not found, so it is not looked for again.
+    diff_languages: collections::HashMap<SharedString, Option<Arc<language::Language>>>,
     /// Keeps the JavaScript toolchain's servers running while this thread is open.
     ///
     /// Dropping it unregisters the buffer that started them, so it is held rather than discarded.
@@ -98,6 +106,7 @@ impl CoworkThreadView {
             .map(|message| MessageView {
                 role: message.role,
                 text: message.text.clone(),
+                reasoning: String::new(),
                 tool_calls: message.tool_calls.clone(),
                 tool_results: message.tool_results.clone(),
                 rendered: (message.role == Role::Assistant)
@@ -124,6 +133,7 @@ impl CoworkThreadView {
             fs,
             tools: ToolRegistry::default_tools(),
             expanded_diffs: collections::HashSet::default(),
+            diff_languages: collections::HashMap::default(),
             _warm_toolchain: None,
             _warm_up: Task::ready(()),
             permissions,
@@ -360,6 +370,50 @@ impl CoworkThreadView {
         None
     }
 
+    /// Asks for the languages the open diffs need, before the render borrows `self`.
+    ///
+    /// Loading one is asynchronous and rendering is not, so a diff appears immediately and gains
+    /// its colours a frame later. An extension recorded as pending is not asked for twice, which
+    /// matters because this runs on every frame.
+    fn request_diff_languages(&mut self, cx: &mut Context<Self>) {
+        let wanted = self
+            .messages
+            .iter()
+            .flat_map(|message| message.tool_results.iter())
+            .filter(|result| !result.diff.is_empty())
+            .filter_map(|result| extension_of(&result.path))
+            .filter(|extension| !self.diff_languages.contains_key(extension))
+            .collect::<Vec<_>>();
+
+        for extension in wanted {
+            self.diff_languages.insert(extension.clone(), None);
+
+            let registry = self.language_registry.clone();
+            let file_name = format!("a.{extension}");
+            cx.spawn(async move |this, cx| {
+                let loaded = registry
+                    .load_language_for_file_path(std::path::Path::new(&file_name))
+                    .await
+                    .ok();
+                this.update(cx, |this, cx| {
+                    this.diff_languages.insert(extension, loaded);
+                    cx.notify();
+                })
+                .log_err();
+            })
+            .detach();
+        }
+    }
+
+    /// Adds to what the model is working through, which is not part of its answer.
+    fn extend_reasoning(&mut self, chunk: &str, cx: &mut Context<Self>) {
+        if let Some(message) = self.messages.last_mut() {
+            message.reasoning.push_str(chunk);
+        }
+        self.scroll_handle.scroll_to_bottom();
+        cx.notify();
+    }
+
     /// Records what the provider said the exchange cost.
     ///
     /// Input is the whole conversation as the provider saw it, so it replaces rather than adds to
@@ -519,6 +573,7 @@ impl CoworkThreadView {
         self.messages.push(MessageView {
             role,
             text,
+            reasoning: String::new(),
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             rendered,
@@ -683,6 +738,14 @@ impl CoworkThreadView {
                         call.arguments.push_str(&arguments);
                     }
                 }
+                CompletionEvent::Reasoning(chunk) => {
+                    if this
+                        .update(cx, |this, cx| this.extend_reasoning(&chunk, cx))
+                        .is_err()
+                    {
+                        return Ok((Vec::new(), false));
+                    }
+                }
                 CompletionEvent::Usage { input, output } => {
                     if this
                         .update(cx, |this, cx| this.record_usage(input, output, cx))
@@ -778,6 +841,7 @@ impl CoworkThreadView {
             call_id: call.id.clone(),
             content: message,
             is_error: true,
+            path: String::new(),
             diff: String::new(),
         };
 
@@ -802,6 +866,7 @@ impl CoworkThreadView {
                 call_id: call.id.clone(),
                 content: output.content,
                 is_error: false,
+                path: output.path,
                 diff: output.diff,
             },
             Err(failure) => error(format!("{failure:#}")),
@@ -825,6 +890,7 @@ impl CoworkThreadView {
         self.messages.push(MessageView {
             role: Role::Tool,
             text: String::new(),
+            reasoning: String::new(),
             rendered: None,
             tool_calls: Vec::new(),
             tool_results: results,
@@ -1091,6 +1157,13 @@ impl CoworkThreadView {
             .map(|result| result.diff.as_str())
             .filter(|diff| !diff.is_empty());
         let open = self.expanded_diffs.contains(&(message_index, position));
+        // Already resolved by `request_diff_languages`, which runs before the render borrows
+        // `self` immutably.
+        let language = result
+            .map(|result| result.path.as_str())
+            .and_then(extension_of)
+            .and_then(|extension| self.diff_languages.get(&extension).cloned())
+            .flatten();
 
         v_flex()
             .w_full()
@@ -1153,7 +1226,7 @@ impl CoworkThreadView {
             )
             .when(open, |this| {
                 this.when_some(diff, |this, diff| {
-                    this.child(div().px_2p5().pb_2().child(render_diff(diff, cx)))
+                    this.child(div().px_2p5().pb_2().child(render_diff(diff, language.as_ref(), cx)))
                 })
             })
             .into_any_element()
@@ -1296,6 +1369,18 @@ fn first_line(content: &str) -> String {
 /// asks nothing of them, and reads the same whether they are watching it happen or scrolling past
 /// it afterwards — which is why the only thing the tense changes is the verb.
 fn describe_call(tool: &str, arguments: &str, finished: bool) -> String {
+    // The model's own account of the step, when it gave one. It knows why it made the call; a
+    // sentence assembled from the tool's name only ever describes the mechanism.
+    if let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(arguments)
+        && let Some(intent) = fields
+            .get("intent")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|intent| !intent.is_empty())
+    {
+        return first_line(intent);
+    }
+
     let subject = summarize_arguments(arguments);
 
     let verb = match (tool, finished) {
@@ -1534,9 +1619,46 @@ fn render_diff_counts(diff: &str, cx: &App) -> impl IntoElement + use<> {
         })
 }
 
-/// The diff itself, with a line-number gutter.
-fn render_diff(diff: &str, cx: &App) -> impl IntoElement + use<> {
+/// What the model worked through before answering.
+///
+/// Set apart from the answer rather than mixed into it: this is the model's working, not its
+/// conclusion, and a reader skimming for what was decided should be able to skip it. Muted and
+/// bordered on one side, the way a quotation is.
+fn render_reasoning(reasoning: &str, cx: &App) -> impl IntoElement + use<> {
     let colors = cx.theme().colors();
+
+    div()
+        .w_full()
+        .min_w_0()
+        .my_1()
+        .pl_2()
+        .border_l_2()
+        .border_color(colors.border_variant)
+        .text_ui_sm(cx)
+        .text_color(colors.text_muted)
+        .child(reasoning.to_owned())
+}
+
+/// A path's extension, which is the key the language cache uses.
+fn extension_of(path: &str) -> Option<SharedString> {
+    std::path::Path::new(path)
+        .extension()
+        .map(|extension| SharedString::from(extension.to_string_lossy().into_owned()))
+}
+
+/// The diff itself: the code in its own syntax colours, the change in the background.
+///
+/// Colouring the characters green and red throws away everything the syntax already told you — a
+/// string stops looking like a string, a keyword like a keyword — to say something the background
+/// is already saying. So the text keeps the language's own highlighting and only the row behind it
+/// carries the add/remove colour.
+fn render_diff(
+    diff: &str,
+    language: Option<&Arc<language::Language>>,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let colors = cx.theme().colors();
+    let syntax = cx.theme().syntax();
     let parsed = parse_unified_diff(diff);
     let shown = parsed.len().min(MAX_DIFF_LINES);
     let truncated = parsed.len().saturating_sub(shown);
@@ -1545,27 +1667,48 @@ fn render_diff(diff: &str, cx: &App) -> impl IntoElement + use<> {
         .into_iter()
         .take(shown)
         .map(|line| {
-            let (text_color, background, marker) = match line.kind {
+            let (background, marker, marker_color) = match line.kind {
                 DiffKind::Added => (
-                    colors.version_control_added,
-                    colors.version_control_added.opacity(0.12),
+                    colors.version_control_added.opacity(0.15),
                     "+",
+                    colors.version_control_added,
                 ),
                 DiffKind::Removed => (
-                    colors.version_control_deleted,
-                    colors.version_control_deleted.opacity(0.12),
+                    colors.version_control_deleted.opacity(0.15),
                     "-",
+                    colors.version_control_deleted,
                 ),
-                DiffKind::Header => (colors.text_accent, colors.element_background, " "),
-                DiffKind::Context => (colors.text_muted, colors.editor_background, " "),
+                DiffKind::Header => (colors.element_background, " ", colors.text_accent),
+                DiffKind::Context => (colors.editor_background, " ", colors.text_muted),
+            };
+
+            // A hunk header is not source, so it is left as plain accent text.
+            let text: AnyElement = match (line.kind, language) {
+                (DiffKind::Header, _) | (_, None) => div()
+                    .text_color(if line.kind == DiffKind::Header {
+                        colors.text_accent
+                    } else {
+                        colors.text
+                    })
+                    .child(line.text.clone())
+                    .into_any_element(),
+                (_, Some(language)) => {
+                    let highlights = language
+                        .highlight_text(&language::Rope::from(line.text.as_str()), 0..line.text.len())
+                        .into_iter()
+                        .filter_map(|(range, id)| syntax.get(id).cloned().map(|style| (range, style)))
+                        .collect::<Vec<_>>();
+
+                    StyledText::new(line.text.clone())
+                        .with_highlights(highlights)
+                        .into_any_element()
+                }
             };
 
             h_flex()
                 .w_full()
                 .bg(background)
                 .child(
-                    // The new-side number, falling back to the old one for a removed line, which
-                    // is the only number that line has.
                     div()
                         .w(px(40.))
                         .px_1()
@@ -1582,10 +1725,10 @@ fn render_diff(diff: &str, cx: &App) -> impl IntoElement + use<> {
                     div()
                         .w(px(10.))
                         .flex_shrink_0()
-                        .text_color(text_color)
+                        .text_color(marker_color)
                         .child(marker),
                 )
-                .child(div().flex_1().min_w_0().text_color(text_color).child(line.text))
+                .child(div().flex_1().min_w_0().child(text))
         })
         .collect::<Vec<_>>();
 
@@ -1692,6 +1835,9 @@ fn render_error(error: SharedString, cx: &App) -> impl IntoElement {
 
 impl Render for CoworkThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Before anything borrows the theme, because asking for a language needs `cx` mutably.
+        self.request_diff_languages(cx);
+
         let colors = cx.theme().colors();
         let is_streaming = self.is_streaming();
         let markdown_style = MarkdownStyle::themed(MarkdownFont::Preview, window, cx);
@@ -1730,6 +1876,9 @@ impl Render for CoworkThreadView {
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
+                    .when(!message.reasoning.is_empty(), |this| {
+                        this.child(render_reasoning(&message.reasoning, cx))
+                    })
                     .when_some(message.rendered.clone(), |this, markdown| {
                         this.child(MarkdownElement::new(markdown, markdown_style.clone()))
                     })
@@ -1787,6 +1936,45 @@ mod tests {
         "+    println!(\"extra\");\n",
         " }\n",
     );
+
+    #[test]
+    fn the_models_own_account_of_a_step_wins() {
+        // A transcript built from tool names reads as mechanics and leaves the reader to
+        // reconstruct why. The model knows why; it is asked, and its sentence is what shows.
+        let described = describe_call(
+            "read",
+            r#"{"path":"src/picker.rs","intent":"Checked how the picker is wired"}"#,
+            true,
+        );
+
+        assert_eq!(described, "Checked how the picker is wired");
+    }
+
+    #[test]
+    fn without_one_the_step_is_still_a_sentence() {
+        assert_eq!(
+            describe_call("write", r#"{"path":"src/index.ts"}"#, true),
+            "Wrote src/index.ts"
+        );
+        assert_eq!(
+            describe_call("shell", r#"{"command":"npm install"}"#, false),
+            "Running npm install…"
+        );
+    }
+
+    #[test]
+    fn an_empty_account_falls_back_rather_than_showing_nothing() {
+        assert_eq!(
+            describe_call("read", r#"{"path":"a.rs","intent":"   "}"#, true),
+            "Read a.rs"
+        );
+    }
+
+    #[test]
+    fn an_unknown_tool_still_reads_as_a_sentence() {
+        assert_eq!(describe_call("teleport", "{}", false), "Running teleport…");
+        assert_eq!(describe_call("teleport", "{}", true), "Ran teleport");
+    }
 
     #[test]
     fn counts_what_changed() {
