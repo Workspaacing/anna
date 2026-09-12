@@ -9,6 +9,10 @@
 //! that is never answered blocks that turn and nothing else.
 
 use crate::consequence::Consequence;
+use crate::thread::KVP_NAMESPACE;
+use db::kvp::KeyValueStore;
+use gpui::{AppContext as _, TaskExt as _};
+use util::ResultExt as _;
 use crate::cowork_settings::CoworkSettings;
 use collections::HashSet;
 use futures::channel::oneshot;
@@ -60,26 +64,84 @@ pub enum PermissionEvent {
     Changed,
 }
 
+/// Whether a grant the user gave should outlive the window it was given in.
+///
+/// Everything except what cannot be undone. Being asked again about `cargo` in every new thread of
+/// the same project is the friction that teaches people to switch the prompt off altogether, and
+/// the grant was never risky — a build can be undone, and its worst case is wasted time.
+///
+/// A standing permission to run `rm`, by contrast, is one the user will have forgotten giving, and
+/// the entire reason for asking was that there is no second chance. Those live and die with the
+/// window.
+fn worth_remembering(consequence: Consequence) -> bool {
+    consequence != Consequence::Irreversible
+}
+
+/// Where a project's remembered grants live in the key-value store.
+fn grants_key(project: &str) -> String {
+    format!("grants/{project}")
+}
+
 pub struct PermissionBroker {
     pending: Option<(PermissionRequest, oneshot::Sender<Decision>)>,
-    /// Scopes the user allowed for the session. Deliberately not persisted: a standing grant that
-    /// outlives the window is one the user will have forgotten giving.
+    /// Scopes allowed for this window only.
     granted: HashSet<String>,
+    /// Scopes allowed for this project, kept across sessions.
+    ///
+    /// Not everything the user allows is worth forgetting when the window closes. Being asked
+    /// again about `cargo` in every new thread of the same project is the friction that teaches
+    /// people to turn the prompt off altogether, and the grant was never risky: a build can be
+    /// undone.
+    ///
+    /// What is never remembered is anything that cannot be undone. A standing permission to run
+    /// `rm` is one the user will have forgotten giving, and the whole reason for asking about it
+    /// was that there is no second chance — so those stay in `granted` and die with the window.
+    remembered: HashSet<String>,
+    /// The project these grants belong to. `None` means nothing is remembered: a grant with no
+    /// project to scope it to would apply everywhere.
+    project: Option<String>,
+    key_value_store: KeyValueStore,
 }
 
 impl EventEmitter<PermissionEvent> for PermissionBroker {}
 
-impl Default for PermissionBroker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl PermissionBroker {
-    pub fn new() -> Self {
+    /// A broker for one thread, which reads back what this project was already allowed to do.
+    ///
+    /// `project` is the folder the thread works in. Grants are kept against it rather than
+    /// globally, because "yes, run npm here" says nothing about anywhere else.
+    pub fn new(project: Option<String>, cx: &mut Context<Self>) -> Self {
+        let key_value_store = KeyValueStore::global(cx);
+
+        if let Some(project) = project.clone() {
+            let store = key_value_store.clone();
+            cx.spawn(async move |this, cx| {
+                let remembered = cx
+                    .background_spawn(async move {
+                        store
+                            .scoped(KVP_NAMESPACE)
+                            .read(&grants_key(&project))
+                            .ok()
+                            .flatten()
+                            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                            .unwrap_or_default()
+                    })
+                    .await;
+
+                this.update(cx, |this, _| {
+                    this.remembered = remembered.into_iter().collect();
+                })
+                .log_err();
+            })
+            .detach();
+        }
+
         Self {
             pending: None,
             granted: HashSet::default(),
+            remembered: HashSet::default(),
+            project,
+            key_value_store,
         }
     }
 
@@ -136,6 +198,9 @@ impl PermissionBroker {
         };
 
         if decision == Decision::Always {
+            if worth_remembering(request.consequence) {
+                self.remember(request.scope.clone(), cx);
+            }
             self.granted.insert(request.scope);
         }
         let _ = sender.send(decision);
@@ -155,7 +220,47 @@ impl PermissionBroker {
     }
 
     pub fn is_granted(&self, scope: &str) -> bool {
-        self.granted.contains(scope)
+        self.granted.contains(scope) || self.remembered.contains(scope)
+    }
+
+    /// Keeps a grant for this project, so the next thread does not ask again.
+    fn remember(&mut self, scope: String, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        if !self.remembered.insert(scope) {
+            return;
+        }
+
+        let key_value_store = self.key_value_store.clone();
+        let scopes = self.remembered.iter().cloned().collect::<Vec<_>>();
+        cx.background_spawn(async move {
+            let raw = serde_json::to_string(&scopes)?;
+            key_value_store
+                .scoped(KVP_NAMESPACE)
+                .write(grants_key(&project), raw)
+                .await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Forgets everything this project was allowed to do without asking.
+    pub fn forget_grants(&mut self, cx: &mut Context<Self>) {
+        self.granted.clear();
+        self.remembered.clear();
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+
+        let key_value_store = self.key_value_store.clone();
+        cx.background_spawn(async move {
+            key_value_store
+                .scoped(KVP_NAMESPACE)
+                .delete(grants_key(&project))
+                .await
+        })
+        .detach_and_log_err(cx);
+        cx.notify();
     }
 }
 
@@ -194,6 +299,26 @@ pub fn command_scope(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_build_is_worth_remembering_and_a_deletion_is_not() {
+        // The whole rule, in one place: being asked about `cargo` in every new thread is the
+        // friction that makes people disable the prompt, and a standing `rm` is the grant nobody
+        // remembers giving.
+        assert!(worth_remembering(Consequence::Harmless));
+        assert!(worth_remembering(Consequence::Reversible));
+        assert!(!worth_remembering(Consequence::Irreversible));
+    }
+
+    #[test]
+    fn grants_are_filed_under_the_project_they_were_given_in() {
+        // "Yes, run npm here" says nothing about anywhere else, so the key carries the folder.
+        assert_eq!(
+            grants_key("C:/Users/USER/Documents/wu-main"),
+            "grants/C:/Users/USER/Documents/wu-main"
+        );
+        assert_ne!(grants_key("/a/one"), grants_key("/a/two"));
+    }
 
     #[test]
     fn a_scope_is_the_program_being_run() {

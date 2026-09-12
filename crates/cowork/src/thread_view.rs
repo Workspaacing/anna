@@ -125,7 +125,7 @@ impl CoworkThreadView {
             })
             .collect();
 
-        let permissions = cx.new(|_| PermissionBroker::new());
+        let permissions = cx.new(|cx| PermissionBroker::new(thread.metadata.project.clone(), cx));
         // A question the agent is waiting on has to reach the screen, and it is the broker that
         // knows when one arrives.
         let permissions_subscription =

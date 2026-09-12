@@ -25,7 +25,7 @@ use std::{
 };
 use util::ResultExt as _;
 
-const KVP_NAMESPACE: &str = "cowork";
+pub const KVP_NAMESPACE: &str = "cowork";
 const INDEX_KEY: &str = "index";
 const CATALOG_KEY: &str = "catalog";
 const STORED_KEYS_KEY: &str = "providers_with_keys";
