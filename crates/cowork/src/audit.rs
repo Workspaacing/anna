@@ -477,7 +477,7 @@ pub fn findings(advisories: &[Advisory], contents: &str) -> Vec<Finding> {
     advisories
         .iter()
         .map(|advisory| Finding {
-            check: "dependencies",
+            check: "dependencies".into(),
             severity: Severity::Warning,
             line: line_of(contents, &advisory.package).unwrap_or(1),
             message: advisory.message(),

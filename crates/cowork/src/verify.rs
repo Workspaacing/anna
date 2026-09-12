@@ -12,7 +12,7 @@
 use crate::{audit, cowork_settings::VerificationSettings};
 use collections::HashSet;
 use futures::channel::oneshot;
-use gpui::{AsyncApp, Entity, FutureExt as _};
+use gpui::{AsyncApp, Entity, FutureExt as _, SharedString};
 use http_client::HttpClient;
 use language::{Buffer, BufferEvent, Point};
 use regex::Regex;
@@ -26,11 +26,27 @@ pub enum Severity {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finding {
-    pub check: &'static str,
+    pub check: SharedString,
     pub severity: Severity,
     /// 1-based, to match how every compiler and editor reports a line.
     pub line: usize,
     pub message: String,
+}
+
+/// What the project's own checks made of one file, for showing the user.
+///
+/// The distinction this exists to draw is between a tool that ran and was happy and a tool that
+/// never ran at all. Both produce no findings, and until now both looked identical — which is why
+/// "is Biome actually working?" was a question nobody could answer by looking. `attached` is the
+/// set of language servers the buffer really had; anything not in it did not look at this file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CheckReport {
+    /// The language servers that were attached to the buffer when it was written.
+    pub attached: Vec<SharedString>,
+    /// What they said, already named after the tool that said it.
+    pub findings: Vec<Finding>,
+    /// Whether the formatter chain changed the file.
+    pub formatted: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -179,13 +195,19 @@ async fn diagnostics(buffer: &Entity<Buffer>, cx: &mut AsyncApp) -> Vec<Finding>
 
 /// Names the check after the tool that produced the diagnostic, so the report says `clippy` or
 /// `biome` rather than a uniform `lsp` the user cannot act on.
-fn source_check(source: &str) -> &'static str {
+///
+/// Unrecognised sources keep their own name rather than collapsing into one bucket. Collapsing
+/// them was a quiet bug: the checks strip matches findings against the servers that were attached,
+/// so a `vtsls` that reported ten errors showed as `vtsls ✓` with its errors filed under a
+/// separate heading. A server is only ever named after itself here.
+fn source_check(source: &str) -> SharedString {
     match source {
-        source if source.contains("clippy") => "clippy",
-        source if source.contains("biome") => "biome",
-        source if source.contains("eslint") => "eslint",
-        source if source.contains("rustc") => "rustc",
-        _ => "diagnostics",
+        source if source.contains("clippy") => "clippy".into(),
+        source if source.contains("biome") => "biome".into(),
+        source if source.contains("eslint") => "eslint".into(),
+        source if source.contains("rustc") => "rustc".into(),
+        "" | "lsp" => "diagnostics".into(),
+        source => SharedString::from(source.to_owned()),
     }
 }
 
@@ -386,7 +408,7 @@ pub fn scan_secrets(text: &str) -> Vec<Finding> {
         for (name, family, regex) in COMPILED_PATTERNS.iter() {
             if regex.is_match(line) && reported.insert((line_number, family)) {
                 findings.push(Finding {
-                    check: "secrets",
+                    check: "secrets".into(),
                     severity: Severity::Error,
                     line: line_number,
                     message: format!("looks like a {name}; move it to an environment variable"),
@@ -407,7 +429,7 @@ pub fn scan_secrets(text: &str) -> Vec<Finding> {
             }
             if reported.insert((line_number, "assignment")) {
                 findings.push(Finding {
-                    check: "secrets",
+                    check: "secrets".into(),
                     severity: Severity::Error,
                     line: line_number,
                     message: format!(
@@ -546,13 +568,13 @@ mod tests {
         let report = VerificationReport {
             findings: vec![
                 Finding {
-                    check: "lint",
+                    check: "lint".into(),
                     severity: Severity::Warning,
                     line: 2,
                     message: "unused import".into(),
                 },
                 Finding {
-                    check: "secrets",
+                    check: "secrets".into(),
                     severity: Severity::Error,
                     line: 9,
                     message: "looks like a GitHub token".into(),
@@ -615,6 +637,19 @@ mod tests {
         assert_eq!(source_check("clippy"), "clippy");
         assert_eq!(source_check("biome"), "biome");
         assert_eq!(source_check("rustc"), "rustc");
-        assert_eq!(source_check("some-other-server"), "diagnostics");
+
+        // A server nobody special-cased keeps its own name. It used to collapse into
+        // "diagnostics", which broke the checks strip: that matches findings against the servers
+        // that were attached, so a `vtsls` reporting ten errors was shown as `vtsls ✓` with its
+        // errors filed under a heading belonging to nothing.
+        assert_eq!(source_check("vtsls"), "vtsls");
+        assert_eq!(
+            source_check("tailwindcss-language-server"),
+            "tailwindcss-language-server"
+        );
+
+        // Only a source that names nothing falls back.
+        assert_eq!(source_check(""), "diagnostics");
+        assert_eq!(source_check("lsp"), "diagnostics");
     }
 }

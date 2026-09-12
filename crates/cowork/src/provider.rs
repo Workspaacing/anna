@@ -55,6 +55,13 @@ pub struct ToolResult {
     /// conversation still shows what was changed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub diff: String,
+    /// What Biome, ESLint and the rest made of the file this call changed.
+    ///
+    /// Never serialized: it is for the panel above the composer, and a model has already been told
+    /// everything in it as prose inside `content`. Sending it twice would cost tokens to say the
+    /// same thing in a shape the model has no use for.
+    #[serde(skip)]
+    pub checks: Option<crate::verify::CheckReport>,
 }
 
 /// Fields added after the first release default, so threads stored by an earlier version still load.
@@ -1321,6 +1328,7 @@ mod tests {
                     attachments: Vec::new(),
                 },
                 Message::tool_results(vec![ToolResult {
+                    checks: None,
                     call_id: "read".into(),
                     content: "fn main() {}".into(),
                     is_error: false,
@@ -1487,6 +1495,7 @@ mod tests {
                     attachments: Vec::new(),
                 },
                 Message::tool_results(vec![ToolResult {
+                    checks: None,
                     call_id: "c1".into(),
                     content: "fn main() {}".into(),
                     is_error: false,

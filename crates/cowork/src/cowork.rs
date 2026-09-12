@@ -12,6 +12,7 @@
 mod audit;
 mod catalog;
 mod cowork_panel;
+mod consequence;
 mod cowork_settings;
 mod image;
 mod inline_calls;

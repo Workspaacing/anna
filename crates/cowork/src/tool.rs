@@ -12,7 +12,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::FutureExt as _;
-use gpui::{App, AppContext as _, AsyncApp, Entity, Task, WeakEntity};
+use gpui::{App, AppContext as _, AsyncApp, Entity, SharedString, Task, WeakEntity};
 use language::Buffer;
 use collections::HashSet;
 use project::{
@@ -70,6 +70,9 @@ pub struct ToolOutput {
     pub diff: String,
     /// The file it changed, for highlighting that diff.
     pub path: String,
+    /// What Biome, ESLint, Prettier and the rest made of it — `None` for a tool that changed
+    /// nothing and therefore had nothing checked.
+    pub checks: Option<verify::CheckReport>,
 }
 
 impl ToolOutput {
@@ -79,7 +82,13 @@ impl ToolOutput {
             summary: summary.into(),
             diff: String::new(),
             path: String::new(),
+            checks: None,
         }
+    }
+
+    pub fn with_checks(mut self, checks: verify::CheckReport) -> Self {
+        self.checks = Some(checks);
+        self
     }
 
     pub fn with_diff(mut self, diff: String, path: String) -> Self {
@@ -335,6 +344,7 @@ async fn apply(
     let _language_servers = project.update(cx, |project, cx| {
         project.register_buffer_with_language_servers(&buffer, cx)
     });
+    let attached = attached_servers(&project, &buffer, cx);
 
     let before = buffer_text(&buffer, cx).await;
     let summary = edit_buffer(&buffer, &change, cx).await?;
@@ -363,6 +373,9 @@ async fn apply(
     // either side: enough to see where a change landed without pasting the file back into the
     // transcript, which is what made an earlier version unreadable.
     let diff = language::unified_diff_with_context(&before, &saved, 1, 1, 3);
+    // Whether the formatter chain rewrote anything. Recorded here because `saved` is about to be
+    // handed to the checks, which take it.
+    let formatted = before != saved;
 
     findings.extend(
         verify::inspect(settings, http, buffer, file_name, saved, cx)
@@ -377,7 +390,41 @@ async fn apply(
         content.push_str(&report.to_model(&path));
     }
 
-    Ok(ToolOutput::new(content, format!("{path} · {summary}")).with_diff(diff, path.clone()))
+    Ok(
+        ToolOutput::new(content, format!("{path} · {summary}"))
+            .with_diff(diff, path.clone())
+            .with_checks(verify::CheckReport {
+                attached,
+                findings: report.findings,
+                formatted,
+            }),
+    )
+}
+
+/// The language servers that were actually running for this buffer.
+///
+/// Asked right after registration, because that is the moment the answer means something: a server
+/// missing here did not look at this file, whatever the settings say it should do. That is the one
+/// fact the checks panel cannot get from the findings — a tool that ran and was happy and a tool
+/// that never started both report nothing.
+///
+/// The borrow dance is the shape `Project::has_language_servers_for` uses: the buffer reference has
+/// to come from an enclosing `update`, or it and the store would both want `cx`.
+fn attached_servers(
+    project: &Entity<Project>,
+    buffer: &Entity<Buffer>,
+    cx: &mut AsyncApp,
+) -> Vec<SharedString> {
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+
+    buffer.update(cx, |buffer, cx| {
+        lsp_store.update(cx, |lsp_store, cx| {
+            lsp_store
+                .running_language_servers_for_local_buffer(buffer, cx)
+                .map(|(adapter, _)| SharedString::from(adapter.name.0.to_string()))
+                .collect()
+        })
+    })
 }
 
 /// Hands the change to the project's own formatter chain.
@@ -562,9 +609,15 @@ impl Tool for ShellTool {
 
         cx.spawn(async move |cx| {
             let outside = reaches_outside(&command, &folders);
-            let title = match &outside {
-                Some(path) => format!("Run a command that reaches outside this project: {path}"),
-                None => "Run a command".to_owned(),
+            let consequence = crate::consequence::classify(&command);
+            let title = match (&outside, consequence) {
+                (Some(path), _) => {
+                    format!("Run a command that reaches outside this project: {path}")
+                }
+                (None, crate::consequence::Consequence::Irreversible) => {
+                    "Run a command that cannot be undone".to_owned()
+                }
+                (None, _) => "Run a command".to_owned(),
             };
 
             let decision = context
@@ -575,6 +628,7 @@ impl Tool for ShellTool {
                             tool: "shell",
                             title: title.into(),
                             detail: command.clone().into(),
+                            consequence,
                             always_ask: outside.is_some(),
                             scope: command_scope(&command),
                         },

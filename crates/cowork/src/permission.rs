@@ -8,6 +8,7 @@
 //! One request is outstanding at a time, because the turn loop runs tools in sequence. A request
 //! that is never answered blocks that turn and nothing else.
 
+use crate::consequence::Consequence;
 use crate::cowork_settings::CoworkSettings;
 use collections::HashSet;
 use futures::channel::oneshot;
@@ -38,6 +39,8 @@ pub struct PermissionRequest {
     pub title: SharedString,
     /// The specifics the user judges — for a command, the command itself.
     pub detail: SharedString,
+    /// What running it would amount to, which decides whether it is worth an interruption.
+    pub consequence: Consequence,
     /// Whether this must be asked even when the user has turned on approving everything.
     ///
     /// Approving everything is a promise about *this project*: the user made it so an agent could
@@ -91,6 +94,16 @@ impl PermissionBroker {
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Decision> {
         let (sender, receiver) = oneshot::channel();
+
+        // Reading something is not worth an interruption. The prompt exists for changes that
+        // cannot be seen or taken back, and firing it for `ls` and `git status` is how a person
+        // learns to click through the dialog without reading it — which costs exactly the one
+        // that mattered. A command that reaches outside the project is still asked about, whatever
+        // it does, because leaving the project is itself the thing being judged.
+        if request.consequence == Consequence::Harmless && !request.always_ask {
+            let _ = sender.send(Decision::Always);
+            return receiver;
+        }
 
         // Both shortcuts are skipped for a request that leaves the project: neither the
         // setting nor an earlier "always" for this program was given with that in view.

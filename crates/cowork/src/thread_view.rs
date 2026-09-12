@@ -10,6 +10,7 @@ use crate::{
     permission::{Decision, PermissionBroker, PermissionEvent},
     thread::{CoworkStore, Thread, ThreadId},
     tool::{ToolContext, ToolKind, ToolRegistry},
+    verify::{CheckReport, Finding, Severity},
 };
 use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
@@ -1013,6 +1014,7 @@ impl CoworkThreadView {
             is_error: true,
             path: String::new(),
             diff: String::new(),
+            checks: None,
         };
 
         let Some(tool) = tools.get(&call.name) else {
@@ -1038,6 +1040,7 @@ impl CoworkThreadView {
                 is_error: false,
                 path: output.path,
                 diff: output.diff,
+                checks: output.checks,
             },
             Err(failure) => error(format!("{failure:#}")),
         }
@@ -1586,12 +1589,71 @@ impl CoworkThreadView {
         )
     }
 
+    /// What the project's own tooling made of the files the agent just wrote.
+    ///
+    /// A tool that ran and found nothing and a tool that never started both report no findings, so
+    /// a strip assembled from findings alone would be blank in both cases and misleading in one of
+    /// them. `attached` is the only thing that tells them apart, which is why every server that
+    /// looked gets a chip even when it has nothing to say, and why nothing having looked is stated
+    /// outright: until now "is Biome actually working?" could not be answered by looking.
+    ///
+    /// Only the most recent exchange is shown. Anything older describes a file the agent may have
+    /// changed again since, and a strip that accumulated them would push the composer it sits
+    /// above off the screen.
+    fn render_check_strip(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
+        let reported = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Tool)?
+            .tool_results
+            .iter()
+            .filter_map(|result| {
+                let report = result.checks.as_ref()?;
+                Some((SharedString::from(result.path.clone()), check_chips(report)))
+            })
+            .collect::<Vec<_>>();
+
+        if reported.is_empty() {
+            return None;
+        }
+
+        let colors = cx.theme().colors();
+
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .pt_2()
+                .gap_1()
+                .children(reported.into_iter().map(|(path, chips)| {
+                    h_flex()
+                        .w_full()
+                        .gap_1p5()
+                        .flex_wrap()
+                        .child(Label::new(path).size(LabelSize::Small).color(Color::Muted))
+                        .children(chips.into_iter().map(|(text, color)| {
+                            h_flex()
+                                .px_1p5()
+                                .py_0p5()
+                                .gap_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.border)
+                                .bg(colors.element_background)
+                                .child(Label::new(text).size(LabelSize::Small).color(color))
+                        }))
+                })),
+        )
+    }
+
     fn render_composer(&self, is_streaming: bool, cx: &Context<Self>) -> impl IntoElement {
         let accepts_images = self.model_accepts_images(cx);
 
         v_flex()
             .w_full()
             .child(Divider::horizontal())
+            .children(self.render_check_strip(cx))
             .children(self.render_pending_images(cx))
             .child(
                 h_flex()
@@ -1637,6 +1699,74 @@ impl CoworkThreadView {
                     ),
             )
     }
+}
+
+/// One chip per tool, in the order the file met them: the language servers that were attached,
+/// then the checks that reported without one — the secret scan and the dependency audit are
+/// compiled in and so never appear in `attached`.
+fn check_chips(report: &CheckReport) -> Vec<(SharedString, Color)> {
+    let mut chips = Vec::new();
+
+    // The one state the per-tool chips cannot express, and the state most worth knowing: no
+    // language server so much as opened the file.
+    if report.attached.is_empty() {
+        chips.push((SharedString::new_static("no checks ran"), Color::Muted));
+    }
+
+    for name in &report.attached {
+        let findings = report
+            .findings
+            .iter()
+            .filter(|finding| finding.check.eq_ignore_ascii_case(name))
+            .collect::<Vec<_>>();
+        chips.push(check_chip(name.clone(), &findings));
+    }
+
+    // Shown even when nothing was attached: a leaked credential is not made less true by the
+    // absence of a language server.
+    let mut unattached = Vec::new();
+    for finding in &report.findings {
+        let covered = report
+            .attached
+            .iter()
+            .any(|name| finding.check.eq_ignore_ascii_case(name));
+        if !covered && !unattached.contains(&finding.check) {
+            unattached.push(finding.check.clone());
+        }
+    }
+    for check in unattached {
+        let findings = report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == check)
+            .collect::<Vec<_>>();
+        chips.push(check_chip(check.clone(), &findings));
+    }
+
+    if report.formatted {
+        chips.push((SharedString::new_static("formatted"), Color::Muted));
+    }
+
+    chips
+}
+
+/// A tool's own chip: a tick when it was satisfied, otherwise how much it had to say, coloured by
+/// the worst of it.
+fn check_chip(name: SharedString, findings: &[&Finding]) -> (SharedString, Color) {
+    if findings.is_empty() {
+        return (format!("{name} \u{2713}").into(), Color::Success);
+    }
+
+    let worst = if findings
+        .iter()
+        .any(|finding| finding.severity == Severity::Error)
+    {
+        Color::Error
+    } else {
+        Color::Warning
+    };
+
+    (format!("{name} {}", findings.len()).into(), worst)
 }
 
 /// The first non-empty line of a tool's output, for the collapsed row.
