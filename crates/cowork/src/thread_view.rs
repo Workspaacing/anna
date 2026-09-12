@@ -242,6 +242,19 @@ impl CoworkThreadView {
         self.open_model_selector(window, cx);
     }
 
+    /// Changes the model this conversation runs on.
+    ///
+    /// Public because the panel's own picker sets it too: the two must never name different
+    /// models for the same open thread.
+    pub fn set_model(&mut self, model: ModelRef, cx: &mut Context<Self>) {
+        if self.thread.metadata.model == model {
+            return;
+        }
+        self.thread.metadata.model = model;
+        self.persist(cx);
+        cx.notify();
+    }
+
     fn open_model_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
@@ -257,12 +270,7 @@ impl CoworkThreadView {
                 store
                     .update(cx, |store, cx| store.remember_model(model.clone(), cx))
                     .log_err();
-                this.update(cx, |this, cx| {
-                    this.thread.metadata.model = model;
-                    this.persist(cx);
-                    cx.notify();
-                })
-                .log_err();
+                this.update(cx, |this, cx| this.set_model(model, cx)).log_err();
             });
 
         workspace.update(cx, |workspace, cx| {

@@ -9,8 +9,8 @@ use crate::{
 use editor::{Editor, EditorEvent};
 use fs::Fs;
 use gpui::{
-    Action, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Subscription,
-    WeakEntity, actions, uniform_list,
+    Action, AsyncWindowContext, App, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    PromptLevel, Subscription, WeakEntity, actions, uniform_list,
 };
 use settings::{DockSide, Settings as _};
 use std::sync::Arc;
@@ -153,12 +153,27 @@ impl CoworkPanel {
         self.start_new_thread(window, cx);
     }
 
+    /// Starting a thread asks which model it is for.
+    ///
+    /// A conversation keeps the model it was created with, so this is the one moment the choice
+    /// matters and the one moment it is cheap to make. Escape starts nothing, which is the right
+    /// outcome for a picker opened by mistake.
     pub fn start_new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(model) = self.store.read(cx).model_for_new_thread() else {
+        let Some(suggested) = self.store.read(cx).model_for_new_thread() else {
             self.report_no_model(cx);
             return;
         };
-        self.open_new_thread(model, window, cx);
+
+        let this = cx.entity().downgrade();
+        self.pick_model(
+            Some(suggested),
+            Arc::new(move |model, window, cx| {
+                this.update(cx, |this, cx| this.open_new_thread(model, window, cx))
+                    .log_err();
+            }),
+            window,
+            cx,
+        );
     }
 
     fn open_new_thread(&mut self, model: ModelRef, window: &mut Window, cx: &mut Context<Self>) {
@@ -235,14 +250,45 @@ impl CoworkPanel {
     fn delete_selected_thread(
         &mut self,
         _: &DeleteSelectedThread,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(thread) = self.visible_threads.get(self.selected_index) else {
+        let Some(thread) = self.visible_threads.get(self.selected_index).cloned() else {
             return;
         };
-        let id = thread.id.clone();
-        self.store.update(cx, |store, cx| store.delete_thread(id, cx));
+        self.confirm_delete(thread, window, cx);
+    }
+
+    /// Asks before deleting, because nothing here can put a conversation back.
+    ///
+    /// Threads are not in the editor's undo history and are removed from the key-value store
+    /// outright, so the prompt is the only thing standing between a mis-aimed keystroke and losing
+    /// a conversation.
+    fn confirm_delete(
+        &mut self,
+        thread: ThreadMetadata,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Delete “{}”?", thread.title),
+            Some("This conversation cannot be recovered."),
+            &["Delete", "Cancel"],
+            cx,
+        );
+
+        let store = self.store.downgrade();
+        let id = thread.id;
+        cx.spawn(async move |_, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            store
+                .update(cx, |store, cx| store.delete_thread(id, cx))
+                .log_err();
+        })
+        .detach();
     }
 
     fn select_next_thread(
@@ -283,30 +329,55 @@ impl CoworkPanel {
         self.open_model_selector(window, cx);
     }
 
-    /// Choosing here sets what new threads start on. An existing thread keeps the model it was
-    /// created with; that one is changed from the thread's own header.
+    /// Choosing here changes what new threads start on **and** the thread being looked at.
+    ///
+    /// The footer and the thread's own header used to disagree: changing the model in the header
+    /// updated the footer, but not the other way round, so the panel could name one model while
+    /// the open conversation ran on another.
     fn open_model_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.store.read(cx).model_for_new_thread();
+        let store = self.store.downgrade();
+        let workspace = self.workspace.clone();
+
+        self.pick_model(
+            selected,
+            Arc::new(move |model, _window, cx| {
+                store
+                    .update(cx, |store, cx| store.remember_model(model.clone(), cx))
+                    .log_err();
+                workspace
+                    .update(cx, |workspace, cx| {
+                        if let Some(thread) = workspace.active_item_as::<CoworkThreadView>(cx) {
+                            thread.update(cx, |thread, cx| thread.set_model(model, cx));
+                        }
+                    })
+                    .log_err();
+            }),
+            window,
+            cx,
+        );
+    }
+
+    /// Opens the model picker and hands the choice to `on_chosen`.
+    fn pick_model(
+        &mut self,
+        selected: Option<ModelRef>,
+        on_chosen: Arc<dyn Fn(ModelRef, &mut Window, &mut App) + Send + Sync>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
 
-        // The environment may have gained a key since the catalog was last read, and a model whose
-        // provider is not connected is never offered.
+        // A key may have been added since the catalog was last read, and a model whose provider is
+        // not connected is never offered.
         self.store
             .update(cx, |store, cx| store.refresh_connections(cx));
 
-        let selected = self.store.read(cx).model_for_new_thread();
-        let store = self.store.downgrade();
-        let on_confirm: Arc<dyn Fn(ModelRef, &mut Window, &mut App) + Send + Sync> =
-            Arc::new(move |model, _window, cx| {
-                store
-                    .update(cx, |store, cx| store.remember_model(model, cx))
-                    .log_err();
-            });
-
         workspace.update(cx, |workspace, cx| {
             workspace.toggle_modal(window, cx, move |window, cx| {
-                ModelSelector::new(selected, on_confirm, window, cx)
+                ModelSelector::new(selected, on_chosen, window, cx)
             });
         });
     }

@@ -1,5 +1,8 @@
 use crate::{
-    catalog::{CATALOG_STALE_AFTER, Catalog, CatalogEntry, ModelRef, POPULAR_PROVIDERS, Support},
+    catalog::{
+        CATALOG_STALE_AFTER, Catalog, CatalogEntry, ModelRef, POPULAR_FILTER_LENGTH,
+        POPULAR_PROVIDERS, Support,
+    },
     cowork_settings::CoworkSettings,
     provider::{self, Message, Role},
 };
@@ -126,6 +129,8 @@ pub struct ProviderRow {
     /// The credential came from the OS credential store rather than the environment.
     pub stored: bool,
     pub supported: bool,
+    /// One of the first [`POPULAR_FILTER_LENGTH`] curated providers.
+    pub popular: bool,
 }
 
 /// A model of a connected provider, resolved once for the same reason as [`ProviderRow`].
@@ -625,6 +630,10 @@ impl CoworkStore {
                 connected: self.connected.contains(id),
                 stored: self.stored_keys.contains_key(id),
                 supported: provider.support() == Support::Supported,
+                popular: POPULAR_PROVIDERS
+                    .iter()
+                    .take(POPULAR_FILTER_LENGTH)
+                    .any(|popular| popular == id),
             })
             .collect::<Vec<_>>();
         rows.sort_by_key(|row| row.name.to_lowercase());

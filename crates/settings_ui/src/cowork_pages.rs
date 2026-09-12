@@ -33,6 +33,9 @@ use ui::{
 struct PageState {
     editor: Entity<Editor>,
     table: Entity<TableInteractionState>,
+    /// Which half of the provider list to show. Popular first, because with 213 providers the
+    /// full list is a directory rather than a choice.
+    show_all: Entity<bool>,
     _subscription: Subscription,
 }
 
@@ -57,6 +60,7 @@ impl PageState {
         Self {
             editor,
             table: cx.new(|cx| TableInteractionState::new(cx)),
+            show_all: cx.new(|_| false),
             _subscription: subscription,
         }
     }
@@ -97,6 +101,64 @@ fn render_intro(
         )
 }
 
+/// Popular / All, as two counted tabs.
+///
+/// The counts are on the labels because the difference between them is the whole reason the filter
+/// exists, and a tab that does not say how much it is hiding is not informative.
+fn render_filter_tabs(
+    show_all: &GpuiEntity<bool>,
+    is_showing_all: bool,
+    popular_count: usize,
+    total: usize,
+    cx: &mut Context<SettingsWindow>,
+) -> impl IntoElement + use<> {
+    h_flex()
+        .gap_1()
+        .pb_1()
+        .child(filter_tab(
+            format!("Popular ({popular_count})"),
+            !is_showing_all,
+            false,
+            show_all.clone(),
+            cx,
+        ))
+        .child(filter_tab(
+            format!("All ({total})"),
+            is_showing_all,
+            true,
+            show_all.clone(),
+            cx,
+        ))
+}
+
+/// One counted tab.
+///
+/// A free function rather than a closure because each tab needs `cx` to build its own listener, and
+/// a closure capturing `cx` cannot be called twice.
+fn filter_tab(
+    label: String,
+    selected: bool,
+    target: bool,
+    show_all: GpuiEntity<bool>,
+    cx: &mut Context<SettingsWindow>,
+    // The button owns everything it needs, so the return type must not capture `cx` — otherwise
+    // the first tab holds the borrow and the second cannot be built.
+) -> impl IntoElement + use<> {
+    Button::new(SharedString::from(format!("cowork-filter-{target}")), label)
+        .style(if selected {
+            ButtonStyle::Tinted(ui::TintColor::Accent)
+        } else {
+            ButtonStyle::Subtle
+        })
+        .on_click(cx.listener(move |_, _, _window, cx| {
+            show_all.update(cx, |value, cx| {
+                *value = target;
+                cx.notify();
+            });
+            cx.notify();
+        }))
+}
+
 pub(crate) fn render_providers(
     _settings_window: &SettingsWindow,
     _scroll_handle: &ScrollHandle,
@@ -108,30 +170,40 @@ pub(crate) fn render_providers(
     };
 
     let settings_window = cx.entity().downgrade();
-    let state = window.use_state(cx, move |window, cx| {
+    let page = window.use_state(cx, move |window, cx| {
         PageState::new("Search providers…", settings_window, window, cx)
     });
-    let state = state.read(cx);
-    let query = state.query(cx);
+
+    // Everything read from `cx` is taken by value first. The tabs need `cx` mutably to build their
+    // click listeners, which cannot happen while a `&PageState` borrow is still alive.
+    let show_all_state = page.read(cx).show_all.clone();
+    let show_all = *show_all_state.read(cx);
+    let query = page.read(cx).query(cx);
 
     let store_handle = store.clone();
-    let store = store.read(cx);
-    let rows = store.provider_list();
-    let connected = store.connected_count();
-
-    let visible: Vec<usize> = if query.is_empty() {
-        (0..rows.len()).collect()
-    } else {
-        rows.iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                row.name.to_lowercase().contains(&query)
-                    || row.id.to_lowercase().contains(&query)
-                    || row.env_label.to_lowercase().contains(&query)
-            })
-            .map(|(index, _)| index)
-            .collect()
+    let (rows, connected) = {
+        let store = store.read(cx);
+        (store.provider_list(), store.connected_count())
     };
+
+    // A connected provider is always listed, whichever filter is on: hiding one the user has
+    // already set up would look like it had been forgotten.
+    let visible: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| show_all || row.popular || row.connected)
+        .filter(|(_, row)| {
+            query.is_empty()
+                || row.name.to_lowercase().contains(&query)
+                || row.id.to_lowercase().contains(&query)
+                || row.env_label.to_lowercase().contains(&query)
+        })
+        .map(|(index, _)| index)
+        .collect();
+
+    let popular_count = rows.iter().filter(|row| row.popular || row.connected).count();
+    let tabs = render_filter_tabs(&show_all_state, show_all, popular_count, rows.len(), cx);
+    let state = page.read(cx);
 
     v_flex()
         .size_full()
@@ -139,10 +211,12 @@ pub(crate) fn render_providers(
         .gap_2()
         .child(render_intro(
             format!("{connected} of {} providers connected", rows.len()),
-            "Cowork never stores an API key. A provider is connected when one of its environment \
-             variables is set in the environment Wu was started from. Set it, then restart Wu.",
+            "Connect a provider by clicking it and entering an API key, which is kept in the \
+             operating system's credential store. A provider whose key is already in the \
+             environment Wu started from is connected without one.",
             state,
         ))
+        .child(tabs)
         .when(visible.is_empty(), |this| {
             this.child(unavailable_owned(format!("No provider matches “{query}”.")))
         })
