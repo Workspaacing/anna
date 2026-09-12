@@ -55,6 +55,22 @@ pub struct ToolResult {
 }
 
 /// Fields added after the first release default, so threads stored by an earlier version still load.
+/// An image sent along with a message.
+///
+/// Held in the format the user supplied rather than re-encoded: a PNG screenshot stays a PNG, a
+/// photograph stays a JPEG. Re-encoding would cost quality for nothing, and every provider accepts
+/// the common types directly.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Attachment {
+    /// The IANA media type, e.g. `image/png`. Taken from the file rather than guessed, because
+    /// every provider trusts this field over the bytes.
+    pub media_type: String,
+    /// Standard base64, padded, no line breaks.
+    pub data: String,
+    /// The file's own name, for the transcript.
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -64,6 +80,8 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_results: Vec<ToolResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message {
@@ -73,6 +91,7 @@ impl Message {
             text: text.into(),
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -82,6 +101,7 @@ impl Message {
             text: text.into(),
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -91,6 +111,7 @@ impl Message {
             text: String::new(),
             tool_calls: Vec::new(),
             tool_results: results,
+            attachments: Vec::new(),
         }
     }
 }
@@ -1162,6 +1183,7 @@ mod tests {
                         arguments: r#"{"path":"a.rs"}"#.into(),
                     }],
                     tool_results: Vec::new(),
+                    attachments: Vec::new(),
                 },
                 Message::tool_results(vec![ToolResult {
                     call_id: "read".into(),
@@ -1270,6 +1292,7 @@ mod tests {
                         arguments: r#"{"path":"a.rs"}"#.into(),
                     }],
                     tool_results: Vec::new(),
+                    attachments: Vec::new(),
                 },
                 Message::tool_results(vec![ToolResult {
                     call_id: "c1".into(),

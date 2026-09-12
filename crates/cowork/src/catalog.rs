@@ -111,6 +111,9 @@ pub struct Model {
     pub tool_call: bool,
     #[serde(default)]
     pub attachment: bool,
+    /// What the model actually takes in and produces: `text`, `image`, `audio`, `video`, `pdf`.
+    #[serde(default)]
+    pub modalities: Option<Modalities>,
     #[serde(default)]
     pub temperature: bool,
     #[serde(default)]
@@ -147,6 +150,14 @@ pub struct ModelProvider {
     /// Which OpenAI request shape: `completions` or `responses`.
     #[serde(default)]
     pub shape: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Modalities {
+    #[serde(default)]
+    pub input: Vec<String>,
+    #[serde(default)]
+    pub output: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -308,6 +319,18 @@ impl Model {
             .is_some_and(|shape| !shape.eq_ignore_ascii_case("completions"))
     }
 
+    /// Whether an image may be sent to this model.
+    ///
+    /// Read from `modalities.input` rather than the `attachment` flag. The two disagree on 359
+    /// models in the catalog, and `modalities` is the one that says what the model takes: some
+    /// models flagged `attachment: false` accept images, and some flagged `true` are text-only.
+    /// Offering an attachment the model will reject is worse than not offering it.
+    pub fn accepts_images(&self) -> bool {
+        self.modalities
+            .as_ref()
+            .is_some_and(|modalities| modalities.input.iter().any(|kind| kind == "image"))
+    }
+
     pub fn is_deprecated(&self) -> bool {
         self.status
             .as_deref()
@@ -441,6 +464,38 @@ mod tests {
             .map(|api| format!(r#","api":"{api}""#))
             .unwrap_or_default();
         serde_json::from_str(&format!(r#"{{"npm":"{npm}"{api}}}"#)).expect("fixture")
+    }
+
+    #[test]
+    fn image_support_is_read_from_what_the_model_takes_in() {
+        let vision: Model =
+            serde_json::from_str(r#"{"modalities":{"input":["text","image"],"output":["text"]}}"#)
+                .unwrap();
+        let text_only: Model =
+            serde_json::from_str(r#"{"modalities":{"input":["text"],"output":["text"]}}"#).unwrap();
+
+        assert!(vision.accepts_images());
+        assert!(!text_only.accepts_images());
+    }
+
+    #[test]
+    fn the_attachment_flag_is_not_what_decides_it() {
+        // The two fields disagree on 359 models in the catalog. `modalities` says what the model
+        // takes; `attachment` does not, and offering an attachment the model will reject is worse
+        // than not offering it.
+        let flagged_but_text_only: Model =
+            serde_json::from_str(r#"{"attachment":true,"modalities":{"input":["text"]}}"#).unwrap();
+        let unflagged_but_sees: Model =
+            serde_json::from_str(r#"{"attachment":false,"modalities":{"input":["image"]}}"#)
+                .unwrap();
+
+        assert!(!flagged_but_text_only.accepts_images());
+        assert!(unflagged_but_sees.accepts_images());
+    }
+
+    #[test]
+    fn a_model_declaring_no_modalities_is_not_offered_attachments() {
+        assert!(!Model::default().accepts_images());
     }
 
     #[test]
