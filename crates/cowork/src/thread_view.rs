@@ -39,6 +39,8 @@ struct MessageView {
     text: String,
     /// What the model worked through before answering, when it reports any.
     reasoning: String,
+    /// The same, parsed. Rebuilt as it streams, the way the answer is.
+    reasoning_rendered: Option<Entity<Markdown>>,
     tool_calls: Vec<ToolCall>,
     tool_results: Vec<ToolResult>,
     /// Assistant prose is rendered as markdown. The entity is built when the message is created or
@@ -107,6 +109,7 @@ impl CoworkThreadView {
                 role: message.role,
                 text: message.text.clone(),
                 reasoning: String::new(),
+                reasoning_rendered: None,
                 tool_calls: message.tool_calls.clone(),
                 tool_results: message.tool_results.clone(),
                 rendered: (message.role == Role::Assistant)
@@ -407,9 +410,23 @@ impl CoworkThreadView {
 
     /// Adds to what the model is working through, which is not part of its answer.
     fn extend_reasoning(&mut self, chunk: &str, cx: &mut Context<Self>) {
-        if let Some(message) = self.messages.last_mut() {
-            message.reasoning.push_str(chunk);
+        let registry = self.language_registry.clone();
+        let Some(message) = self.messages.last_mut() else {
+            return;
+        };
+        message.reasoning.push_str(chunk);
+
+        match message.reasoning_rendered.clone() {
+            Some(markdown) => markdown.update(cx, |markdown, cx| markdown.append(chunk, cx)),
+            None => {
+                let source = message.reasoning.clone();
+                let markdown = render_markdown(&source, registry, cx);
+                if let Some(message) = self.messages.last_mut() {
+                    message.reasoning_rendered = Some(markdown);
+                }
+            }
         }
+
         self.scroll_handle.scroll_to_bottom();
         cx.notify();
     }
@@ -574,6 +591,7 @@ impl CoworkThreadView {
             role,
             text,
             reasoning: String::new(),
+            reasoning_rendered: None,
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             rendered,
@@ -601,11 +619,18 @@ impl CoworkThreadView {
         cx.notify();
     }
 
-    /// The number of model round-trips one user message may cause.
+    /// How many times the same call may repeat before the turn is stopped.
     ///
-    /// A loop that cannot end is the default failure mode of a tool-calling agent: a model that
-    /// keeps re-reading the same file will otherwise spend the user's money until they notice.
-    const MAX_STEPS: usize = 12;
+    /// There is deliberately no limit on *steps*. A turn runs until the model says it is done or
+    /// the user stops it, because any number chosen here is a guess that will one day cut real
+    /// work in half — reading four files, writing three, running a build and reacting to it is an
+    /// ordinary task that spends a dozen steps before it has started. And the loop is visible: a
+    /// reader watching the transcript sees repetition at once, and Stop is right there.
+    ///
+    /// What is worth catching is not length but the absence of progress. A model asking for the
+    /// identical thing over and over is not working, and unlike a long turn it will never end on
+    /// its own. Two identical calls can be a retry; three is a circle.
+    const MAX_IDENTICAL_CALLS: usize = 3;
 
     fn start_completion(&mut self, cx: &mut Context<Self>) {
         let http_client = cx.http_client();
@@ -621,7 +646,8 @@ impl CoworkThreadView {
             .map(std::path::PathBuf::from);
 
         self.completion = Some(cx.spawn(async move |this, cx| {
-            for step in 0..Self::MAX_STEPS {
+            let mut recent: Vec<String> = Vec::new();
+            loop {
                 let request = match this.update(cx, |this, cx| this.build_request(cx)) {
                     Ok(Ok(request)) => request,
                     Ok(Err(error)) => {
@@ -672,6 +698,22 @@ impl CoworkThreadView {
                     permissions: permissions.clone(),
                     working_folder: working_folder.clone(),
                 };
+                if let Some(repeated) = Self::repeating(&mut recent, &calls) {
+                    this.update(cx, |this, cx| {
+                        this.fail(
+                            anyhow!(
+                                "Stopped: the model asked to {repeated} {} times in a row without \
+                                 using the answer. Whatever it finished is kept — ask again, or \
+                                 tell it what to do differently.",
+                                Self::MAX_IDENTICAL_CALLS
+                            ),
+                            cx,
+                        )
+                    })
+                    .log_err();
+                    return;
+                }
+
                 let results = Self::run_tools(&tools, &calls, context, cx).await;
 
                 if this
@@ -681,22 +723,40 @@ impl CoworkThreadView {
                     return;
                 }
 
-                if step + 1 == Self::MAX_STEPS {
-                    this.update(cx, |this, cx| {
-                        this.fail(
-                            anyhow!(
-                                "stopped after {} tool calls in one turn. Ask again, more \
-                                 narrowly, to continue.",
-                                Self::MAX_STEPS
-                            ),
-                            cx,
-                        )
-                    })
-                    .log_err();
-                    return;
-                }
             }
         }));
+    }
+
+    /// Whether the model is asking for the same thing again instead of making progress.
+    ///
+    /// Compares the whole call — name and arguments — because the same tool on a different file is
+    /// progress, and the same tool on the same file is not. Anything different resets the count: a
+    /// model that reads a file, writes it, then reads it again is working.
+    fn repeating(recent: &mut Vec<String>, calls: &[ToolCall]) -> Option<String> {
+        let signature = calls
+            .iter()
+            .map(|call| format!("{}({})", call.name, call.arguments))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if recent.last() != Some(&signature) {
+            recent.clear();
+        }
+        recent.push(signature);
+
+        (recent.len() >= Self::MAX_IDENTICAL_CALLS).then(|| {
+            calls
+                .first()
+                .map(|call| {
+                    let subject = summarize_arguments(&call.arguments);
+                    if subject.is_empty() {
+                        format!("run `{}`", call.name)
+                    } else {
+                        format!("run `{}` on {subject}", call.name)
+                    }
+                })
+                .unwrap_or_else(|| "do the same thing".to_owned())
+        })
     }
 
     /// Streams one assistant message, returning the tool calls it asked for and whether it stopped
@@ -891,6 +951,7 @@ impl CoworkThreadView {
             role: Role::Tool,
             text: String::new(),
             reasoning: String::new(),
+            reasoning_rendered: None,
             rendered: None,
             tool_calls: Vec::new(),
             tool_results: results,
@@ -1621,22 +1682,25 @@ fn render_diff_counts(diff: &str, cx: &App) -> impl IntoElement + use<> {
 
 /// What the model worked through before answering.
 ///
-/// Set apart from the answer rather than mixed into it: this is the model's working, not its
-/// conclusion, and a reader skimming for what was decided should be able to skip it. Muted and
-/// bordered on one side, the way a quotation is.
-fn render_reasoning(reasoning: &str, cx: &App) -> impl IntoElement + use<> {
+/// Rendered as markdown, like the answer, because it *is* prose: models fence code inside it and
+/// write lists in it, and showing it raw left the backticks on screen. Set apart rather than mixed
+/// in — this is the working, not the conclusion — but at reading size, because it is meant to be
+/// read.
+fn render_reasoning(
+    markdown: Entity<Markdown>,
+    style: MarkdownStyle,
+    cx: &App,
+) -> impl IntoElement + use<> {
     let colors = cx.theme().colors();
 
     div()
         .w_full()
         .min_w_0()
         .my_1()
-        .pl_2()
+        .pl_3()
         .border_l_2()
         .border_color(colors.border_variant)
-        .text_ui_sm(cx)
-        .text_color(colors.text_muted)
-        .child(reasoning.to_owned())
+        .child(MarkdownElement::new(markdown, style))
 }
 
 /// A path's extension, which is the key the language cache uses.
@@ -1876,8 +1940,8 @@ impl Render for CoworkThreadView {
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .when(!message.reasoning.is_empty(), |this| {
-                        this.child(render_reasoning(&message.reasoning, cx))
+                    .when_some(message.reasoning_rendered.clone(), |this, markdown| {
+                        this.child(render_reasoning(markdown, markdown_style.clone(), cx))
                     })
                     .when_some(message.rendered.clone(), |this, markdown| {
                         this.child(MarkdownElement::new(markdown, markdown_style.clone()))
@@ -1936,6 +2000,74 @@ mod tests {
         "+    println!(\"extra\");\n",
         " }\n",
     );
+
+    fn call(name: &str, arguments: &str) -> ToolCall {
+        ToolCall {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+        }
+    }
+
+    #[test]
+    fn three_identical_calls_in_a_row_is_a_circle() {
+        let mut recent = Vec::new();
+        let same = [call("read", r#"{"path":"a.rs"}"#)];
+
+        assert_eq!(CoworkThreadView::repeating(&mut recent, &same), None);
+        assert_eq!(CoworkThreadView::repeating(&mut recent, &same), None,
+            "twice can be a retry");
+        assert!(
+            CoworkThreadView::repeating(&mut recent, &same).is_some(),
+            "three times is not work"
+        );
+    }
+
+    #[test]
+    fn the_same_tool_on_a_different_file_is_progress() {
+        let mut recent = Vec::new();
+
+        for path in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"] {
+            let calls = [call("read", &format!(r#"{{"path":"{path}"}}"#))];
+            assert_eq!(
+                CoworkThreadView::repeating(&mut recent, &calls),
+                None,
+                "reading {path} is not a repeat of the file before it"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_different_resets_the_count() {
+        // A model that reads a file, writes it, then reads it again is working, and must not be
+        // stopped because two of those three happened to match.
+        let mut recent = Vec::new();
+        let read = [call("read", r#"{"path":"a.rs"}"#)];
+        let write = [call("write", r#"{"path":"a.rs"}"#)];
+
+        CoworkThreadView::repeating(&mut recent, &read);
+        CoworkThreadView::repeating(&mut recent, &read);
+        assert_eq!(CoworkThreadView::repeating(&mut recent, &write), None);
+        assert_eq!(
+            CoworkThreadView::repeating(&mut recent, &read),
+            None,
+            "the streak restarted"
+        );
+    }
+
+    #[test]
+    fn the_message_names_what_is_being_repeated() {
+        // "Stopped" with no subject leaves the user to guess which of ten calls was the problem.
+        let mut recent = Vec::new();
+        let same = [call("shell", r#"{"command":"npm test"}"#)];
+
+        CoworkThreadView::repeating(&mut recent, &same);
+        CoworkThreadView::repeating(&mut recent, &same);
+        let reported = CoworkThreadView::repeating(&mut recent, &same).expect("should stop");
+
+        assert!(reported.contains("shell"), "got: {reported}");
+        assert!(reported.contains("npm test"), "got: {reported}");
+    }
 
     #[test]
     fn the_models_own_account_of_a_step_wins() {
