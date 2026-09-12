@@ -17,6 +17,7 @@ mod consequence;
 mod cowork_settings;
 mod document;
 mod image;
+mod image_preview;
 mod inline_calls;
 mod fetch;
 mod github_tools;

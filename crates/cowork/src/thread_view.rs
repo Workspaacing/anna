@@ -29,6 +29,7 @@ use project::{
 use settings::Settings as _;
 use std::{path::Path, rc::Rc, sync::Arc};
 use crate::waiting::{OpenPrompt, WaitingOnYou};
+use crate::image_preview::ImagePreview;
 use gpui::StyledText;
 use settings::AgentPermission;
 use ui::{
@@ -447,6 +448,75 @@ impl CoworkThreadView {
             cx.emit(CoworkThreadEvent::TitleChanged);
         }
         cx.notify();
+    }
+
+    /// Opens the picture at `index` among the ones waiting to be sent.
+    fn preview_pending_picture(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let pictures = self
+            .pending_attachments
+            .iter()
+            .enumerate()
+            .filter_map(|(position, pending)| {
+                pending.preview.clone().map(|preview| {
+                    (position, SharedString::from(pending.attachment.name.clone()), preview)
+                })
+            })
+            .collect();
+        self.open_preview(pictures, index, window, cx);
+    }
+
+    /// Opens a picture from a sent message, with the message's other pictures a step away.
+    fn preview_sent_picture(
+        &mut self,
+        message_index: usize,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self.messages.get(message_index) else {
+            return;
+        };
+        let pictures = message
+            .attachments
+            .iter()
+            .zip(message.thumbnails.iter())
+            .enumerate()
+            .filter_map(|(at, (attachment, thumbnail))| {
+                thumbnail
+                    .clone()
+                    .map(|preview| (at, SharedString::from(attachment.name.clone()), preview))
+            })
+            .collect();
+        self.open_preview(pictures, position, window, cx);
+    }
+
+    /// Shows `pictures` in the preview, starting at the one whose attachment position is `clicked`.
+    ///
+    /// Positions are among all attachments, pictures or not, because that is what the click knows;
+    /// the preview steps through pictures only, so a PDF between two screenshots is not a blank page.
+    fn open_preview(
+        &self,
+        pictures: Vec<(usize, SharedString, AttachmentPreview)>,
+        clicked: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(start) = pictures.iter().position(|(position, _, _)| *position == clicked) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let pictures = pictures
+            .into_iter()
+            .map(|(_, name, preview)| (name, preview))
+            .collect::<Vec<_>>();
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, move |_window, cx| {
+                ImagePreview::new(pictures, start, cx)
+            });
+        });
     }
 
     /// Starts a new thread from everything before one of the user's messages, with that message
@@ -2091,6 +2161,9 @@ impl CoworkThreadView {
                         .icon_size(IconSize::XSmall)
                         .tooltip(Tooltip::text("Remove"))
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            // The button sits on the picture's tile, which opens the preview when
+                            // clicked; removing a picture must not also open it.
+                            cx.stop_propagation();
                             this.pending_attachments.remove(index);
                             cx.notify();
                         }));
@@ -2101,6 +2174,10 @@ impl CoworkThreadView {
                                 SharedString::from(format!("cowork-pending-picture-{index}"));
                             div()
                                 .id(("cowork-pending-picture", index))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.preview_pending_picture(index, window, cx)
+                                }))
                                 .group(group.clone())
                                 .relative()
                                 .flex_none()
@@ -3081,7 +3158,12 @@ fn picture_row_width(row: &[AttachmentPreview]) -> f32 {
 /// Pictures are shown rather than named, in their own shape. Every picture in a row gets a share of
 /// the width in proportion to its aspect ratio, which gives them all the same height: one picture
 /// fills the row, several shrink together to fit it. Anything that is not a picture is a chip.
-fn render_sent_attachments(index: usize, message: &MessageView, cx: &App) -> impl IntoElement {
+fn render_sent_attachments(
+    index: usize,
+    message: &MessageView,
+    view: WeakEntity<CoworkThreadView>,
+    cx: &App,
+) -> impl IntoElement {
     let colors = cx.theme().colors();
 
     let mut pictures = Vec::new();
@@ -3117,6 +3199,17 @@ fn render_sent_attachments(index: usize, message: &MessageView, cx: &App) -> imp
                         .id(SharedString::from(format!(
                             "cowork-sent-picture-{index}-{position}"
                         )))
+                        .cursor_pointer()
+                        .on_click({
+                            let view = view.clone();
+                            let position = *position;
+                            move |_, window, cx| {
+                                view.update(cx, |view, cx| {
+                                    view.preview_sent_picture(index, position, window, cx)
+                                })
+                                .log_err();
+                            }
+                        })
                         .flex_grow(preview.aspect_ratio)
                         .flex_basis(px(0.))
                         .min_w_0()
@@ -3215,7 +3308,7 @@ impl Render for CoworkThreadView {
                                     // Above the words, as they were sent: the picture is usually what
                                     // the words are about.
                                     .when(!message.attachments.is_empty(), |this| {
-                                        this.child(render_sent_attachments(index, message, cx))
+                                        this.child(render_sent_attachments(index, message, cx.weak_entity(), cx))
                                     })
                                     // A message that was only a picture has no text to show.
                                     .when(!message.text.is_empty(), |this| {
