@@ -361,6 +361,14 @@ impl Model {
             .is_some_and(|modalities| modalities.input.iter().any(|kind| kind == "image"))
     }
 
+    /// Whether a PDF may be sent to this model, read from `modalities.input` for the same reason
+    /// as `accepts_images`: a model that is sent a PDF it cannot read rejects the whole request.
+    pub fn accepts_pdf(&self) -> bool {
+        self.modalities
+            .as_ref()
+            .is_some_and(|modalities| modalities.input.iter().any(|kind| kind == "pdf"))
+    }
+
     pub fn is_deprecated(&self) -> bool {
         self.status
             .as_deref()
@@ -584,6 +592,18 @@ mod tests {
     #[test]
     fn a_model_declaring_no_modalities_is_not_offered_attachments() {
         assert!(!Model::default().accepts_images());
+        assert!(!Model::default().accepts_pdf());
+    }
+
+    #[test]
+    fn pdf_support_is_read_from_what_the_model_takes_in() {
+        let reads_pdfs: Model =
+            serde_json::from_str(r#"{"modalities":{"input":["text","image","pdf"]}}"#).unwrap();
+        let sees_but_does_not_read: Model =
+            serde_json::from_str(r#"{"modalities":{"input":["text","image"]}}"#).unwrap();
+
+        assert!(reads_pdfs.accepts_pdf());
+        assert!(!sees_but_does_not_read.accepts_pdf());
     }
 
     #[test]

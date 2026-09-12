@@ -15,6 +15,7 @@ pub mod checkpoint;
 mod cowork_panel;
 mod consequence;
 mod cowork_settings;
+mod document;
 mod image;
 mod inline_calls;
 mod fetch;

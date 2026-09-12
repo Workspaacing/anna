@@ -51,9 +51,12 @@ struct MessageView {
     reasoning_rendered: Option<Entity<Markdown>>,
     tool_calls: Vec<ToolCall>,
     tool_results: Vec<ToolResult>,
-    /// Pictures sent with this message, shown as chips rather than thumbnails: the transcript is a
-    /// record of what was asked, and a wall of images pushes the conversation off the screen.
+    /// What was sent along with this message.
     attachments: Vec<Attachment>,
+    /// `attachments` decoded for drawing, one entry each, `None` for anything that is not a picture
+    /// gpui can draw. Filled in by `render` the first time the message is shown, so a thread with
+    /// many pictures decodes each one once rather than on every frame.
+    thumbnails: Vec<Option<AttachmentPreview>>,
     /// Assistant prose is rendered as markdown. The entity is built when the message is created or
     /// extended, never during `render`, because updating an entity while rendering panics.
     rendered: Option<Entity<Markdown>>,
@@ -86,11 +89,67 @@ pub struct CoworkThreadView {
     _warm_toolchain: Option<project::lsp_store::OpenLspBufferHandle>,
     _warm_up: Task<()>,
     permissions: Entity<PermissionBroker>,
-    /// Pictures chosen but not yet sent.
-    pending_images: Vec<Attachment>,
+    /// Pictures and files chosen but not yet sent.
+    pending_attachments: PendingAttachments,
     error: Option<SharedString>,
     completion: Option<Task<()>>,
     _permissions: gpui::Subscription,
+}
+
+/// The side of a picture's tile above the composer: large enough to recognise the picture, small
+/// enough that several share a row without pushing the composer down.
+const PENDING_PICTURE_SIZE: f32 = 96.;
+
+/// A file chosen for the next message.
+struct PendingAttachment {
+    attachment: Attachment,
+    /// `None` for anything that is not a picture gpui can draw, which is shown as a chip instead.
+    preview: Option<AttachmentPreview>,
+}
+
+/// What has been chosen to go with the next message.
+///
+/// Each picture is decoded once, when it is added, rather than on every frame. Its preview is kept
+/// in the same entry as the attachment so that removing one can never leave a picture drawn under
+/// another file's name.
+#[derive(Default)]
+struct PendingAttachments(Vec<PendingAttachment>);
+
+impl PendingAttachments {
+    fn new(attachments: Vec<Attachment>) -> Self {
+        let mut pending = Self::default();
+        pending.extend(attachments);
+        pending
+    }
+
+    fn extend(&mut self, attachments: impl IntoIterator<Item = Attachment>) {
+        self.0
+            .extend(attachments.into_iter().map(|attachment| PendingAttachment {
+                preview: preview(&attachment),
+                attachment,
+            }));
+    }
+
+    fn remove(&mut self, index: usize) {
+        if index < self.0.len() {
+            self.0.remove(index);
+        }
+    }
+
+    fn take(&mut self) -> Vec<Attachment> {
+        std::mem::take(&mut self.0)
+            .into_iter()
+            .map(|pending| pending.attachment)
+            .collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &PendingAttachment> {
+        self.0.iter()
+    }
 }
 
 impl CoworkThreadView {
@@ -126,6 +185,7 @@ impl CoworkThreadView {
                 tool_calls: message.tool_calls.clone(),
                 tool_results: message.tool_results.clone(),
                 attachments: message.attachments.clone(),
+                thumbnails: Vec::new(),
                 rendered: (message.role == Role::Assistant)
                     .then(|| render_markdown(&message.text, language_registry.clone(), cx)),
             })
@@ -154,7 +214,7 @@ impl CoworkThreadView {
             _warm_toolchain: None,
             _warm_up: Task::ready(()),
             permissions,
-            pending_images: Vec::new(),
+            pending_attachments: PendingAttachments::default(),
             error: None,
             completion: None,
             _permissions: permissions_subscription,
@@ -181,20 +241,20 @@ impl CoworkThreadView {
         let prompt = self.input.read(cx).text(cx).trim().to_owned();
         // A picture on its own is a question — "what is wrong with this?" — so an empty box with
         // something attached still sends.
-        if prompt.is_empty() && self.pending_images.is_empty() {
+        if prompt.is_empty() && self.pending_attachments.is_empty() {
             return;
         }
 
         self.input.update(cx, |editor, cx| editor.clear(window, cx));
         self.error = None;
-        let images = std::mem::take(&mut self.pending_images);
+        let attachments = self.pending_attachments.take();
         self.push_message(Role::User, prompt, cx);
-        if !images.is_empty() {
+        if !attachments.is_empty() {
             if let Some(stored) = self.thread.messages.last_mut() {
-                stored.attachments = images.clone();
+                stored.attachments = attachments.clone();
             }
             if let Some(shown) = self.messages.last_mut() {
-                shown.attachments = images;
+                shown.attachments = attachments;
             }
         }
         self.start_completion(cx);
@@ -233,7 +293,7 @@ impl CoworkThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.pending_images = attachments;
+        self.pending_attachments = PendingAttachments::new(attachments);
         self.input
             .update(cx, |editor, cx| editor.set_text(text, window, cx));
         window.focus(&self.input.focus_handle(cx), cx);
@@ -886,6 +946,7 @@ impl CoworkThreadView {
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             attachments: Vec::new(),
+            thumbnails: Vec::new(),
             rendered,
         });
         self.follow_the_end();
@@ -1303,6 +1364,7 @@ impl CoworkThreadView {
             tool_calls: Vec::new(),
             tool_results: results,
             attachments: Vec::new(),
+            thumbnails: Vec::new(),
         });
         self.follow_the_end();
         cx.notify();
@@ -1729,12 +1791,42 @@ impl CoworkThreadView {
             .is_some_and(|(_, model)| model.accepts_images())
     }
 
-    /// Asks for files and attaches the ones that are images.
+    /// Whether the chosen model reads PDFs, read from the same `modalities.input` as
+    /// `model_accepts_images` and for the same reason.
+    fn model_accepts_pdf(&self, cx: &App) -> bool {
+        self.store
+            .read(cx)
+            .catalog()
+            .model(&self.thread.metadata.model)
+            .is_some_and(|(_, model)| model.accepts_pdf())
+    }
+
+    fn choose_images(&mut self, cx: &mut Context<Self>) {
+        self.choose_attachments(crate::image::attach, cx);
+    }
+
+    /// Text files for any model, and PDFs for a model that reads them.
+    ///
+    /// Whether PDFs are allowed is settled when the picker opens, so the answer is the one the
+    /// button's tooltip gave.
+    fn choose_files(&mut self, cx: &mut Context<Self>) {
+        let accepts_pdf = self.model_accepts_pdf(cx);
+        self.choose_attachments(
+            move |path, bytes| crate::document::attach(path, bytes, accepts_pdf),
+            cx,
+        );
+    }
+
+    /// Asks for files and attaches the ones `prepare` accepts.
     ///
     /// Whatever the user picked is read and checked here rather than at send time, so a file that
     /// cannot be sent is refused while they are still looking at the picker — not after the
     /// message has gone.
-    fn choose_images(&mut self, cx: &mut Context<Self>) {
+    fn choose_attachments(
+        &mut self,
+        prepare: impl Fn(&std::path::Path, Vec<u8>) -> Result<Attachment> + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -1752,7 +1844,7 @@ impl CoworkThreadView {
             let mut refused: Option<String> = None;
             for path in paths {
                 match fs.load_bytes(&path).await {
-                    Ok(bytes) => match crate::image::attach(&path, bytes) {
+                    Ok(bytes) => match prepare(&path, bytes) {
                         Ok(attachment) => attached.push(attachment),
                         Err(error) => {
                             // Only the first refusal is reported: picking ten files and being told
@@ -1768,7 +1860,7 @@ impl CoworkThreadView {
             }
 
             this.update(cx, |this, cx| {
-                this.pending_images.extend(attached);
+                this.pending_attachments.extend(attached);
                 if let Some(refused) = refused {
                     this.error = Some(refused.into());
                 }
@@ -1779,9 +1871,13 @@ impl CoworkThreadView {
         .detach();
     }
 
-    /// The pictures waiting to be sent, each with a way to take it back off.
-    fn render_pending_images(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
-        if self.pending_images.is_empty() {
+    /// What is waiting to be sent, each with a way to take it back off.
+    ///
+    /// A picture is a tile showing the picture, the way Claude Code draws it: seeing it is how the
+    /// user knows they picked the right one. Its remove button appears only on hover, so it is not
+    /// covering a corner of the picture the rest of the time. Anything else is a chip with its name.
+    fn render_pending_attachments(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.pending_attachments.is_empty() {
             return None;
         }
         let colors = cx.theme().colors();
@@ -1793,28 +1889,60 @@ impl CoworkThreadView {
                 .pt_2()
                 .gap_1p5()
                 .flex_wrap()
-                .children(self.pending_images.iter().enumerate().map(|(index, image)| {
-                    h_flex()
-                        .px_1p5()
-                        .py_0p5()
-                        .gap_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.element_background)
-                        .child(Icon::new(IconName::Image).size(IconSize::XSmall))
-                        .child(Label::new(image.name.clone()).size(LabelSize::Small))
-                        .child(
-                            IconButton::new(("cowork-unattach", index), IconName::Close)
-                                .icon_size(IconSize::XSmall)
-                                .tooltip(Tooltip::text("Remove"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if index < this.pending_images.len() {
-                                        this.pending_images.remove(index);
-                                    }
-                                    cx.notify();
-                                })),
-                        )
+                .items_end()
+                .children(self.pending_attachments.iter().enumerate().map(|(index, pending)| {
+                    let name = SharedString::from(pending.attachment.name.clone());
+                    let remove = IconButton::new(("cowork-unattach", index), IconName::Close)
+                        .icon_size(IconSize::XSmall)
+                        .tooltip(Tooltip::text("Remove"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pending_attachments.remove(index);
+                            cx.notify();
+                        }));
+
+                    match &pending.preview {
+                        Some(preview) => {
+                            let group =
+                                SharedString::from(format!("cowork-pending-picture-{index}"));
+                            div()
+                                .id(("cowork-pending-picture", index))
+                                .group(group.clone())
+                                .relative()
+                                .flex_none()
+                                .w(px(PENDING_PICTURE_SIZE))
+                                .h(px(PENDING_PICTURE_SIZE))
+                                .rounded_md()
+                                .overflow_hidden()
+                                .bg(colors.editor_background)
+                                .tooltip(Tooltip::text(name))
+                                .child(
+                                    gpui::img(preview.image.clone())
+                                        .size_full()
+                                        .object_fit(gpui::ObjectFit::Contain),
+                                )
+                                .child(
+                                    div().absolute().top_1().right_1().child(
+                                        // Filled, so the cross stays visible over a light picture.
+                                        remove
+                                            .style(ButtonStyle::Filled)
+                                            .visible_on_hover(group),
+                                    ),
+                                )
+                                .into_any_element()
+                        }
+                        None => h_flex()
+                            .px_1p5()
+                            .py_0p5()
+                            .gap_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.element_background)
+                            .child(Icon::new(IconName::File).size(IconSize::XSmall))
+                            .child(Label::new(name).size(LabelSize::Small))
+                            .child(remove)
+                            .into_any_element(),
+                    }
                 })),
         )
     }
@@ -1879,12 +2007,13 @@ impl CoworkThreadView {
 
     fn render_composer(&self, is_streaming: bool, cx: &Context<Self>) -> impl IntoElement {
         let accepts_images = self.model_accepts_images(cx);
+        let accepts_pdf = self.model_accepts_pdf(cx);
 
         v_flex()
             .w_full()
             .child(Divider::horizontal())
             .children(self.render_check_strip(cx))
-            .children(self.render_pending_images(cx))
+            .children(self.render_pending_attachments(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -1902,6 +2031,17 @@ impl CoworkThreadView {
                                 "This model does not accept images"
                             }))
                             .on_click(cx.listener(|this, _, _, cx| this.choose_images(cx))),
+                    )
+                    // Never disabled, unlike the image button: every model reads text.
+                    .child(
+                        IconButton::new("cowork-attach-file", IconName::Attach)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text(if accepts_pdf {
+                                "Attach text files or PDFs"
+                            } else {
+                                "Attach text files"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_files(cx))),
                     )
                     .child(div().flex_1().child(self.input.clone()))
                     .child(
@@ -2597,10 +2737,168 @@ fn describe_restore(outcome: &checkpoint::RestoreOutcome) -> String {
     format!("{} ({details}).", summary.trim_end_matches('.'))
 }
 
+impl CoworkThreadView {
+    /// Decodes the pictures of any message whose attachments have not been decoded yet.
+    ///
+    /// Compared by count rather than tracked with a flag, because the attachments of the message
+    /// just sent are filled in after its view was pushed.
+    fn decode_thumbnails(&mut self) {
+        for message in &mut self.messages {
+            if message.thumbnails.len() != message.attachments.len() {
+                message.thumbnails = message.attachments.iter().map(preview).collect();
+            }
+        }
+    }
+}
+
+/// The tallest a row of sent pictures is drawn. A picture on its own grows to this; several share
+/// a row and shrink together so the row still fits.
+const PICTURE_ROW_HEIGHT: f32 = 360.;
+
+/// How many pictures share a row before another starts. Past this each one is too small to make out.
+const PICTURES_PER_ROW: usize = 4;
+
+/// The space between pictures in a row, which the row's width has to account for.
+const PICTURE_GAP: f32 = 6.;
+
+/// A picture ready to draw, with the shape it was taken in.
+#[derive(Clone)]
+pub(crate) struct AttachmentPreview {
+    pub(crate) image: Arc<gpui::Image>,
+    /// Width over height, read from the file's own header. Laying pictures out by their real shape
+    /// is what lets a row of them share one height without cropping any of them.
+    pub(crate) aspect_ratio: f32,
+    /// The picture's own width in pixels, so a small one is never blown up past it.
+    pub(crate) natural_width: f32,
+}
+
+impl AttachmentPreview {
+    /// The widest this picture is drawn in a row: its own width, or the width at which it would
+    /// reach the row's height, whichever comes first.
+    fn widest(&self) -> f32 {
+        self.natural_width.min(PICTURE_ROW_HEIGHT * self.aspect_ratio)
+    }
+}
+
+/// An attachment as something gpui can draw, when it is a picture in a format gpui knows.
+pub(crate) fn preview(attachment: &Attachment) -> Option<AttachmentPreview> {
+    use base64::Engine as _;
+
+    let format = gpui::ImageFormat::from_mime_type(&attachment.media_type)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&attachment.data)
+        .ok()?;
+
+    // Only the header is read, not the pixels. A format the `image` crate is not built with, such
+    // as SVG, still draws; it is laid out square, which is a guess about its shape, not a failure.
+    let (natural_width, aspect_ratio) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .map_or((PICTURE_ROW_HEIGHT, 1.), |(width, height)| {
+            (width as f32, width as f32 / height as f32)
+        });
+
+    Some(AttachmentPreview {
+        image: Arc::new(gpui::Image::from_bytes(format, bytes)),
+        aspect_ratio,
+        natural_width,
+    })
+}
+
+/// How wide a row of pictures wants to be when nothing constrains it.
+///
+/// Given to the row as its width, so the bubble around it grows to fit the pictures rather than to
+/// fit whatever text came with them; the bubble's own cap still applies, and the row shrinks to it.
+fn picture_row_width(row: &[AttachmentPreview]) -> f32 {
+    let gaps = PICTURE_GAP * row.len().saturating_sub(1) as f32;
+    row.iter().map(AttachmentPreview::widest).sum::<f32>() + gaps
+}
+
+/// What the user sent with a message, inside its bubble, the way Claude Code shows it.
+///
+/// Pictures are shown rather than named, in their own shape. Every picture in a row gets a share of
+/// the width in proportion to its aspect ratio, which gives them all the same height: one picture
+/// fills the row, several shrink together to fit it. Anything that is not a picture is a chip.
+fn render_sent_attachments(index: usize, message: &MessageView, cx: &App) -> impl IntoElement {
+    let colors = cx.theme().colors();
+
+    let mut pictures = Vec::new();
+    let mut others = Vec::new();
+    for (position, attachment) in message.attachments.iter().enumerate() {
+        match message.thumbnails.get(position).cloned().flatten() {
+            Some(preview) => pictures.push((position, attachment.name.clone(), preview)),
+            None => others.push((position, attachment.name.clone())),
+        }
+    }
+    let rows = pictures.chunks(PICTURES_PER_ROW).collect::<Vec<_>>();
+    let width = rows
+        .iter()
+        .map(|row| {
+            let previews = row
+                .iter()
+                .map(|(_, _, preview)| preview.clone())
+                .collect::<Vec<_>>();
+            picture_row_width(&previews)
+        })
+        .fold(0., f32::max);
+
+    v_flex()
+        .gap(px(PICTURE_GAP))
+        .when(!rows.is_empty(), |this| this.w(px(width)).max_w_full())
+        .children(rows.into_iter().map(|row| {
+            h_flex()
+                .w_full()
+                .items_start()
+                .gap(px(PICTURE_GAP))
+                .children(row.iter().map(|(position, name, preview)| {
+                    div()
+                        .id(SharedString::from(format!(
+                            "cowork-sent-picture-{index}-{position}"
+                        )))
+                        .flex_grow(preview.aspect_ratio)
+                        .flex_basis(px(0.))
+                        .min_w_0()
+                        .max_w(px(preview.widest()))
+                        .aspect_ratio(preview.aspect_ratio)
+                        .rounded_md()
+                        .overflow_hidden()
+                        .bg(colors.editor_background)
+                        .tooltip(Tooltip::text(name.clone()))
+                        .child(
+                            gpui::img(preview.image.clone())
+                                .size_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        )
+                }))
+        }))
+        .when(!others.is_empty(), |this| {
+            this.child(h_flex().gap_1p5().flex_wrap().children(others.into_iter().map(
+                |(position, name)| {
+                    h_flex()
+                        .id(SharedString::from(format!(
+                            "cowork-sent-attachment-{index}-{position}"
+                        )))
+                        .px_1p5()
+                        .py_0p5()
+                        .gap_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.editor_background)
+                        .child(Icon::new(IconName::File).size(IconSize::XSmall))
+                        .child(Label::new(name).size(LabelSize::Small))
+                },
+            )))
+        })
+}
+
 impl Render for CoworkThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Before anything borrows the theme, because asking for a language needs `cx` mutably.
         self.request_diff_languages(cx);
+        self.decode_thumbnails();
 
         let colors = cx.theme().colors();
         let is_streaming = self.is_streaming();
@@ -2654,7 +2952,15 @@ impl Render for CoworkThreadView {
                                             .size(LabelSize::XSmall)
                                             .color(Color::Muted),
                                     )
-                                    .child(div().child(message.text.clone())),
+                                    // Above the words, as they were sent: the picture is usually what
+                                    // the words are about.
+                                    .when(!message.attachments.is_empty(), |this| {
+                                        this.child(render_sent_attachments(index, message, cx))
+                                    })
+                                    // A message that was only a picture has no text to show.
+                                    .when(!message.text.is_empty(), |this| {
+                                        this.child(div().child(message.text.clone()))
+                                    }),
                             ),
                         )
                         .child(h_flex().w_full().justify_end().child(
@@ -2731,6 +3037,71 @@ impl Render for CoworkThreadView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn attachment(media_type: &str, data: &str) -> Attachment {
+        Attachment {
+            media_type: media_type.to_owned(),
+            data: data.to_owned(),
+            name: "sent".to_owned(),
+        }
+    }
+
+    fn png(width: u32, height: u32) -> String {
+        use base64::Engine as _;
+
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+            .write_to(&mut buffer, image::ImageFormat::Png)
+            .expect("a PNG encodes");
+        base64::engine::general_purpose::STANDARD.encode(buffer.into_inner())
+    }
+
+    #[test]
+    fn a_sent_picture_keeps_the_shape_it_was_taken_in() {
+        let wide = preview(&attachment("image/png", &png(400, 200))).expect("a PNG is drawable");
+        assert_eq!(wide.image.format, gpui::ImageFormat::Png);
+        assert_eq!(wide.aspect_ratio, 2.);
+        assert_eq!(wide.natural_width, 400.);
+    }
+
+    #[test]
+    fn a_picture_whose_header_cannot_be_read_is_still_drawn_square() {
+        // Only the signature of a PNG: drawable bytes, no dimensions to read.
+        let unknown = preview(&attachment("image/png", "iVBORw0KGgo=")).expect("still drawable");
+        assert_eq!(unknown.aspect_ratio, 1.);
+        assert_eq!(unknown.image.bytes, b"\x89PNG\r\n\x1a\n".to_vec());
+    }
+
+    #[test]
+    fn anything_that_is_not_a_drawable_picture_falls_back_to_a_chip() {
+        assert!(preview(&attachment("text/plain", "aGVsbG8=")).is_none());
+        assert!(preview(&attachment("application/pdf", "JVBERi0=")).is_none());
+        assert!(preview(&attachment("image/png", "not base64 at all!")).is_none());
+    }
+
+    #[test]
+    fn a_picture_is_never_drawn_taller_than_the_row_or_wider_than_itself() {
+        let screenshot = AttachmentPreview {
+            image: Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new())),
+            aspect_ratio: 2.,
+            natural_width: 1600.,
+        };
+        // At the row's height it is twice as wide as tall, long before its own 1600 pixels.
+        assert_eq!(screenshot.widest(), PICTURE_ROW_HEIGHT * 2.);
+
+        let icon = AttachmentPreview {
+            natural_width: 48.,
+            aspect_ratio: 1.,
+            ..screenshot.clone()
+        };
+        assert_eq!(icon.widest(), 48.);
+
+        // Two of them side by side want both widths and the gap between.
+        assert_eq!(
+            picture_row_width(&[screenshot, icon]),
+            PICTURE_ROW_HEIGHT * 2. + 48. + PICTURE_GAP
+        );
+    }
 
     fn written(abs_path: &str, before: checkpoint::Before) -> ToolResult {
         ToolResult {
@@ -2966,5 +3337,40 @@ mod tests {
         assert_eq!(compact(842), "842");
         assert_eq!(compact(706_123), "706k");
         assert_eq!(compact(1_048_576), "1.0M");
+    }
+
+    #[test]
+    fn removing_a_pending_attachment_takes_its_preview_with_it() {
+        let named = |name: &str, media_type: &str, data: &str| Attachment {
+            name: name.to_owned(),
+            ..attachment(media_type, data)
+        };
+        let mut pending = PendingAttachments::new(vec![
+            named("first.png", "image/png", "iVBORw0KGgo="),
+            named("notes.txt", "text/plain", "aGk="),
+            named("second.png", "image/png", "iVBORw0KGgo="),
+        ]);
+
+        pending.remove(0);
+
+        // Each file that is left must still have its own preview: the text file a chip, the second
+        // picture a tile — not the first picture's preview drawn under the text file's name.
+        let remaining = pending
+            .iter()
+            .map(|entry| (entry.attachment.name.as_str(), entry.preview.is_some()))
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, vec![("notes.txt", false), ("second.png", true)]);
+
+        // A click on a tile that was already removed must not take the app down.
+        pending.remove(5);
+
+        let sent = pending.take();
+        assert_eq!(
+            sent.iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["notes.txt", "second.png"]
+        );
+        assert!(pending.is_empty());
     }
 }

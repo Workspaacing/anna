@@ -73,7 +73,7 @@ pub struct ToolResult {
 }
 
 /// Fields added after the first release default, so threads stored by an earlier version still load.
-/// An image sent along with a message.
+/// A picture, a PDF or a text file sent along with a message.
 ///
 /// Held in the format the user supplied rather than re-encoded: a PNG screenshot stays a PNG, a
 /// photograph stays a JPEG. Re-encoding would cost quality for nothing, and every provider accepts
@@ -87,6 +87,57 @@ pub struct Attachment {
     pub data: String,
     /// The file's own name, for the transcript.
     pub name: String,
+}
+
+/// What an attachment is, which decides how each wire format carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachmentKind {
+    Image,
+    Pdf,
+    Text,
+}
+
+impl Attachment {
+    /// Anything that is neither a PDF nor text is a picture, because pictures were the only
+    /// attachments before files existed: a thread stored then is sent exactly as it was.
+    fn kind(&self) -> AttachmentKind {
+        if self.media_type == crate::document::PDF_MEDIA_TYPE {
+            AttachmentKind::Pdf
+        } else if self.media_type.starts_with("text/") {
+            AttachmentKind::Text
+        } else {
+            AttachmentKind::Image
+        }
+    }
+
+    /// A text file as the model reads it: its contents, fenced by its name.
+    ///
+    /// Sent as ordinary text rather than as any provider's document type, which is what lets a
+    /// text file reach every model, including the many that take no documents at all. The name
+    /// gives the model something to refer to, and the fence keeps two files in one message apart.
+    fn text_file(&self) -> Result<String> {
+        use base64::Engine as _;
+
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.data)
+            .with_context(|| format!("{} was stored as data that is not base64", self.name))?;
+        let text = String::from_utf8(bytes)
+            .with_context(|| format!("{} is no longer UTF-8 text", self.name))?;
+
+        // Escaped so a name with a quote in it cannot end the attribute early and leave the model
+        // guessing where the name stops and the file begins.
+        let name = self
+            .name
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;");
+        let closing_newline = if text.is_empty() || text.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        Ok(format!("<file name=\"{name}\">\n{text}{closing_newline}</file>"))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -216,7 +267,7 @@ pub async fn stream_completion(
     let (url, body, http_request) = match wire_api {
         WireApi::Anthropic => {
             let url = endpoint(&api_base, "messages");
-            let body = anthropic_body(&request);
+            let body = anthropic_body(&request)?;
             let http_request = Request::post(&url)
                 .header("content-type", "application/json")
                 .header("accept", "text/event-stream")
@@ -232,7 +283,7 @@ pub async fn stream_completion(
                 api_base.trim_end_matches('/'),
                 request.model_id
             );
-            let body = google_body(&request);
+            let body = google_body(&request)?;
             let http_request = Request::post(&url)
                 .header("content-type", "application/json")
                 .header("accept", "text/event-stream")
@@ -241,7 +292,7 @@ pub async fn stream_completion(
         }
         WireApi::OpenAiCompatible => {
             let url = endpoint(&api_base, "chat/completions");
-            let body = openai_body(&request);
+            let body = openai_body(&request)?;
             let http_request = Request::post(&url)
                 .header("content-type", "application/json")
                 .header("accept", "text/event-stream")
@@ -401,25 +452,55 @@ fn anthropic_tools(request: &CompletionRequest) -> Vec<Value> {
 /// Anthropic documents that an image placed *before* the text referring to it gives better results
 /// than the other order. Neither of the other two formats cares, so all three put images first —
 /// one rule about how a turn is shaped is easier to keep right than three.
-fn anthropic_user_content(message: &Message) -> Vec<Value> {
-    // With more than one picture each is introduced by name, which is what Anthropic's own
+fn anthropic_user_content(message: &Message) -> Result<Vec<Value>> {
+    // With more than one picture each is introduced by number, which is what Anthropic's own
     // guidance asks for: it gives the model something to refer to, so "the second one" in a
     // follow-up means something. A single image needs no label and reads better without one.
-    let label_them = message.attachments.len() > 1;
+    // Only pictures are counted, so a PDF or a text file alongside does not make "Image 2" the
+    // first picture.
+    let label_images = message
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.kind() == AttachmentKind::Image)
+        .count()
+        > 1;
+    let mut image_number = 0;
 
     let mut content = Vec::new();
-    for (index, attachment) in message.attachments.iter().enumerate() {
-        if label_them {
-            content.push(json!({ "type": "text", "text": format!("Image {}:", index + 1) }));
+    for attachment in &message.attachments {
+        match attachment.kind() {
+            AttachmentKind::Image => {
+                image_number += 1;
+                if label_images {
+                    content.push(json!({ "type": "text", "text": format!("Image {image_number}:") }));
+                }
+                content.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": attachment.media_type,
+                        "data": attachment.data,
+                    },
+                }));
+            }
+            // The `document` block with a base64 source, as documented at
+            // https://platform.claude.com/docs/en/build-with-claude/pdf-support. The block carries
+            // no file name, so the name goes in a text block ahead of it for the model to refer to.
+            AttachmentKind::Pdf => {
+                content.push(json!({ "type": "text", "text": format!("{}:", attachment.name) }));
+                content.push(json!({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": attachment.media_type,
+                        "data": attachment.data,
+                    },
+                }));
+            }
+            AttachmentKind::Text => {
+                content.push(json!({ "type": "text", "text": attachment.text_file()? }));
+            }
         }
-        content.push(json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": attachment.media_type,
-                "data": attachment.data,
-            },
-        }));
     }
 
     // An empty text block is rejected outright, so it is only included when there is something in
@@ -428,16 +509,16 @@ fn anthropic_user_content(message: &Message) -> Vec<Value> {
     if !message.text.is_empty() || content.is_empty() {
         content.push(json!({ "type": "text", "text": message.text }));
     }
-    content
+    Ok(content)
 }
 
-fn anthropic_body(request: &CompletionRequest) -> Value {
+fn anthropic_body(request: &CompletionRequest) -> Result<Value> {
     let mut messages = Vec::new();
     for message in &request.messages {
         match message.role {
             Role::User => messages.push(json!({
                 "role": "user",
-                "content": anthropic_user_content(message),
+                "content": anthropic_user_content(message)?,
             })),
             Role::Assistant => {
                 let mut content = Vec::new();
@@ -486,7 +567,7 @@ fn anthropic_body(request: &CompletionRequest) -> Value {
     if !request.tools.is_empty() {
         body["tools"] = json!(anthropic_tools(request));
     }
-    body
+    Ok(body)
 }
 
 /// A user turn's parts, with any images inlined ahead of the text.
@@ -494,36 +575,45 @@ fn anthropic_body(request: &CompletionRequest) -> Value {
 /// The field names are camelCase to match the rest of this encoder. Gemini is a protobuf service
 /// and its JSON mapping accepts either spelling, which the existing `functionCall` already relies
 /// on — `inline_data` would work equally well, and consistency is the only thing deciding it.
-fn google_user_parts(message: &Message) -> Vec<Value> {
-    let mut parts = message
-        .attachments
-        .iter()
-        .map(|attachment| {
-            json!({
-                "inlineData": {
-                    "mimeType": attachment.media_type,
-                    "data": attachment.data,
-                },
-            })
-        })
-        .collect::<Vec<_>>();
+fn google_user_parts(message: &Message) -> Result<Vec<Value>> {
+    let mut parts = Vec::new();
+    for attachment in &message.attachments {
+        let inline = json!({
+            "inlineData": {
+                "mimeType": attachment.media_type,
+                "data": attachment.data,
+            },
+        });
+        match attachment.kind() {
+            AttachmentKind::Image => parts.push(inline),
+            // A PDF is inline data like a picture, only with its own MIME type: the `Blob` part
+            // (https://ai.google.dev/api/caching#Blob), which
+            // https://ai.google.dev/gemini-api/docs/file-input-methods documents for PDFs up to
+            // 50 MB. A blob has no name, so the name is a text part ahead of it.
+            AttachmentKind::Pdf => {
+                parts.push(json!({ "text": format!("{}:", attachment.name) }));
+                parts.push(inline);
+            }
+            AttachmentKind::Text => parts.push(json!({ "text": attachment.text_file()? })),
+        }
+    }
 
     if !message.text.is_empty() || parts.is_empty() {
         parts.push(json!({ "text": message.text }));
     }
-    parts
+    Ok(parts)
 }
 
 /// Gemini differs from both other formats in three ways that matter: the assistant role is
 /// called `model`, tool calls and their results are *parts* of a message rather than a field on
 /// it, and a result is matched to its call by function name rather than by an id.
-fn google_body(request: &CompletionRequest) -> Value {
+fn google_body(request: &CompletionRequest) -> Result<Value> {
     let mut contents = Vec::new();
     for message in &request.messages {
         match message.role {
             Role::User => contents.push(json!({
                 "role": "user",
-                "parts": google_user_parts(message),
+                "parts": google_user_parts(message)?,
             })),
             Role::Assistant => {
                 let mut parts = Vec::new();
@@ -584,42 +674,71 @@ fn google_body(request: &CompletionRequest) -> Value {
                 .collect::<Vec<_>>(),
         }]);
     }
-    body
+    Ok(body)
 }
 
-/// A user turn's content, which stays a plain string until there is a picture in it.
+/// A user turn's content, which stays a plain string until there is a picture or a PDF in it.
 ///
-/// The array form is the one that carries images, and it is also the form the long tail of
-/// OpenAI-compatible servers in the catalog is least likely to have implemented. Sending a message
-/// with no attachments as a bare string, exactly as before, means adding image support cannot
-/// break a provider that never sees an image.
-fn openai_user_content(message: &Message) -> Value {
+/// The array form is the one that carries images and documents, and it is also the form the long
+/// tail of OpenAI-compatible servers in the catalog is least likely to have implemented. Sending a
+/// message with no attachments as a bare string, exactly as before, means adding image support
+/// cannot break a provider that never sees an image. Text files are words, so they join that string
+/// rather than forcing the array form: a text file reaches every server a typed message reaches.
+fn openai_user_content(message: &Message) -> Result<Value> {
     if message.attachments.is_empty() {
-        return json!(message.text);
+        return Ok(json!(message.text));
     }
 
-    let mut parts = message
+    if message
         .attachments
         .iter()
-        .map(|attachment| {
-            json!({
+        .all(|attachment| attachment.kind() == AttachmentKind::Text)
+    {
+        let mut sections = message
+            .attachments
+            .iter()
+            .map(Attachment::text_file)
+            .collect::<Result<Vec<_>>>()?;
+        if !message.text.is_empty() {
+            sections.push(message.text.clone());
+        }
+        return Ok(json!(sections.join("\n\n")));
+    }
+
+    let mut parts = Vec::new();
+    for attachment in &message.attachments {
+        parts.push(match attachment.kind() {
+            AttachmentKind::Image => json!({
                 "type": "image_url",
                 // A data URL, not a link: the bytes travel with the request. `image_url` is an
                 // object even though it holds a single field, which is the shape servers check.
                 "image_url": {
                     "url": format!("data:{};base64,{}", attachment.media_type, attachment.data),
                 },
-            })
-        })
-        .collect::<Vec<_>>();
+            }),
+            // The "File content part" of OpenAI's own schema
+            // (https://github.com/openai/openai-openapi, `type: file` with `filename` and
+            // `file_data`). The data goes as a data URL, the form OpenAI's guide shows
+            // (https://developers.openai.com/api/docs/guides/pdf-files) and the form OpenRouter
+            // documents for this same part (https://openrouter.ai/docs/features/multimodal/pdfs).
+            AttachmentKind::Pdf => json!({
+                "type": "file",
+                "file": {
+                    "filename": attachment.name,
+                    "file_data": format!("data:{};base64,{}", attachment.media_type, attachment.data),
+                },
+            }),
+            AttachmentKind::Text => json!({ "type": "text", "text": attachment.text_file()? }),
+        });
+    }
 
     if !message.text.is_empty() {
         parts.push(json!({ "type": "text", "text": message.text }));
     }
-    json!(parts)
+    Ok(json!(parts))
 }
 
-fn openai_body(request: &CompletionRequest) -> Value {
+fn openai_body(request: &CompletionRequest) -> Result<Value> {
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
         messages.push(json!({ "role": "system", "content": system }));
@@ -629,7 +748,7 @@ fn openai_body(request: &CompletionRequest) -> Value {
         match message.role {
             Role::User => messages.push(json!({
                 "role": "user",
-                "content": openai_user_content(message),
+                "content": openai_user_content(message)?,
             })),
             Role::Assistant => {
                 let mut entry = json!({ "role": "assistant", "content": message.text });
@@ -692,7 +811,7 @@ fn openai_body(request: &CompletionRequest) -> Value {
                 .collect::<Vec<_>>()
         );
     }
-    body
+    Ok(body)
 }
 
 /// Tool arguments are echoed back to the provider as a JSON value. A call whose arguments never
@@ -1099,13 +1218,16 @@ mod tests {
     fn a_published_output_limit_is_asked_for_in_full() {
         // Whatever the model says it can produce is what we ask for; there is no reason to cap a
         // response below the ceiling the provider itself publishes.
-        assert_eq!(anthropic_body(&request("@ai-sdk/anthropic", Some(64000)))["max_tokens"], 64000);
         assert_eq!(
-            openai_body(&request("@ai-sdk/openai", Some(32768)))["max_completion_tokens"],
+            anthropic_body(&request("@ai-sdk/anthropic", Some(64000))).unwrap()["max_tokens"],
+            64000
+        );
+        assert_eq!(
+            openai_body(&request("@ai-sdk/openai", Some(32768))).unwrap()["max_completion_tokens"],
             32768
         );
         assert_eq!(
-            google_body(&request("@ai-sdk/google", Some(8192)))["generationConfig"]
+            google_body(&request("@ai-sdk/google", Some(8192))).unwrap()["generationConfig"]
                 ["maxOutputTokens"],
             8192
         );
@@ -1115,16 +1237,16 @@ mod tests {
     fn with_no_published_limit_the_provider_decides() {
         // Omitting the field asks for the provider's own default, which is a better guess than any
         // number invented here.
-        let openai = openai_body(&request("@ai-sdk/openai", None));
+        let openai = openai_body(&request("@ai-sdk/openai", None)).unwrap();
         assert!(openai.get("max_completion_tokens").is_none(), "got: {openai}");
 
-        let google = google_body(&request("@ai-sdk/google", None));
+        let google = google_body(&request("@ai-sdk/google", None)).unwrap();
         assert!(google.get("generationConfig").is_none(), "got: {google}");
     }
 
     #[test]
     fn anthropic_always_sends_a_ceiling_because_it_rejects_a_request_without_one() {
-        let body = anthropic_body(&request("@ai-sdk/anthropic", None));
+        let body = anthropic_body(&request("@ai-sdk/anthropic", None)).unwrap();
 
         assert_eq!(body["max_tokens"], ANTHROPIC_FALLBACK_MAX_TOKENS);
     }
@@ -1349,7 +1471,7 @@ mod tests {
             max_output_tokens: Some(64),
         };
 
-        let body = google_body(&request);
+        let body = google_body(&request).unwrap();
         let contents = body["contents"].as_array().unwrap();
 
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be brief");
@@ -1518,7 +1640,7 @@ mod tests {
         };
 
         // Anthropic folds results into a user message.
-        let anthropic = anthropic_body(&request);
+        let anthropic = anthropic_body(&request).unwrap();
         let messages = anthropic["messages"].as_array().unwrap();
         assert_eq!(messages[2]["role"], "user");
         assert_eq!(messages[2]["content"][0]["type"], "tool_result");
@@ -1526,10 +1648,191 @@ mod tests {
         assert_eq!(messages[1]["content"][0]["type"], "tool_use");
 
         // OpenAI gives each result its own message with a role of its own.
-        let openai = openai_body(&request);
+        let openai = openai_body(&request).unwrap();
         let messages = openai["messages"].as_array().unwrap();
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[2]["tool_call_id"], "c1");
         assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "read");
+    }
+
+    /// `%PDF-1.7`, which is all a request body needs of a PDF.
+    const PDF_DATA: &str = "JVBERi0xLjc=";
+
+    fn text_attachment(name: &str, text: &str) -> Attachment {
+        use base64::Engine as _;
+
+        Attachment {
+            media_type: crate::document::TEXT_MEDIA_TYPE.to_owned(),
+            data: base64::engine::general_purpose::STANDARD.encode(text),
+            name: name.to_owned(),
+        }
+    }
+
+    fn pdf_attachment() -> Attachment {
+        Attachment {
+            media_type: crate::document::PDF_MEDIA_TYPE.to_owned(),
+            data: PDF_DATA.to_owned(),
+            name: "paper.pdf".to_owned(),
+        }
+    }
+
+    fn picture(name: &str) -> Attachment {
+        Attachment {
+            media_type: "image/png".to_owned(),
+            data: "iVBORw0KGgo=".to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    fn asking_about(npm: &str, attachments: Vec<Attachment>) -> CompletionRequest {
+        let mut request = request(npm, Some(64));
+        request.messages = vec![Message {
+            attachments,
+            ..Message::user("what is in it?")
+        }];
+        request
+    }
+
+    #[test]
+    fn a_text_file_reaches_anthropic_as_text_fenced_by_its_name() {
+        let body = anthropic_body(&asking_about(
+            "@ai-sdk/anthropic",
+            vec![text_attachment("main.rs", "fn main() {}")],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                { "type": "text", "text": "<file name=\"main.rs\">\nfn main() {}\n</file>" },
+                { "type": "text", "text": "what is in it?" },
+            ])
+        );
+    }
+
+    #[test]
+    fn a_pdf_reaches_anthropic_as_a_base64_document_block() {
+        let body =
+            anthropic_body(&asking_about("@ai-sdk/anthropic", vec![pdf_attachment()])).unwrap();
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                { "type": "text", "text": "paper.pdf:" },
+                {
+                    "type": "document",
+                    "source": { "type": "base64", "media_type": "application/pdf", "data": PDF_DATA },
+                },
+                { "type": "text", "text": "what is in it?" },
+            ])
+        );
+    }
+
+    #[test]
+    fn pictures_are_numbered_among_pictures_only() {
+        // A file ahead of them must not make the first picture "Image 2".
+        let body = anthropic_body(&asking_about(
+            "@ai-sdk/anthropic",
+            vec![text_attachment("a.txt", "x"), picture("one.png"), picture("two.png")],
+        ))
+        .unwrap();
+        let content = &body["messages"][0]["content"];
+
+        assert_eq!(content[1], json!({ "type": "text", "text": "Image 1:" }));
+        assert_eq!(content[2]["type"], "image");
+        assert_eq!(content[3], json!({ "type": "text", "text": "Image 2:" }));
+    }
+
+    #[test]
+    fn a_text_file_alone_keeps_the_openai_content_a_plain_string() {
+        // The array form is what the long tail of compatible servers is least likely to accept, and
+        // a text file does not need it.
+        let body = openai_body(&asking_about(
+            "@ai-sdk/openai",
+            vec![text_attachment("notes.md", "# Notes\n")],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!("<file name=\"notes.md\">\n# Notes\n</file>\n\nwhat is in it?")
+        );
+    }
+
+    #[test]
+    fn a_pdf_reaches_openai_as_a_file_part_carrying_a_data_url() {
+        let body = openai_body(&asking_about(
+            "@ai-sdk/openai",
+            vec![pdf_attachment(), text_attachment("a.txt", "hi")],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": "paper.pdf",
+                        "file_data": format!("data:application/pdf;base64,{PDF_DATA}"),
+                    },
+                },
+                { "type": "text", "text": "<file name=\"a.txt\">\nhi\n</file>" },
+                { "type": "text", "text": "what is in it?" },
+            ])
+        );
+    }
+
+    #[test]
+    fn a_text_file_reaches_gemini_as_a_text_part() {
+        let body = google_body(&asking_about(
+            "@ai-sdk/google",
+            vec![text_attachment("data.csv", "a,b\n1,2")],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            body["contents"][0]["parts"],
+            json!([
+                { "text": "<file name=\"data.csv\">\na,b\n1,2\n</file>" },
+                { "text": "what is in it?" },
+            ])
+        );
+    }
+
+    #[test]
+    fn a_pdf_reaches_gemini_as_inline_data() {
+        let body = google_body(&asking_about("@ai-sdk/google", vec![pdf_attachment()])).unwrap();
+
+        assert_eq!(
+            body["contents"][0]["parts"],
+            json!([
+                { "text": "paper.pdf:" },
+                { "inlineData": { "mimeType": "application/pdf", "data": PDF_DATA } },
+                { "text": "what is in it?" },
+            ])
+        );
+    }
+
+    #[test]
+    fn a_quote_in_a_file_name_cannot_end_its_attribute() {
+        assert_eq!(
+            text_attachment("say \"hi\".txt", "x").text_file().unwrap(),
+            "<file name=\"say &quot;hi&quot;.txt\">\nx\n</file>"
+        );
+    }
+
+    #[test]
+    fn stored_text_that_is_not_utf8_fails_the_request_rather_than_sending_garbage() {
+        // "café" in Latin-1, as a thread edited by hand might hold it.
+        let broken = Attachment {
+            media_type: crate::document::TEXT_MEDIA_TYPE.to_owned(),
+            data: "Y2Fm6Q==".to_owned(),
+            name: "menu.txt".to_owned(),
+        };
+        let error = openai_body(&asking_about("@ai-sdk/openai", vec![broken]))
+            .expect_err("invalid UTF-8 must not be sent");
+
+        assert!(error.to_string().contains("menu.txt"), "{error}");
     }
 }
