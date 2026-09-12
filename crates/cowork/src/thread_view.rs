@@ -169,6 +169,43 @@ impl CoworkThreadView {
             .update(cx, |permissions, cx| permissions.resolve(decision, cx));
     }
 
+    /// What the agent is doing right now, while it is still doing it.
+    ///
+    /// Only shown when nothing else already says so: a running tool has its own card describing
+    /// itself, and repeating "Executing tools…" underneath would be noise. What is left is the
+    /// gap before the first token arrives, which is otherwise a blank screen.
+    fn render_status(&self, is_streaming: bool, _cx: &Context<Self>) -> Option<AnyElement> {
+        if !is_streaming {
+            return None;
+        }
+
+        let last = self.messages.last()?;
+        let waiting_on_a_tool = last.role == Role::Assistant && !last.tool_calls.is_empty();
+        let has_text = last.role == Role::Assistant && !last.text.is_empty();
+        if waiting_on_a_tool || has_text {
+            return None;
+        }
+
+        Some(
+            h_flex()
+                .w_full()
+                .px_4()
+                .py_1p5()
+                .gap_1p5()
+                .child(
+                    Icon::new(IconName::Sparkle)
+                        .size(IconSize::XSmall)
+                        .color(Color::Accent),
+                )
+                .child(
+                    Label::new("Thinking…")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The card that asks before the agent runs a command.
     ///
     /// Deliberately shown between the transcript and the composer rather than as a modal: the user
@@ -927,6 +964,102 @@ impl CoworkThreadView {
             }))
     }
 
+    /// One tool call and whatever it produced, as a single card.
+    ///
+    /// Its result lives on the next message rather than this one, so it is looked up by position:
+    /// the model asks for calls in order and the loop answers in the same order, which is also how
+    /// several wire formats match the two.
+    fn render_tool_call(
+        &self,
+        message_index: usize,
+        position: usize,
+        call: &ToolCall,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let result = self
+            .messages
+            .get(message_index + 1)
+            .filter(|next| next.role == Role::Tool)
+            .and_then(|next| next.tool_results.get(position));
+
+        let (icon, icon_color) = match result {
+            None => (IconName::PlayOutlined, Color::Accent),
+            Some(result) if result.is_error => (IconName::XCircle, Color::Error),
+            Some(_) => (IconName::Check, Color::Success),
+        };
+
+        v_flex()
+            .id(("cowork-tool-call", message_index * 64 + position))
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border_variant)
+            .bg(colors.element_background)
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1p5()
+                    .child(Icon::new(icon).size(IconSize::Small).color(icon_color))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Label::new(describe_call(
+                                &call.name,
+                                &call.arguments,
+                                result.is_some(),
+                            ))
+                            .size(LabelSize::Small)
+                            .truncate_middle(),
+                        ),
+                    ),
+            )
+            .when_some(result, |this, result| {
+                let open = self.expanded_diffs.contains(&(message_index, position));
+
+                this.child(
+                    Label::new(first_line(&result.content))
+                        .size(LabelSize::XSmall)
+                        .color(if result.is_error {
+                            Color::Error
+                        } else {
+                            Color::Muted
+                        })
+                        .truncate_middle(),
+                )
+                .when(!result.diff.is_empty(), |this| {
+                    this.child(
+                        h_flex()
+                            .id(("cowork-diff-toggle", message_index * 64 + position))
+                            .gap_1()
+                            .cursor_pointer()
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                            )
+                            .child(render_diff_counts(&result.diff, cx))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                let key = (message_index, position);
+                                if !this.expanded_diffs.remove(&key) {
+                                    this.expanded_diffs.insert(key);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when(open, |this| this.child(render_diff(&result.diff, cx)))
+                })
+            })
+            .into_any_element()
+    }
+
     /// The switch that stops the agent asking before it runs commands.
     fn render_permission_toggle(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let approving = CoworkSettings::get_global(cx).auto_approve;
@@ -1057,6 +1190,40 @@ fn first_line(content: &str) -> String {
 
 /// Tool arguments are shown as the values alone: the model already named the tool, and the keys
 /// are noise at this size.
+/// What the agent is doing, as a sentence.
+///
+/// `write src/index.ts` is the wire form of a tool call, not a description of anything. It tells
+/// the reader to know what `write` means and to infer that the path is its argument. A sentence
+/// asks nothing of them, and reads the same whether they are watching it happen or scrolling past
+/// it afterwards — which is why the only thing the tense changes is the verb.
+fn describe_call(tool: &str, arguments: &str, finished: bool) -> String {
+    let subject = summarize_arguments(arguments);
+
+    let verb = match (tool, finished) {
+        ("read", false) => "Reading",
+        ("read", true) => "Read",
+        ("list", false) => "Listing",
+        ("list", true) => "Listed",
+        ("write", false) => "Writing",
+        ("write", true) => "Wrote",
+        ("edit", false) => "Editing",
+        ("edit", true) => "Edited",
+        ("shell", false) => "Running",
+        ("shell", true) => "Ran",
+        // A tool nobody has written a phrase for still reads as a sentence rather than as a
+        // fragment of JSON.
+        (_, false) => return format!("Running {tool}…"),
+        (_, true) => return format!("Ran {tool}"),
+    };
+
+    match (subject.is_empty(), finished) {
+        (true, false) => format!("{verb}…"),
+        (true, true) => verb.to_owned(),
+        (false, false) => format!("{verb} {subject}…"),
+        (false, true) => format!("{verb} {subject}"),
+    }
+}
+
 /// What a tool call is *about*, in one line.
 ///
 /// Deliberately a named subset rather than every argument. Joining all of them put the entire
@@ -1468,84 +1635,12 @@ impl Render for CoworkThreadView {
                         this.child(MarkdownElement::new(markdown, markdown_style.clone()))
                     })
                     .children(message.tool_calls.iter().enumerate().map(|(position, call)| {
-                        h_flex()
-                            .id(("cowork-tool-call", position))
-                            .w_full()
-                            .gap_1p5()
-                            .child(
-                                Icon::new(IconName::PlayOutlined)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Accent),
-                            )
-                            .child(Label::new(call.name.clone()).size(LabelSize::XSmall))
-                            .child(
-                                Label::new(summarize_arguments(&call.arguments))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
-                                    .truncate_middle(),
-                            )
+                        self.render_tool_call(index, position, call, cx)
                     }))
                     .into_any_element(),
-                Role::Tool => v_flex()
-                    .id(("cowork-tool-results", index))
-                    .w_full()
-                    .px_3()
-                    .gap_1()
-                    .children(message.tool_results.iter().enumerate().map(
-                        |(position, result)| {
-                            let (icon, color) = if result.is_error {
-                                (IconName::XCircle, Color::Error)
-                            } else {
-                                (IconName::Check, Color::Success)
-                            };
-                            v_flex()
-                                .id(("cowork-tool-result", position))
-                                .w_full()
-                                .min_w_0()
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .gap_1p5()
-                                        .child(
-                                            Icon::new(icon).size(IconSize::XSmall).color(color),
-                                        )
-                                        .child(
-                                            Label::new(first_line(&result.content))
-                                                .size(LabelSize::XSmall)
-                                                .color(Color::Muted)
-                                                .truncate_middle(),
-                                        ),
-                                )
-                                .when(!result.diff.is_empty(), |this| {
-                                    let open = self.expanded_diffs.contains(&(index, position));
-                                    this.child(
-                                        h_flex()
-                                            .id(("cowork-diff-toggle", position))
-                                            .gap_1()
-                                            .cursor_pointer()
-                                            .child(
-                                                Icon::new(if open {
-                                                    IconName::ChevronDown
-                                                } else {
-                                                    IconName::ChevronRight
-                                                })
-                                                .size(IconSize::XSmall)
-                                                .color(Color::Muted),
-                                            )
-                                            .child(render_diff_counts(&result.diff, cx))
-                                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                                let key = (index, position);
-                                                if !this.expanded_diffs.remove(&key) {
-                                                    this.expanded_diffs.insert(key);
-                                                }
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .when(open, |this| this.child(render_diff(&result.diff, cx)))
-                                })
-                        },
-                    ))
-                    .into_any_element(),
+                // Results are drawn inside the card of the call they answer, so this message
+                // contributes nothing of its own.
+                Role::Tool => div().into_any_element(),
             })
             .collect::<Vec<_>>();
 
@@ -1572,6 +1667,7 @@ impl Render for CoworkThreadView {
                     .when(is_empty, |this| this.child(self.render_empty_state()))
                     .children(messages),
             )
+            .children(self.render_status(is_streaming, cx))
             .children(self.render_permission(cx))
             .when_some(self.error.clone(), |this, error| {
                 this.child(render_error(error, cx))

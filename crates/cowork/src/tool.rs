@@ -288,6 +288,15 @@ async fn apply(
         .await
         .with_context(|| format!("opening {path}"))?;
 
+    // Opening a buffer does not start the language servers for it — `open_buffer_with_lsp` does
+    // that, and it is gated behind `test-support`. Without this the agent edited files that no
+    // server had ever seen: Biome and ESLint never started, so there was nothing for the formatter
+    // chain to call and no diagnostics for the checks to report. The handle is held until the end
+    // of the operation, because dropping it unregisters the buffer again.
+    let _language_servers = project.update(cx, |project, cx| {
+        project.register_buffer_with_language_servers(&buffer, cx)
+    });
+
     let before = buffer_text(&buffer, cx).await;
     let summary = edit_buffer(&buffer, &change, cx).await?;
 
