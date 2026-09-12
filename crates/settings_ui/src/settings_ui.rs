@@ -571,6 +571,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::IncludeIgnoredContent>(render_dropdown)
         .add_basic_renderer::<settings::ShowIndentGuides>(render_dropdown)
         .add_basic_renderer::<settings::ShellDiscriminants>(render_dropdown)
+        .add_basic_renderer::<settings::AgentShellDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::RelativeLineNumbers>(render_dropdown)
         .add_basic_renderer::<settings::WindowDecorations>(render_dropdown)
         .add_basic_renderer::<settings::FullscreenMode>(render_dropdown)
@@ -6018,5 +6019,77 @@ mod project_settings_update_tests {
             "Buffer should not contain the external modification value: {}",
             text
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every field on every settings page must have a renderer registered for its type.
+    ///
+    /// A missing one is invisible until someone opens that page and finds "NO RENDERER" where a
+    /// control should be — which is how it was found twice. The registry is keyed by `TypeId` and
+    /// populated by hand in `init_renderers`, so adding a settings type and forgetting to register
+    /// it compiles, passes every other test, and ships.
+    #[gpui::test]
+    fn every_settings_field_has_a_renderer(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            // The renderer registry is the only thing under test, but `settings_data` reads real
+            // settings and the app state to decide what to show, so both have to exist first.
+            // `AppState::test` installs the settings store and the base theme on the way.
+            let app_state = workspace::AppState::test(cx);
+            workspace::AppState::set_global(app_state, cx);
+            init_renderers(cx);
+
+            let renderer = cx.default_global::<SettingFieldRenderer>().clone();
+            let registered = renderer.renderers.borrow();
+
+            let mut missing = Vec::new();
+            let mut checked = 0usize;
+
+            let mut check = |field: &dyn AnySettingField, page: &str, title: &str| {
+                checked += 1;
+                if !registered.contains_key(&field.type_id()) {
+                    missing.push(format!("{page} / {title}: {}", field.type_name()));
+                }
+            };
+
+            for page in crate::page_data::settings_data(cx) {
+                for item in page.items.iter() {
+                    match item {
+                        SettingsPageItem::SettingItem(item) => {
+                            check(item.field.as_ref(), page.title, item.title)
+                        }
+                        SettingsPageItem::DynamicItem(item) => {
+                            // The discriminant picks the variant; each variant's own fields are
+                            // rendered underneath it, and both need a renderer.
+                            check(
+                                item.discriminant.field.as_ref(),
+                                page.title,
+                                item.discriminant.title,
+                            );
+                            for variant in item.fields.iter() {
+                                for field in variant.iter() {
+                                    check(field.field.as_ref(), page.title, field.title);
+                                }
+                            }
+                        }
+                        SettingsPageItem::SectionHeader(_)
+                        | SettingsPageItem::SubPageLink(_)
+                        | SettingsPageItem::ActionLink(_) => {}
+                    }
+                }
+            }
+
+            assert!(checked > 0, "no settings fields were found to check");
+            assert!(
+                missing.is_empty(),
+                "{} of {checked} settings fields have no renderer registered in \
+                 `init_renderers`:\n  {}",
+                missing.len(),
+                missing.join("\n  ")
+            );
+        });
     }
 }
