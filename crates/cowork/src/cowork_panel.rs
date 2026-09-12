@@ -53,6 +53,10 @@ pub struct CoworkPanel {
     query: String,
     visible_threads: Vec<ThreadMetadata>,
     selected_index: usize,
+    /// Whether the panel is showing in its dock, which is when an empty center becomes the home.
+    active: bool,
+    /// The home was wanted while the catalog was still loading, and opens once it has loaded.
+    home_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -86,13 +90,22 @@ impl CoworkPanel {
             });
 
             let mut subscriptions = Vec::new();
-            subscriptions.push(cx.subscribe(&store, |this: &mut Self, _, event, cx| match event {
-                CoworkStoreEvent::ThreadsChanged => {
-                    this.refresh_visible_threads(cx);
-                    cx.notify();
-                }
-                CoworkStoreEvent::CatalogChanged => cx.notify(),
-            }));
+            subscriptions.push(cx.subscribe_in(
+                &store,
+                window,
+                |this: &mut Self, _, event, window, cx| match event {
+                    CoworkStoreEvent::ThreadsChanged => {
+                        this.refresh_visible_threads(cx);
+                        cx.notify();
+                    }
+                    CoworkStoreEvent::CatalogChanged => {
+                        if this.home_pending {
+                            this.show_home_later(window, cx);
+                        }
+                        cx.notify();
+                    }
+                },
+            ));
             subscriptions.push(cx.subscribe(
                 &search_editor,
                 |this: &mut Self, editor, event: &EditorEvent, cx| {
@@ -116,6 +129,8 @@ impl CoworkPanel {
                 query: String::new(),
                 visible_threads: Vec::new(),
                 selected_index: 0,
+                active: false,
+                home_pending: false,
                 _subscriptions: subscriptions,
             };
             this.refresh_visible_threads(cx);
@@ -165,6 +180,51 @@ impl CoworkPanel {
 
     fn new_thread(&mut self, _: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
         self.start_new_thread(window, cx);
+    }
+
+    /// Opens the home once the current update is over, if it should open at all.
+    ///
+    /// Deferred because the dock tells a panel it became active from inside its own update, and
+    /// opening the home reads and updates the workspace that update belongs to.
+    fn show_home_later(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.show_home(window, cx))
+                .log_err();
+        });
+    }
+
+    fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let (thread_open, center_empty) = {
+            let workspace = workspace.read(cx);
+            (
+                workspace
+                    .items_of_type::<CoworkThreadView>(cx)
+                    .next()
+                    .is_some(),
+                workspace.active_pane().read(cx).items_len() == 0,
+            )
+        };
+
+        let store = self.store.read(cx);
+        let decision = home_decision(HomeCircumstances {
+            active: self.active,
+            thread_open,
+            center_empty,
+            model_available: store.model_for_new_thread().is_some(),
+            catalog_loading: matches!(
+                store.catalog_state(),
+                CatalogState::Idle | CatalogState::Loading
+            ),
+        });
+
+        self.home_pending = decision == HomeDecision::WaitForCatalog;
+        if decision == HomeDecision::Open {
+            self.start_new_thread(window, cx);
+        }
     }
 
     /// Opens a thread that already has something to work on, and starts it.
@@ -713,7 +773,52 @@ impl CoworkPanel {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
                 )
+                // For a window that already has files open, where the home does not open on its
+                // own: without this the only way in is the small "+" in the header.
+                .child(
+                    ui::Button::new("cowork-empty-new-thread", "New thread")
+                        .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
+                        .style(ui::ButtonStyle::Tinted(ui::TintColor::Accent))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.new_thread(&NewThread, window, cx)
+                        })),
+                )
             })
+    }
+}
+
+/// What decides whether showing the panel opens the home in the center.
+#[derive(Clone, Copy, Debug)]
+struct HomeCircumstances {
+    active: bool,
+    thread_open: bool,
+    center_empty: bool,
+    model_available: bool,
+    catalog_loading: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HomeDecision {
+    Open,
+    WaitForCatalog,
+    Stay,
+}
+
+/// Whether showing the panel should open the home, the way Claude Code opens on one.
+///
+/// Only into an empty center: a window with files open is someone in the middle of editing, and a
+/// tab appearing on its own would take their focus, so the panel offers a button instead. Nothing
+/// opens beside a thread that is already open. And nothing opens, or complains about a missing
+/// model, while the catalog that would supply one is still loading: the home waits for it.
+fn home_decision(circumstances: HomeCircumstances) -> HomeDecision {
+    if !circumstances.active || circumstances.thread_open || !circumstances.center_empty {
+        HomeDecision::Stay
+    } else if circumstances.model_available {
+        HomeDecision::Open
+    } else if circumstances.catalog_loading {
+        HomeDecision::WaitForCatalog
+    } else {
+        HomeDecision::Stay
     }
 }
 
@@ -781,6 +886,15 @@ impl Panel for CoworkPanel {
         4
     }
 
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.active = active;
+        if active {
+            self.show_home_later(window, cx);
+        } else {
+            self.home_pending = false;
+        }
+    }
+
     fn hide_button_setting(&self, _cx: &App) -> Option<workspace::HideStatusItem> {
         Some(workspace::HideStatusItem::new(|settings| {
             settings.cowork.get_or_insert_default().button = Some(false);
@@ -814,5 +928,60 @@ impl Render for CoworkPanel {
                 }
             })
             .child(self.render_model_footer(cx))
+    }
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+
+    fn empty_window() -> HomeCircumstances {
+        HomeCircumstances {
+            active: true,
+            thread_open: false,
+            center_empty: true,
+            model_available: true,
+            catalog_loading: false,
+        }
+    }
+
+    #[test]
+    fn an_empty_window_opens_on_the_home_when_the_panel_shows() {
+        assert_eq!(home_decision(empty_window()), HomeDecision::Open);
+    }
+
+    #[test]
+    fn nothing_opens_over_work_already_on_screen() {
+        let files_open = HomeCircumstances {
+            center_empty: false,
+            ..empty_window()
+        };
+        let thread_open = HomeCircumstances {
+            thread_open: true,
+            ..empty_window()
+        };
+        let panel_hidden = HomeCircumstances {
+            active: false,
+            ..empty_window()
+        };
+        assert_eq!(home_decision(files_open), HomeDecision::Stay);
+        assert_eq!(home_decision(thread_open), HomeDecision::Stay);
+        assert_eq!(home_decision(panel_hidden), HomeDecision::Stay);
+    }
+
+    #[test]
+    fn the_home_waits_for_the_catalog_rather_than_reporting_no_model() {
+        let loading = HomeCircumstances {
+            model_available: false,
+            catalog_loading: true,
+            ..empty_window()
+        };
+        let loaded_without_a_model = HomeCircumstances {
+            model_available: false,
+            catalog_loading: false,
+            ..empty_window()
+        };
+        assert_eq!(home_decision(loading), HomeDecision::WaitForCatalog);
+        assert_eq!(home_decision(loaded_without_a_model), HomeDecision::Stay);
     }
 }
