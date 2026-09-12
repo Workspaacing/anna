@@ -857,11 +857,20 @@ impl CoworkStore {
         // A thread used to reach the database only through `persist`, which runs on send and when
         // a turn ends. So a session the user created and then left alone — or closed the window on
         // before a reply landed — had never been written at all, and was simply gone at the next
-        // launch, with nothing to explain where it went. Creating a session is a deliberate act
-        // that costs a dialog; it should outlive the window it was created in.
+        // launch, with nothing to explain where it went. A thread created here is handed its work
+        // at once, so it should outlive the window it was created in.
         self.save_thread(thread.clone(), cx);
 
         thread
+    }
+
+    /// A thread that is not stored yet, for a composer the user has not typed into.
+    ///
+    /// Nothing is written and nothing is listed: the view that shows it saves it through `persist`
+    /// when its first message is sent. A "+" pressed by mistake and closed again should leave no
+    /// empty conversation behind in the panel.
+    pub fn draft_thread(&mut self, model: ModelRef, project: Option<String>) -> Thread {
+        self.blank_thread(model, project)
     }
 
     /// Starts a new thread from a copy of earlier messages, leaving the source thread as it was.
@@ -1284,5 +1293,58 @@ mod tests {
     #[test]
     fn thread_ids_are_unique_per_sequence() {
         assert_ne!(ThreadId::new(1), ThreadId::new(2));
+    }
+
+    #[gpui::test]
+    async fn a_draft_is_stored_only_once_its_first_message_is_saved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let store = cx.new(CoworkStore::new);
+        cx.executor().run_until_parked();
+        let key_value_store = store.read_with(cx, |store, _| store.key_value_store.clone());
+        let model = thread_with(Vec::new()).metadata.model;
+
+        let mut draft = store.update(cx, |store, _| {
+            store.draft_thread(model, Some("/project".to_owned()))
+        });
+        cx.executor().run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert!(
+                store
+                    .threads()
+                    .iter()
+                    .all(|thread| thread.id != draft.metadata.id),
+                "a draft is not listed in the panel"
+            );
+        });
+        assert!(
+            read_thread(&key_value_store, &draft.metadata.id).is_err(),
+            "nothing is written for a draft"
+        );
+
+        // What the view's `persist` hands the store when the first message is sent.
+        draft.messages.push(Message::user("Fix the parser"));
+        draft.refresh_metadata();
+        store.update(cx, |store, cx| store.save_thread(draft.clone(), cx));
+        cx.executor().run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert!(
+                store
+                    .threads()
+                    .iter()
+                    .any(|thread| thread.id == draft.metadata.id),
+                "a sent thread is listed"
+            );
+        });
+        let stored = read_thread(&key_value_store, &draft.metadata.id)
+            .expect("a thread is written once its first message is sent");
+        assert_eq!(stored.metadata.title, "Fix the parser");
+        assert_eq!(stored.messages.len(), 1);
     }
 }

@@ -44,6 +44,8 @@ smol.workspace = true
 task.workspace = true
 terminal.workspace = true
 theme.workspace = true
+time.workspace = true
+time_format.workspace = true
 toml.workspace = true
 url.workspace = true
 ui.workspace = true
@@ -53,6 +55,7 @@ workspace.workspace = true
 wu_actions.workspace = true
 
 [dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }

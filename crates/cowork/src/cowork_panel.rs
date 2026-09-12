@@ -3,7 +3,6 @@ use crate::{
     catalog::ModelRef,
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
-    new_thread_dialog::NewThreadDialog,
     thread::{CatalogState, CoworkStore, CoworkStoreEvent, ThreadId, ThreadMetadata, format_age},
     thread_view::CoworkThreadView,
 };
@@ -168,16 +167,11 @@ impl CoworkPanel {
         self.start_new_thread(window, cx);
     }
 
-    /// Starting a thread opens the dialog that decides what it is for.
-    ///
-    /// Model and folder are both awkward to change after the fact — one is kept for the whole
-    /// conversation, the other is where every command runs — so they are asked together, before
-    /// anything exists. Cancelling starts nothing.
     /// Opens a thread that already has something to work on, and starts it.
     ///
-    /// No dialog: the caller is handing over a specific piece of work, and asking which model and
-    /// which folder at that moment would be asking a question whose answer is already the obvious
-    /// one — the model last used, and the project this window has open.
+    /// Stored at once rather than drafted: the caller is handing over a specific piece of work,
+    /// which is sent as the first message straight away, on the obvious model and folder — the
+    /// model last used, and the project this window has open.
     pub fn start_thread_with(
         &mut self,
         prompt: String,
@@ -192,48 +186,54 @@ impl CoworkPanel {
         self.open_thread_in_with(model, folder, Some(prompt), window, cx);
     }
 
+    /// Opens a composer ready to type into, as Claude Code's home screen does.
+    ///
+    /// The thread behind it is a draft, stored only once its first message is sent, so a "+"
+    /// pressed and closed again leaves nothing in the list. It starts on the model last used and
+    /// the project's first folder, and both stay changeable from the thread's header. An open
+    /// draft is brought forward instead of a second one being opened beside it.
     pub fn start_new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(suggested) = self.store.read(cx).model_for_new_thread() else {
-            self.report_no_model(cx);
-            return;
-        };
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+
+        let existing = workspace
+            .read(cx)
+            .items_of_type::<CoworkThreadView>(cx)
+            .find(|view| view.read(cx).is_draft());
+        if let Some(existing) = existing {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_item(&existing, true, true, window, cx);
+            });
+            existing.update(cx, |view, cx| view.focus_composer(window, cx));
+            return;
+        }
 
         // A key may have been added since the catalog was last read, and a model whose provider is
         // not connected is never offered.
         self.store
             .update(cx, |store, cx| store.refresh_connections(cx));
+        let Some(model) = self.store.read(cx).model_for_new_thread() else {
+            self.report_no_model(cx);
+            return;
+        };
+        let folder = self.project_folders(cx).into_iter().next();
+        let thread = self
+            .store
+            .update(cx, |store, _| store.draft_thread(model, folder));
+        let store = self.store.clone();
+        let workspace_handle = self.workspace.clone();
 
-        let this = cx.entity().downgrade();
-        let project = self.project.clone();
         workspace.update(cx, |workspace, cx| {
-            workspace.toggle_modal(window, cx, move |window, cx| {
-                NewThreadDialog::new(
-                    suggested,
-                    project,
-                    Arc::new(move |model, folder, window, cx| {
-                        this.update(cx, |this, cx| {
-                            this.open_thread_in(model, folder, window, cx);
-                        })
-                        .log_err();
-                    }),
-                    window,
-                    cx,
-                )
+            let project = workspace.project().clone();
+            let fs = workspace.app_state().fs.clone();
+            let view = cx.new(|cx| {
+                CoworkThreadView::draft(thread, store, workspace_handle, project, fs, window, cx)
             });
+            workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            // After the item is added, which focuses the item itself rather than its composer.
+            view.update(cx, |view, cx| view.focus_composer(window, cx));
         });
-    }
-
-    fn open_thread_in(
-        &mut self,
-        model: ModelRef,
-        project: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_thread_in_with(model, project, None, window, cx);
     }
 
     /// Opens a thread, optionally with its first message already written and sent.

@@ -91,7 +91,7 @@ pub struct Attachment {
 
 /// What an attachment is, which decides how each wire format carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AttachmentKind {
+pub(crate) enum AttachmentKind {
     Image,
     Pdf,
     Text,
@@ -100,7 +100,7 @@ enum AttachmentKind {
 impl Attachment {
     /// Anything that is neither a PDF nor text is a picture, because pictures were the only
     /// attachments before files existed: a thread stored then is sent exactly as it was.
-    fn kind(&self) -> AttachmentKind {
+    pub(crate) fn kind(&self) -> AttachmentKind {
         if self.media_type == crate::document::PDF_MEDIA_TYPE {
             AttachmentKind::Pdf
         } else if self.media_type.starts_with("text/") {

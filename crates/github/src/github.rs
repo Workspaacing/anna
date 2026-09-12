@@ -16,7 +16,8 @@ mod repositories;
 mod worklist;
 
 pub use api::{Client, Failure, Identity};
-pub use github_window::GitHubWindow;
+pub use github_window::{GitHubWindow, describe as describe_failure};
+pub use worklist::{Item, Kind, Waiting, WaitingReason, fetch_waiting_in_repository};
 
 use anyhow::Result;
 use gpui::{App, Task};

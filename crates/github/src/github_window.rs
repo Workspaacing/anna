@@ -442,7 +442,7 @@ impl GitHubWindow {
 }
 
 /// Turns a failure into the one sentence worth putting on the screen.
-fn describe(error: &anyhow::Error) -> SharedString {
+pub fn describe(error: &anyhow::Error) -> SharedString {
     match error.downcast_ref::<Failure>() {
         Some(Failure::Unauthorized) => {
             "GitHub rejected this token. It may have been revoked or have expired.".into()

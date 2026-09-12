@@ -23,20 +23,19 @@ mod github_tools;
 mod gitleaks;
 mod outdated;
 mod model_selector;
-mod new_thread_dialog;
 mod permission;
 mod provider;
 mod thread;
 mod thread_view;
 mod tool;
 mod verify;
+pub mod waiting;
 
 pub use audit::{Advisory, Package};
 pub use catalog::{Catalog, CatalogEntry, ModelRef, POPULAR_PROVIDERS, Support};
 pub use cowork_panel::CoworkPanel;
 pub use cowork_settings::{CoworkSettings, VerificationSettings};
 pub use thread::{ApiKeyMode, CatalogState, CoworkStore, ModelRow, ProviderRow};
-pub use new_thread_dialog::NewThreadDialog;
 pub use permission::{Decision, PermissionBroker, PermissionRequest};
 pub use thread_view::CoworkThreadView;
 pub use tool::{Tool, ToolKind, ToolOutput, ToolRegistry};
@@ -76,14 +75,22 @@ pub fn init(cx: &mut App) {
                     return;
                 };
                 let prompt = action.prompt.clone();
-                panel.update(cx, |panel, cx| panel.start_thread_with(prompt, window, cx));
+                // Deferred for the same reason as `NewThread` below: this handler runs inside the
+                // workspace's update, and opening the thread updates the workspace again.
+                window.defer(cx, move |window, cx| {
+                    panel.update(cx, |panel, cx| panel.start_thread_with(prompt, window, cx));
+                });
             },
         );
         workspace.register_action(|workspace, _: &NewThread, window, cx| {
             let Some(panel) = workspace.panel::<CoworkPanel>(cx) else {
                 return;
             };
-            panel.update(cx, |panel, cx| panel.start_new_thread(window, cx));
+            // Deferred until the workspace is no longer being updated: an action handler runs
+            // inside that update, and opening a draft reads and updates the workspace again.
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.start_new_thread(window, cx));
+            });
         });
     })
     .detach();

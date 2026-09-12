@@ -5,8 +5,8 @@ use crate::{
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
     provider::{
-        self, Attachment, CompletionEvent, CompletionRequest, Message, Role, StopReason, ToolCall,
-        ToolResult,
+        self, Attachment, AttachmentKind, CompletionEvent, CompletionRequest, Message, Role,
+        StopReason, ToolCall, ToolResult,
     },
     permission::{Decision, PermissionBroker, PermissionEvent},
     thread::{CoworkStore, Thread, ThreadId},
@@ -22,9 +22,13 @@ use gpui::{
 };
 use language::LanguageRegistry;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
-use project::Project;
+use project::{
+    Project,
+    git_store::{GitStoreEvent, RepositoryEvent},
+};
 use settings::Settings as _;
-use std::sync::Arc;
+use std::{path::Path, rc::Rc, sync::Arc};
+use crate::waiting::{OpenPrompt, WaitingOnYou};
 use gpui::StyledText;
 use settings::AgentPermission;
 use ui::{
@@ -94,6 +98,17 @@ pub struct CoworkThreadView {
     error: Option<SharedString>,
     completion: Option<Task<()>>,
     _permissions: gpui::Subscription,
+    /// Repaints the branch chip when a repository changes branch. The branch itself is read from
+    /// the git store's state, never by running git.
+    _git_store: gpui::Subscription,
+    /// Not stored yet. See [`CoworkStore::draft_thread`].
+    is_draft: bool,
+    /// What is waiting on the user in this project's repository, for the home of a thread with no
+    /// messages yet. `None` for a thread opened with a history: it never shows the home, and asking
+    /// GitHub on its behalf would be a request nobody sees the answer to.
+    waiting: Option<Entity<WaitingOnYou>>,
+    /// Redraws the home when the answer arrives, which is always after the first frame.
+    _waiting: Option<gpui::Subscription>,
 }
 
 /// The side of a picture's tile above the composer: large enough to recognise the picture, small
@@ -197,6 +212,29 @@ impl CoworkThreadView {
         let permissions_subscription =
             cx.subscribe(&permissions, |_, _, _: &PermissionEvent, cx| cx.notify());
 
+        // Only the events that can change the branch. Statuses update with every file the agent
+        // writes, and repainting the whole thread for each of those would be for nothing.
+        let git_store = project.read(cx).git_store().clone();
+        let git_store_subscription =
+            cx.subscribe(&git_store, |_, _, event: &GitStoreEvent, cx| match event {
+                GitStoreEvent::RepositoryUpdated(
+                    _,
+                    RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged,
+                    _,
+                )
+                | GitStoreEvent::RepositoryAdded
+                | GitStoreEvent::RepositoryRemoved(_) => cx.notify(),
+                _ => {}
+            });
+
+        let (waiting, waiting_subscription) = if thread.messages.is_empty() {
+            let waiting = cx.new(|cx| WaitingOnYou::new(project.clone(), cx));
+            let subscription = cx.observe(&waiting, |_, _, cx| cx.notify());
+            (Some(waiting), Some(subscription))
+        } else {
+            (None, None)
+        };
+
         let mut view = Self {
             thread,
             messages,
@@ -218,6 +256,10 @@ impl CoworkThreadView {
             error: None,
             completion: None,
             _permissions: permissions_subscription,
+            _git_store: git_store_subscription,
+            is_draft: false,
+            waiting,
+            _waiting: waiting_subscription,
         };
 
         // Once the view exists, because the warm-up stores its handle back onto it.
@@ -225,8 +267,31 @@ impl CoworkThreadView {
         view
     }
 
+    /// A view over a thread the store has not saved, which saves it when its first message is sent.
+    pub fn draft(
+        thread: Thread,
+        store: Entity<CoworkStore>,
+        workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
+        fs: Arc<dyn fs::Fs>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(thread, store, workspace, project, fs, window, cx);
+        view.is_draft = true;
+        view
+    }
+
     pub fn thread_id(&self) -> &ThreadId {
         &self.thread.metadata.id
+    }
+
+    pub fn is_draft(&self) -> bool {
+        self.is_draft
+    }
+
+    pub fn focus_composer(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.input.focus_handle(cx), cx);
     }
 
     fn is_streaming(&self) -> bool {
@@ -245,6 +310,15 @@ impl CoworkThreadView {
             return;
         }
 
+        // Checked against the model the thread has now, not the one it had when the files were
+        // picked: the model can be changed afterwards, and a rewind, fork or prefill brings back
+        // attachments chosen for another one. The provider would reject the whole request.
+        if let Some(refusal) = self.refuse_unreadable_attachments(cx) {
+            self.error = Some(refusal.into());
+            cx.notify();
+            return;
+        }
+
         self.input.update(cx, |editor, cx| editor.clear(window, cx));
         self.error = None;
         let attachments = self.pending_attachments.take();
@@ -256,6 +330,13 @@ impl CoworkThreadView {
             if let Some(shown) = self.messages.last_mut() {
                 shown.attachments = attachments;
             }
+        }
+        // Written now rather than when the reply ends, so the conversation reaches the panel the
+        // moment it starts and survives a window closed before the reply lands.
+        if self.is_draft {
+            self.is_draft = false;
+            self.persist(cx);
+            cx.emit(CoworkThreadEvent::TitleChanged);
         }
         self.start_completion(cx);
         cx.notify();
@@ -838,50 +919,6 @@ impl CoworkThreadView {
             .unwrap_or_else(|| SharedString::new_static("No folder"))
     }
 
-    /// Sets which of the project's folders this thread works in.
-    ///
-    /// With several folders it asks. With one it simply adopts it, which is not a no-op: a thread
-    /// created before the folder was recorded — or in another window — shows "No folder" and needs
-    /// exactly this to repair it. Doing nothing at all was the bug: the button offered an action
-    /// and then declined to perform it.
-    fn choose_working_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let folders = project_folders(&self.project, cx);
-
-        match folders.len() {
-            0 => {}
-            1 => {
-                let (_, path) = &folders[0];
-                self.set_working_folder(path.clone(), cx);
-            }
-            _ => {
-                let labels = folders
-                    .iter()
-                    .map(|(name, _)| name.as_str())
-                    .collect::<Vec<_>>();
-                let answer = window.prompt(
-                    gpui::PromptLevel::Info,
-                    "Which folder should this thread work in?",
-                    Some("Commands run here, and paths the agent gives are resolved from here."),
-                    &labels,
-                    cx,
-                );
-
-                cx.spawn(async move |this, cx| {
-                    let Ok(chosen) = answer.await else {
-                        return;
-                    };
-                    let Some((_, path)) = folders.get(chosen) else {
-                        return;
-                    };
-                    let path = path.clone();
-                    this.update(cx, |this, cx| this.set_working_folder(path, cx))
-                        .log_err();
-                })
-                .detach();
-            }
-        }
-    }
-
     fn set_working_folder(&mut self, folder: String, cx: &mut Context<Self>) {
         if self.thread.metadata.project.as_deref() == Some(folder.as_str()) {
             return;
@@ -891,17 +928,147 @@ impl CoworkThreadView {
         cx.notify();
     }
 
-    /// Whether there is anything for the folder button to do.
+    /// Adds a folder to the project and makes it this thread's.
     ///
-    /// A button that cannot change anything is disabled rather than silently inert, and its
-    /// tooltip says which case it is in.
-    fn can_change_working_folder(&self, cx: &App) -> bool {
-        let folders = project_folders(&self.project, cx);
-        match folders.len() {
-            0 => false,
-            1 => self.thread.metadata.project.as_deref() != Some(folders[0].1.as_str()),
-            _ => true,
-        }
+    /// Adding it to the project is the point: a folder the agent is told to work in but which the
+    /// project cannot see would leave every path it tries unresolvable. Once it is a worktree,
+    /// everything inside is readable, searchable and editable like the rest of the project.
+    fn add_folder(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add to project".into()),
+        });
+
+        let project = self.project.clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+
+            let added = project.update(cx, |project, cx| project.create_worktree(&path, true, cx));
+            if let Err(error) = added.await {
+                this.update(cx, |this, cx| {
+                    this.error = Some(
+                        format!(
+                            "{} could not be added to the project: {error:#}",
+                            path.display()
+                        )
+                        .into(),
+                    );
+                    cx.notify();
+                })
+                .log_err();
+                return;
+            }
+
+            this.update(cx, |this, cx| {
+                // The project's own spelling of the path, because that is what the folder menu
+                // compares the thread's folder against.
+                let folder = project_folders(&this.project, cx)
+                    .into_iter()
+                    .map(|(_, candidate)| candidate)
+                    .find(|candidate| Path::new(candidate) == path)
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                this.set_working_folder(folder, cx);
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    /// Where the agent runs, and the way to change it.
+    ///
+    /// A menu rather than a prompt so that adding a folder sits beside choosing one, and so that a
+    /// thread showing "No folder" — created before the folder was recorded, or in another window —
+    /// can always be pointed at one.
+    fn render_folder_menu(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let view = cx.weak_entity();
+        let project = self.project.clone();
+        let current = self.thread.metadata.project.clone();
+
+        PopoverMenu::new("cowork-folder")
+            .trigger(
+                Button::new("cowork-folder-trigger", self.working_folder_label())
+                    .start_icon(Icon::new(IconName::Folder).size(IconSize::Small))
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text("Choose or add the folder this thread works in")),
+            )
+            .menu(move |window, cx| {
+                // Read when the menu opens, so a folder added to the project since is offered.
+                let folders = project_folders(&project, cx);
+                let view = view.clone();
+                let current = current.clone();
+                Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                    let has_folders = !folders.is_empty();
+                    for (name, path) in folders {
+                        let selected = current.as_deref() == Some(path.as_str());
+                        let view = view.clone();
+                        menu = menu.toggleable_entry(
+                            name,
+                            selected,
+                            ui::IconPosition::Start,
+                            None,
+                            move |_window, cx| {
+                                let path = path.clone();
+                                view.update(cx, |view, cx| view.set_working_folder(path, cx))
+                                    .log_err();
+                            },
+                        );
+                    }
+                    if has_folders {
+                        menu = menu.separator();
+                    }
+                    menu.item(
+                        ContextMenuEntry::new("Add folder…")
+                            .icon(IconName::Plus)
+                            .handler(move |_window, cx| {
+                                view.update(cx, |view, cx| view.add_folder(cx)).log_err();
+                            }),
+                    )
+                }))
+            })
+            .anchor(gpui::Anchor::TopLeft)
+    }
+
+    /// The branch checked out where this thread works, as a label: nothing here changes it.
+    fn render_branch_chip(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
+        let branch = self.branch_name(cx)?;
+
+        Some(
+            h_flex()
+                .id("cowork-branch")
+                .gap_1()
+                .px_1()
+                .tooltip(Tooltip::text("The git branch checked out in this thread's folder"))
+                .child(
+                    Icon::new(IconName::GitBranch)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(Label::new(branch).size(LabelSize::Small).color(Color::Muted)),
+        )
+    }
+
+    /// The branch of the repository this thread's folder is in, from the git store's own state.
+    ///
+    /// The innermost repository is the one that counts: a folder inside a nested checkout is on
+    /// that checkout's branch, and the project's active repository may be another folder entirely.
+    fn branch_name(&self, cx: &App) -> Option<SharedString> {
+        let folder = Path::new(self.thread.metadata.project.as_deref()?);
+        let repositories = self.project.read(cx).repositories(cx);
+        let repository = containing_repository(
+            folder,
+            repositories
+                .values()
+                .map(|repository| (&*repository.read(cx).work_directory_abs_path, repository)),
+        )?;
+        let branch = repository.read(cx).branch.as_ref()?;
+        Some(SharedString::from(branch.name().to_owned()))
     }
 
     fn open_model_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1435,6 +1602,11 @@ impl CoworkThreadView {
     }
 
     fn persist(&mut self, cx: &mut Context<Self>) {
+        // A draft lives only in this view until `submit` sends its first message, so changing its
+        // model or folder must not store it early.
+        if self.is_draft {
+            return;
+        }
         self.thread.refresh_metadata();
         let thread = self.thread.clone();
         self.store
@@ -1464,21 +1636,8 @@ impl CoworkThreadView {
                     )
                     // Where the agent runs. Always visible, because "which folder is this editing"
                     // is not something the user should have to infer from the output.
-                    .child({
-                        let changeable = self.can_change_working_folder(cx);
-                        Button::new("cowork-folder", self.working_folder_label())
-                            .start_icon(Icon::new(IconName::Folder).size(IconSize::Small))
-                            .label_size(LabelSize::Small)
-                            .disabled(!changeable)
-                            .tooltip(Tooltip::text(if changeable {
-                                "Change the folder this thread works in"
-                            } else {
-                                "The only folder open in this project"
-                            }))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.choose_working_folder(window, cx)
-                            }))
-                    }),
+                    .child(self.render_folder_menu(cx))
+                    .children(self.render_branch_chip(cx)),
             )
             .child(
                 h_flex()
@@ -1761,21 +1920,57 @@ impl CoworkThreadView {
             .anchor(gpui::Anchor::BottomRight)
     }
 
-    fn render_empty_state(&self) -> impl IntoElement {
+    /// The home a new thread opens on. Quiet on purpose: the composer below is the thing to use.
+    fn render_empty_state(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         v_flex()
             .size_full()
             .items_center()
             .justify_center()
             .gap_1()
-            .child(Icon::new(IconName::Sparkle).color(Color::Muted))
-            .child(Label::new("Start a conversation").color(Color::Muted))
+            .child(Label::new("What should we work on?").size(LabelSize::Large))
             .child(
                 Label::new(
-                    "Cowork reads its model list from models.dev and provider keys from your environment.",
+                    self.thread
+                        .metadata
+                        .project
+                        .clone()
+                        .unwrap_or_else(|| "No folder open".to_owned()),
                 )
                 .size(LabelSize::Small)
                 .color(Color::Muted),
             )
+            // The work that needs the user is the likeliest answer to the question above. A row
+            // sends its hand-off prompt in this thread rather than opening another, which would
+            // leave this home standing empty beside the thread that took its place.
+            .children(self.waiting.as_ref().and_then(|waiting| {
+                let view = cx.weak_entity();
+                let on_open: OpenPrompt = Rc::new(move |prompt, window, cx| {
+                    view.update(cx, |view, cx| view.send_now(prompt, window, cx))
+                        .log_err();
+                });
+                waiting
+                    .read(cx)
+                    .render(on_open)
+                    .map(|section| div().w_full().max_w(rems(40.)).pt_4().child(section))
+            }))
+    }
+
+    /// Why the pending attachments cannot go to this thread's model, when any of them cannot.
+    ///
+    /// A model missing from the catalog is not judged here: `build_request` reports that it is
+    /// missing, which is the real problem, and "cannot read images" would only hide it.
+    fn refuse_unreadable_attachments(&self, cx: &App) -> Option<String> {
+        let model_ref = &self.thread.metadata.model;
+        let store = self.store.read(cx);
+        let (_, model) = store.catalog().model(model_ref)?;
+        let unreadable = unreadable_attachments(
+            self.pending_attachments
+                .iter()
+                .map(|pending| &pending.attachment),
+            model.accepts_images(),
+            model.accepts_pdf(),
+        );
+        describe_unreadable(&model_ref.model_id, &unreadable)
     }
 
     /// Whether the chosen model can actually look at a picture.
@@ -2621,6 +2816,71 @@ fn compact(tokens: u64) -> String {
     }
 }
 
+/// The candidate whose working directory holds `folder`, the innermost when several do.
+fn containing_repository<'a, T>(
+    folder: &Path,
+    repositories: impl IntoIterator<Item = (&'a Path, T)>,
+) -> Option<T> {
+    repositories
+        .into_iter()
+        // By component rather than by string, so `/work/app` does not claim `/work/application`.
+        .filter(|(work_directory, _)| folder.starts_with(work_directory))
+        .max_by_key(|(work_directory, _)| work_directory.components().count())
+        .map(|(_, repository)| repository)
+}
+
+/// The names of the attachments a model cannot read, by what they are.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UnreadableAttachments {
+    images: Vec<String>,
+    pdfs: Vec<String>,
+}
+
+/// Which attachments a model that reads images, PDFs, both or neither would refuse.
+///
+/// Text files never are: they are sent as ordinary text, which every model reads.
+fn unreadable_attachments<'a>(
+    attachments: impl IntoIterator<Item = &'a Attachment>,
+    accepts_images: bool,
+    accepts_pdf: bool,
+) -> UnreadableAttachments {
+    let mut unreadable = UnreadableAttachments::default();
+    for attachment in attachments {
+        match attachment.kind() {
+            AttachmentKind::Image if !accepts_images => {
+                unreadable.images.push(attachment.name.clone())
+            }
+            AttachmentKind::Pdf if !accepts_pdf => unreadable.pdfs.push(attachment.name.clone()),
+            AttachmentKind::Image | AttachmentKind::Pdf | AttachmentKind::Text => {}
+        }
+    }
+    unreadable
+}
+
+/// The error shown instead of sending: which files, what the model cannot read, and the two ways
+/// out of it.
+fn describe_unreadable(model: &str, unreadable: &UnreadableAttachments) -> Option<String> {
+    let mut sentences = Vec::new();
+    let mut kinds = Vec::new();
+    for (kind, names) in [("images", &unreadable.images), ("PDFs", &unreadable.pdfs)] {
+        if !names.is_empty() {
+            sentences.push(format!("{model} cannot read {kind}: {}.", names.join(", ")));
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
+        return None;
+    }
+
+    let refused = unreadable.images.len() + unreadable.pdfs.len();
+    let pronoun = if refused == 1 { "it" } else { "them" };
+    sentences.push(format!(
+        "Remove {pronoun} or pick a model that reads {}.",
+        kinds.join(" and ")
+    ));
+    Some(sentences.join(" "))
+}
+
 /// The project's open folders, as the name the user knows and the path a command runs in.
 pub fn project_folders(project: &Entity<Project>, cx: &App) -> Vec<(String, String)> {
     project
@@ -3022,7 +3282,7 @@ impl Render for CoworkThreadView {
                     .track_scroll(&self.scroll_handle)
                     .p_4()
                     .gap_3()
-                    .when(is_empty, |this| this.child(self.render_empty_state()))
+                    .when(is_empty, |this| this.child(self.render_empty_state(cx)))
                     .children(messages),
             )
             .children(self.render_status(is_streaming, cx))
@@ -3372,5 +3632,76 @@ mod tests {
             vec!["notes.txt", "second.png"]
         );
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn the_innermost_repository_holding_the_folder_is_the_one_whose_branch_is_shown() {
+        let outer = Path::new(util::path!("/work/monorepo"));
+        let inner = Path::new(util::path!("/work/monorepo/vendor/library"));
+        let sibling = Path::new(util::path!("/work/monorepo-tools"));
+        let repositories = [(outer, "outer"), (inner, "inner"), (sibling, "sibling")];
+
+        assert_eq!(
+            containing_repository(
+                Path::new(util::path!("/work/monorepo/vendor/library/src")),
+                repositories
+            ),
+            Some("inner"),
+            "a nested checkout is on its own branch, not the outer repository's"
+        );
+        assert_eq!(
+            containing_repository(Path::new(util::path!("/work/monorepo/app")), repositories),
+            Some("outer")
+        );
+        assert_eq!(
+            containing_repository(Path::new(util::path!("/work/monorepo-old")), repositories),
+            None,
+            "a shared prefix of characters is not a parent folder"
+        );
+        assert_eq!(
+            containing_repository(Path::new(util::path!("/elsewhere")), repositories),
+            None
+        );
+    }
+
+    #[test]
+    fn a_model_refuses_only_the_kinds_of_attachment_it_cannot_read() {
+        let named = |name: &str, media_type: &str| Attachment {
+            name: name.to_owned(),
+            ..attachment(media_type, "")
+        };
+        let attachments = vec![
+            named("screenshot.png", "image/png"),
+            named("report.pdf", crate::document::PDF_MEDIA_TYPE),
+            named("notes.txt", "text/plain"),
+        ];
+
+        let reads_text_only = unreadable_attachments(&attachments, false, false);
+        assert_eq!(
+            reads_text_only,
+            UnreadableAttachments {
+                images: vec!["screenshot.png".to_owned()],
+                pdfs: vec!["report.pdf".to_owned()],
+            },
+            "text files are always readable"
+        );
+        assert_eq!(
+            describe_unreadable("gpt-x", &reads_text_only).as_deref(),
+            Some(
+                "gpt-x cannot read images: screenshot.png. gpt-x cannot read PDFs: report.pdf. \
+                 Remove them or pick a model that reads images and PDFs."
+            )
+        );
+
+        let sees_pictures = unreadable_attachments(&attachments, true, false);
+        assert!(sees_pictures.images.is_empty());
+        assert_eq!(
+            describe_unreadable("gpt-x", &sees_pictures).as_deref(),
+            Some("gpt-x cannot read PDFs: report.pdf. Remove it or pick a model that reads PDFs.")
+        );
+
+        let reads_everything = unreadable_attachments(&attachments, true, true);
+        assert_eq!(reads_everything, UnreadableAttachments::default());
+        assert_eq!(describe_unreadable("claude", &reads_everything), None);
     }
 }

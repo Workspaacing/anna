@@ -10,8 +10,11 @@
 //! tool that writes to a repository other people can see is a different kind of decision, and it
 //! belongs behind the permission prompt rather than in the same commit as the reading.
 
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result, bail};
-use gpui::{App, AppContext as _, Task};
+use gpui::{App, AppContext as _, Entity, Task};
+use project::Project;
 use serde_json::{Value, json};
 
 use crate::tool::{Tool, ToolContext, ToolKind, ToolOutput};
@@ -28,13 +31,8 @@ const MAX_DIFF_LINES: usize = 1_200;
 ///
 /// Read from the project's own remote, which is what makes these tools feel like part of the
 /// window rather than a generic API: the repository on screen is the repository they answer about.
-fn project_repository(context: &ToolContext, cx: &App) -> Option<String> {
-    let repository = context
-        .project
-        .read(cx)
-        .git_store()
-        .read(cx)
-        .active_repository()?;
+pub(crate) fn project_repository(project: &Entity<Project>, cx: &App) -> Option<String> {
+    let repository = project.read(cx).git_store().read(cx).active_repository()?;
 
     let remote = {
         let repository = repository.read(cx);
@@ -44,8 +42,22 @@ fn project_repository(context: &ToolContext, cx: &App) -> Option<String> {
             .or_else(|| repository.remote_upstream_url.clone())?
     };
 
-    let registry = git::GitHostingProviderRegistry::global(cx);
-    let (_, parsed) = git::parse_git_remote_url(registry, &remote)?;
+    repository_from_remote(git::GitHostingProviderRegistry::global(cx), &remote)
+}
+
+/// `owner/name` for a remote on github.com, and `None` for anywhere else.
+///
+/// The GitHub client only talks to api.github.com. A GitLab or GitHub Enterprise remote would
+/// otherwise be looked up there under a name that belongs to a different server — at best a
+/// confusing "not found", at worst an unrelated repository that happens to share the name.
+fn repository_from_remote(
+    registry: Arc<git::GitHostingProviderRegistry>,
+    remote: &str,
+) -> Option<String> {
+    let (provider, parsed) = git::parse_git_remote_url(registry, remote)?;
+    if provider.base_url().host_str() != Some("github.com") {
+        return None;
+    }
     Some(format!("{}/{}", parsed.owner, parsed.repo))
 }
 
@@ -74,7 +86,7 @@ fn resolve_repository(input: &Value, context: &ToolContext, cx: &App) -> Result<
         return split_repository(named);
     }
 
-    let found = project_repository(context, cx).context(
+    let found = project_repository(&context.project, cx).context(
         "this project has no GitHub remote, so there is no repository to assume — pass `repo` as \
          owner/name",
     )?;
@@ -1257,5 +1269,56 @@ mod tests {
         });
 
         assert!(!render_pull_request("a/b", &pr, None).contains("Checks:"));
+    }
+
+    fn registry_with(
+        providers: Vec<Arc<dyn git::GitHostingProvider + Send + Sync + 'static>>,
+    ) -> Arc<git::GitHostingProviderRegistry> {
+        let registry = git::GitHostingProviderRegistry::new();
+        for provider in providers {
+            registry.register_hosting_provider(provider);
+        }
+        Arc::new(registry)
+    }
+
+    fn github_and_gitlab() -> Arc<git::GitHostingProviderRegistry> {
+        registry_with(vec![
+            Arc::new(git_hosting_providers::Github::public_instance()),
+            Arc::new(git_hosting_providers::Gitlab::public_instance()),
+        ])
+    }
+
+    #[test]
+    fn a_github_remote_names_its_repository_however_the_remote_is_spelled() {
+        for remote in [
+            "https://github.com/Workspaacing/wu.git",
+            "https://github.com/Workspaacing/wu",
+            "git@github.com:Workspaacing/wu.git",
+        ] {
+            assert_eq!(
+                repository_from_remote(github_and_gitlab(), remote).as_deref(),
+                Some("Workspaacing/wu"),
+                "{remote}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remote_that_is_not_on_github_dot_com_is_not_taken_for_one() {
+        // The client would look these up on api.github.com under a name from another server.
+        assert_eq!(
+            repository_from_remote(github_and_gitlab(), "https://gitlab.com/Workspaacing/wu.git"),
+            None
+        );
+        assert_eq!(repository_from_remote(github_and_gitlab(), "not a remote"), None);
+
+        let enterprise = registry_with(vec![Arc::new(
+            git_hosting_providers::Github::from_remote_url("https://github.acme.com/team/wu.git")
+                .expect("a self-hosted GitHub"),
+        )]);
+        assert_eq!(
+            repository_from_remote(enterprise, "https://github.acme.com/team/wu.git"),
+            None
+        );
     }
 }
