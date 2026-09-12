@@ -121,6 +121,26 @@ pub struct Model {
     pub cost: Option<Cost>,
     #[serde(default)]
     pub limit: Option<Limit>,
+    /// Overrides for a model that does not speak its provider's protocol.
+    #[serde(default)]
+    pub provider: Option<ModelProvider>,
+}
+
+/// What a single model overrides about how to reach it.
+///
+/// 305 models in the catalog carry one, and 114 of those contradict their provider's row on the
+/// protocol — `agentrouter` is an OpenAI-compatible row serving Claude over Anthropic Messages,
+/// `freemodel` is the reverse. Reading only the provider row sends every one of them in the wrong
+/// format.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ModelProvider {
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub api: Option<String>,
+    /// Which OpenAI request shape: `completions` or `responses`.
+    #[serde(default)]
+    pub shape: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -178,9 +198,40 @@ impl Provider {
     /// models.dev names the AI SDK package that drives each provider. Anthropic's package speaks
     /// the Messages API; every other package in the catalog is either OpenAI's own or an
     /// OpenAI-compatible shim, so that is the fallback.
+    /// The protocol to speak to one of this provider's models.
+    ///
+    /// The model's own `npm` wins where it has one, because a provider row describes the common
+    /// case and the override describes the exception.
+    pub fn wire_api_for(&self, model: &Model) -> WireApi {
+        match model.provider.as_ref().and_then(|over| over.npm.as_deref()) {
+            Some(npm) => Self::wire_api_of(Some(npm)),
+            None => self.wire_api(),
+        }
+    }
+
+    /// Where to send a request for one of this provider's models.
+    pub fn api_base_for(&self, model: &Model) -> Option<String> {
+        model
+            .provider
+            .as_ref()
+            .and_then(|over| over.api.clone())
+            .or_else(|| self.api_base())
+    }
+
     pub fn wire_api(&self) -> WireApi {
-        match self.npm.as_deref() {
+        Self::wire_api_of(self.npm.as_deref())
+    }
+
+    fn wire_api_of(npm: Option<&str>) -> WireApi {
+        match npm {
+            // The substring rather than the exact name, because the protocol can live in a
+            // subpath: `@ai-sdk/google-vertex/anthropic` is Claude on Vertex and speaks Messages,
+            // while `@ai-sdk/google-vertex` is Gemini. Normalising to the package root would route
+            // the first one through the wrong format entirely.
             Some(npm) if npm.contains("anthropic") => WireApi::Anthropic,
+            // Named after neither, and speaks Messages at a dedicated `/anthropic/v1` base. The
+            // npm string is a good heuristic, not a contract, and this is where it breaks.
+            Some("@ai-sdk/minimax") => WireApi::Anthropic,
             Some("@ai-sdk/google") => WireApi::Google,
             _ => WireApi::OpenAiCompatible,
         }
@@ -239,6 +290,18 @@ impl Model {
             .unwrap_or_else(|| key.to_owned())
     }
 
+    /// Whether this model needs a request shape Cowork does not implement.
+    ///
+    /// `responses` is OpenAI's Responses API, a different request and response format from Chat
+    /// Completions rather than a variation on it. 32 models ask for it. Hiding them is honest;
+    /// offering them and sending Chat Completions would only fail at the first message.
+    pub fn uses_unsupported_shape(&self) -> bool {
+        self.provider
+            .as_ref()
+            .and_then(|over| over.shape.as_deref())
+            .is_some_and(|shape| !shape.eq_ignore_ascii_case("completions"))
+    }
+
     pub fn is_deprecated(&self) -> bool {
         self.status
             .as_deref()
@@ -263,11 +326,16 @@ impl Catalog {
     pub fn entries(&self, is_connected: impl Fn(&str) -> bool) -> Vec<CatalogEntry> {
         let mut entries = Vec::new();
         for (provider_key, provider) in &self.providers {
-            if !is_connected(provider_key) || provider.support() == Support::Unsupported {
+            if !is_connected(provider_key) {
                 continue;
             }
+            // A provider with no endpoint of its own can still serve models that carry one.
+            let provider_reachable = provider.support() == Support::Supported;
             for (model_key, model) in &provider.models {
-                if model.is_deprecated() {
+                if model.is_deprecated() || model.uses_unsupported_shape() {
+                    continue;
+                }
+                if !provider_reachable && provider.api_base_for(model).is_none() {
                     continue;
                 }
                 entries.push(CatalogEntry {
@@ -357,6 +425,80 @@ pub const CATALOG_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_with_override(json: &str) -> Model {
+        serde_json::from_str(json).expect("the fixture should parse")
+    }
+
+    fn provider_row(npm: &str, api: Option<&str>) -> Provider {
+        let api = api
+            .map(|api| format!(r#","api":"{api}""#))
+            .unwrap_or_default();
+        serde_json::from_str(&format!(r#"{{"npm":"{npm}"{api}}}"#)).expect("fixture")
+    }
+
+    #[test]
+    fn a_model_may_speak_a_different_protocol_than_its_provider() {
+        // `agentrouter` is an OpenAI-compatible row that serves Claude over Anthropic Messages.
+        // Reading only the row sends 114 models in the catalog in the wrong format.
+        let row = provider_row("@ai-sdk/openai-compatible", Some("https://example.com/v1"));
+        let claude = model_with_override(r#"{"provider":{"npm":"@ai-sdk/anthropic"}}"#);
+
+        assert_eq!(row.wire_api(), WireApi::OpenAiCompatible);
+        assert_eq!(row.wire_api_for(&claude), WireApi::Anthropic);
+    }
+
+    #[test]
+    fn a_model_without_an_override_follows_its_provider() {
+        let row = provider_row("@ai-sdk/anthropic", Some("https://example.com/v1"));
+
+        assert_eq!(row.wire_api_for(&Model::default()), WireApi::Anthropic);
+    }
+
+    #[test]
+    fn a_model_may_live_at_its_own_endpoint() {
+        let row = provider_row("@ai-sdk/openai-compatible", Some("https://row.example/v1"));
+        let elsewhere = model_with_override(r#"{"provider":{"api":"https://model.example/v1"}}"#);
+
+        assert_eq!(
+            row.api_base_for(&elsewhere).as_deref(),
+            Some("https://model.example/v1")
+        );
+        assert_eq!(
+            row.api_base_for(&Model::default()).as_deref(),
+            Some("https://row.example/v1")
+        );
+    }
+
+    #[test]
+    fn a_model_needing_the_responses_api_is_not_offered() {
+        // Chat Completions is not a close-enough approximation; sending it would fail on the first
+        // message, which is worse than the model not appearing.
+        let responses = model_with_override(r#"{"provider":{"shape":"responses"}}"#);
+        let completions = model_with_override(r#"{"provider":{"shape":"completions"}}"#);
+
+        assert!(responses.uses_unsupported_shape());
+        assert!(!completions.uses_unsupported_shape());
+        assert!(!Model::default().uses_unsupported_shape());
+    }
+
+    #[test]
+    fn minimax_speaks_anthropic_despite_its_name() {
+        assert_eq!(
+            provider_row("@ai-sdk/minimax", Some("https://api.minimax.io/anthropic/v1")).wire_api(),
+            WireApi::Anthropic
+        );
+    }
+
+    #[test]
+    fn the_protocol_can_live_in_a_package_subpath() {
+        // `@ai-sdk/google-vertex/anthropic` is Claude on Vertex. Normalising to the package root
+        // would route it through Gemini's format.
+        assert_eq!(
+            provider_row("@ai-sdk/google-vertex/anthropic", Some("https://v/v1")).wire_api(),
+            WireApi::Anthropic
+        );
+    }
 
     const SAMPLE: &str = r#"{
         "anthropic": {

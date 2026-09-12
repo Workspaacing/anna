@@ -1,4 +1,4 @@
-use crate::catalog::{Provider, WireApi};
+use crate::catalog::{Model, Provider, WireApi};
 use anyhow::{Context as _, Result, anyhow, bail};
 use collections::HashMap;
 use futures::{
@@ -99,6 +99,8 @@ pub struct ToolDefinition {
 pub struct CompletionRequest {
     pub provider_id: String,
     pub provider: Provider,
+    /// The catalog entry for this model, which may override the provider's protocol or endpoint.
+    pub model: Model,
     pub model_id: String,
     pub api_key: String,
     pub system: Option<String>,
@@ -149,9 +151,9 @@ pub async fn stream_completion(
 
     let api_base = request
         .provider
-        .api_base()
-        .ok_or_else(|| anyhow!("no API endpoint is known for this provider"))?;
-    let wire_api = request.provider.wire_api();
+        .api_base_for(&request.model)
+        .ok_or_else(|| anyhow!("no API endpoint is known for this model"))?;
+    let wire_api = request.provider.wire_api_for(&request.model);
 
     let (url, body, http_request) = match wire_api {
         WireApi::Anthropic => {
@@ -216,6 +218,90 @@ pub async fn stream_completion(
     }
 
     Ok(decode_sse(response.into_body(), wire_api).boxed())
+}
+
+/// Asks a provider which models it actually serves right now.
+///
+/// The models.dev catalog is a community-maintained snapshot and drifts from reality: OpenCode Zen
+/// lists 102 models where the endpoint serves 70, and of its 31 zero-cost entries only 8 exist. A
+/// model offered in the picker that answers 401 is worse than one that was never offered.
+///
+/// `GET {base}/models` is the OpenAI convention and is what every OpenAI-compatible provider
+/// implements. Anthropic and Google serve the same path with the same envelope, so one request
+/// covers all three wire formats. The key is sent when there is one; several providers answer
+/// without it.
+pub async fn list_models(
+    http: Arc<dyn HttpClient>,
+    provider_id: &str,
+    provider: &Provider,
+    api_key: Option<&str>,
+) -> Result<Vec<String>> {
+    let api_base = provider
+        .api_base()
+        .ok_or_else(|| anyhow!("no API endpoint is known for this provider"))?;
+    let url = endpoint(&api_base, "models");
+
+    let mut request = Request::get(&url).header("accept", "application/json");
+    if let Some(api_key) = api_key {
+        request = match provider.wire_api() {
+            WireApi::Anthropic => request
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01"),
+            WireApi::Google => request.header("x-goog-api-key", api_key),
+            WireApi::OpenAiCompatible => request.header("authorization", format!("Bearer {api_key}")),
+        };
+    }
+
+    let request = request
+        .body(AsyncBody::empty())
+        .with_context(|| format!("building the model list request for {url}"))?;
+
+    let mut response = http
+        .send(request)
+        .await
+        .with_context(|| format!("asking {provider_id} for its model list"))?;
+
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut body)
+        .await
+        .context("reading the model list")?;
+
+    let status = response.status();
+    anyhow::ensure!(
+        status.is_success(),
+        "{provider_id} returned {status}: {}",
+        describe_error(&body)
+    );
+
+    let payload: Value = serde_json::from_slice(&body).context("parsing the model list")?;
+    Ok(model_ids(&payload))
+}
+
+/// Reads ids out of whichever envelope the provider used.
+///
+/// OpenAI and Anthropic both answer `{"data": [{"id": ...}]}`; Google answers
+/// `{"models": [{"name": "models/gemini-..."}]}`. Anything unrecognised yields nothing, which the
+/// caller treats as "no opinion" rather than "no models".
+fn model_ids(payload: &Value) -> Vec<String> {
+    if let Some(entries) = payload.get("data").and_then(Value::as_array) {
+        return entries
+            .iter()
+            .filter_map(|entry| entry.get("id")?.as_str())
+            .map(str::to_owned)
+            .collect();
+    }
+
+    if let Some(entries) = payload.get("models").and_then(Value::as_array) {
+        return entries
+            .iter()
+            .filter_map(|entry| entry.get("name").or_else(|| entry.get("id"))?.as_str())
+            .map(|name| name.trim_start_matches("models/").to_owned())
+            .collect();
+    }
+
+    Vec::new()
 }
 
 /// Providers report failures in several shapes; pull out the human-readable message when one of the
@@ -768,6 +854,7 @@ mod tests {
         CompletionRequest {
             provider_id: "p".into(),
             provider: serde_json::from_str(&format!(r#"{{"npm":"{npm}"}}"#)).unwrap(),
+            model: Model::default(),
             model_id: "m".into(),
             api_key: "k".into(),
             system: None,
@@ -1000,6 +1087,7 @@ mod tests {
         let request = CompletionRequest {
             provider_id: "google".into(),
             provider: serde_json::from_str(r#"{"npm":"@ai-sdk/google"}"#).unwrap(),
+            model: Model::default(),
             model_id: "gemini".into(),
             api_key: "k".into(),
             system: Some("be brief".into()),
@@ -1106,6 +1194,7 @@ mod tests {
         let request = CompletionRequest {
             provider_id: "test".into(),
             provider: serde_json::from_str(r#"{"api":"https://x.test"}"#).unwrap(),
+            model: Model::default(),
             model_id: "m".into(),
             api_key: "k".into(),
             system: None,

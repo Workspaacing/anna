@@ -549,6 +549,7 @@ impl CoworkThreadView {
         Ok(CompletionRequest {
             provider_id: model.provider_id.clone(),
             provider: catalog_provider.clone(),
+            model: catalog_model.clone(),
             model_id: model.model_id.clone(),
             api_key,
             system: None,

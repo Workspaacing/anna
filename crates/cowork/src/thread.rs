@@ -1,7 +1,7 @@
 use crate::{
     catalog::{CATALOG_STALE_AFTER, Catalog, CatalogEntry, ModelRef, POPULAR_PROVIDERS, Support},
     cowork_settings::CoworkSettings,
-    provider::{Message, Role},
+    provider::{self, Message, Role},
 };
 use anyhow::{Context as _, Result};
 use db::kvp::KeyValueStore;
@@ -189,6 +189,11 @@ pub struct CoworkStore {
     /// the environment are never copied here.
     stored_keys: HashMap<String, String>,
     disabled_models: HashSet<String>,
+    /// What each connected provider says it actually serves, asked once per session.
+    ///
+    /// Absent means "not asked, or asked and failed", which is treated as no opinion — a provider
+    /// that will not answer must not make its models disappear.
+    live_models: HashMap<String, Arc<HashSet<String>>>,
     /// What a new thread starts on. Remembered rather than configured — see
     /// [`CoworkStore::model_for_new_thread`].
     last_model: Option<ModelRef>,
@@ -260,6 +265,7 @@ impl CoworkStore {
             connected: HashSet::default(),
             stored_keys: HashMap::default(),
             disabled_models: HashSet::default(),
+            live_models: HashMap::default(),
             last_model: None,
             pending_api_key: None,
             provider_list: Arc::from([]),
@@ -290,7 +296,81 @@ impl CoworkStore {
             .entries(|provider_id| self.connected.contains(provider_id))
             .into_iter()
             .filter(|entry| !self.disabled_models.contains(&entry.model_ref.qualified()))
+            .filter(|entry| self.is_live(&entry.model_ref))
             .collect()
+    }
+
+    /// Whether the provider still serves this model.
+    ///
+    /// The catalog is a community snapshot and drifts: OpenCode Zen lists 102 models where its
+    /// endpoint serves 70. Offering one that answers 401 is worse than not offering it. Where the
+    /// provider has not been asked, or would not answer, everything is offered as before.
+    fn is_live(&self, model: &ModelRef) -> bool {
+        match self.live_models.get(&model.provider_id) {
+            Some(live) => live.contains(&model.model_id),
+            None => true,
+        }
+    }
+
+    /// Asks each connected provider what it serves, once per session.
+    ///
+    /// Best effort throughout: a provider that refuses, or answers something unrecognised, simply
+    /// keeps its catalog listing. Nothing here can fail a user action.
+    fn refresh_live_models(&mut self, cx: &mut Context<Self>) {
+        let pending = self
+            .connected
+            .iter()
+            .filter(|provider_id| !self.live_models.contains_key(*provider_id))
+            .filter_map(|provider_id| {
+                let provider = self.catalog.providers.get(provider_id)?;
+                provider.api_base()?;
+                Some((
+                    provider_id.clone(),
+                    provider.clone(),
+                    self.api_key(provider_id),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        if pending.is_empty() {
+            return;
+        }
+
+        let http_client = self.http_client.clone();
+        cx.spawn(async move |this, cx| {
+            for (provider_id, provider, api_key) in pending {
+                let listed = provider::list_models(
+                    http_client.clone(),
+                    &provider_id,
+                    &provider,
+                    api_key.as_deref(),
+                )
+                .await;
+
+                let live = match listed {
+                    Ok(live) if !live.is_empty() => live,
+                    Ok(_) => continue,
+                    Err(error) => {
+                        log::debug!("cowork: {provider_id} did not list its models: {error:#}");
+                        continue;
+                    }
+                };
+
+                if this
+                    .update(cx, |this, cx| {
+                        this.live_models
+                            .insert(provider_id, Arc::new(live.into_iter().collect()));
+                        this.rebuild_rows(cx);
+                        cx.emit(CoworkStoreEvent::CatalogChanged);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The credential to authenticate a request with. A key typed into Cowork wins over the
@@ -500,6 +580,7 @@ impl CoworkStore {
     /// settings window opens, and never called from `render`.
     pub fn refresh_connections(&mut self, cx: &mut Context<Self>) {
         self.rebuild_rows(cx);
+        self.refresh_live_models(cx);
         cx.emit(CoworkStoreEvent::CatalogChanged);
         cx.notify();
     }
