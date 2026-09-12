@@ -38,8 +38,8 @@ pub struct EsLintLspAdapter {
 }
 
 impl EsLintLspAdapter {
-    const CURRENT_VERSION: &'static str = "3.0.24";
-    const CURRENT_VERSION_TAG_NAME: &'static str = "release/3.0.24";
+    const CURRENT_VERSION: &'static str = "3.0.34";
+    const CURRENT_VERSION_TAG_NAME: &'static str = "release/3.0.34";
 
     #[cfg(not(windows))]
     const GITHUB_ASSET_KIND: AssetKind = AssetKind::TarGz;
