@@ -129,13 +129,24 @@ measured on this machine, one `eslint` CLI run costs 3.8–9.0 s against 7–43 
 process. Type-aware linting pays a one-off TypeScript program build that a resident server
 amortises to nothing.
 
-**Do not run two formatters over one language.** They will fight, and the agent will spend a turn
-undoing the previous turn. `"formatter": "auto"` — the default — already resolves this correctly:
-Prettier when the project has it, otherwise the language server, which is Biome where Biome is
-configured.
+### Resolving the overlap
 
-To have the agent's edits lint-fixed as well as formatted, add the fix-all action for whichever
-linter owns that language:
+All three want to touch the same files, so who does what has to be decided rather than left to
+whichever runs last.
+
+**Formatting: one tool per language, chosen by the project.** `"formatter": "auto"` — the default —
+already does this. Prettier where the project has Prettier; otherwise the language server, which is
+Biome where Biome is configured. Nothing had to change.
+
+**Fixing: ESLint by default, Biome by opt-in, and never both.** Wu's defaults turn on
+`source.fixAll.eslint` for JavaScript, TypeScript and TSX, because ESLint with no configuration
+finds nothing and offers no fix — so having it on costs nothing in a project that does not use it.
+
+Biome's equivalent is deliberately *not* a default, and the asymmetry is the whole point: **Biome
+with no `biome.json` still lints, using its own recommended rules.** Enabling `source.fixAll.biome`
+globally would rewrite code in every JavaScript project — turning `let` into `const`, removing
+imports — including the ones that chose ESLint and Prettier and never asked Biome's opinion. In a
+project that does use Biome, add this to its `.wu/settings.json` and drop the ESLint line:
 
 ```jsonc
 {
@@ -145,17 +156,16 @@ linter owns that language:
         "source.fixAll.biome": true,
         "source.organizeImports.biome": true
       }
-    },
-    // Biome formats neither of these, so Prettier keeps them.
-    "Markdown": { "formatter": "prettier" },
-    "YAML": { "formatter": "prettier" }
+    }
   }
 }
 ```
 
-In a project that uses ESLint and Prettier rather than Biome, the equivalent is
-`"source.fixAll.eslint": true` with `"formatter": "prettier"`. Adding both linters' fix-all actions
-to one language is the one combination to avoid.
+Running both linters' fix-all over one language is the one combination to avoid.
+
+**Saving runs all of it.** `format_on_save` defaults to `"on"`, so the same chain applies whether
+the code was written by the agent or by hand. Diagnostics need no setting at all: Biome and ESLint
+are language servers, so they report as you type.
 
 **On the CLI route, which was tried first and abandoned.** Cowork originally shelled out to
 `biome check --write --stdin-file-path`. That mode silently disables `--reporter` entirely: it

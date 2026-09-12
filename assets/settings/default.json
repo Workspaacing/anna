@@ -120,10 +120,10 @@
     // Reading and writing files never asks either way: those changes land in
     // the editor's own buffers, undo history and git gutter.
     "auto_approve": false,
-    // The shell the agent runs commands in. Omitted, it uses `terminal.shell`,
+    // The shell the agent runs commands in. "terminal" follows `terminal.shell`,
     // so a command the agent runs behaves like one you would type yourself.
-    // Set it to a program name, or to {"program": "...", "args": [...]}.
-    // "shell": "system",
+    // Also accepts "system", a program name, or {"program": ..., "args": [...]}.
+    "shell": "terminal",
     // The checks Cowork runs over its own agents' work. Every one of them is
     // built into Wu and none of them consults a model, so leaving them on
     // costs nothing per message.
@@ -1283,7 +1283,7 @@
   //   "modifications_if_available" — same, but falls back to formatting the whole
   //     buffer when range formatting cannot be used
   // Keep in mind, if the autosave with delay is enabled, format_on_save will be ignored
-  "format_on_save": "off",
+  "format_on_save": "on",
   // How to perform a buffer format. This setting can take multiple values:
   //
   // 1. Default. Format files using Wu's Prettier integration (if applicable),
@@ -2035,6 +2035,23 @@
       "prettier": {
         "allowed": true,
       },
+      // Apply ESLint's safe fixes when the file is formatted. Silent in a project
+      // with no ESLint config, which is what makes it safe to have on by default.
+      //
+      // Biome's equivalent is deliberately NOT here. Unlike ESLint, Biome with no
+      // `biome.json` still lints using its own recommended rules, so enabling it
+      // globally would rewrite code in projects that chose ESLint and Prettier and
+      // never asked for Biome's opinions. In a project that does use Biome, add
+      // this to its `.wu/settings.json` and drop the ESLint line -- running both
+      // linters' fix-all over one language is the one combination to avoid:
+      //
+      //   "code_actions_on_format": {
+      //     "source.fixAll.biome": true,
+      //     "source.organizeImports.biome": true
+      //   }
+      "code_actions_on_format": {
+        "source.fixAll.eslint": true,
+      },
     },
     "JSON": {
       "prettier": {
@@ -2140,6 +2157,23 @@
       "prettier": {
         "allowed": true,
       },
+      // Apply ESLint's safe fixes when the file is formatted. Silent in a project
+      // with no ESLint config, which is what makes it safe to have on by default.
+      //
+      // Biome's equivalent is deliberately NOT here. Unlike ESLint, Biome with no
+      // `biome.json` still lints using its own recommended rules, so enabling it
+      // globally would rewrite code in projects that chose ESLint and Prettier and
+      // never asked for Biome's opinions. In a project that does use Biome, add
+      // this to its `.wu/settings.json` and drop the ESLint line -- running both
+      // linters' fix-all over one language is the one combination to avoid:
+      //
+      //   "code_actions_on_format": {
+      //     "source.fixAll.biome": true,
+      //     "source.organizeImports.biome": true
+      //   }
+      "code_actions_on_format": {
+        "source.fixAll.eslint": true,
+      },
     },
     "Twig": {
       "prettier": {
@@ -2150,6 +2184,23 @@
       "language_servers": ["!typescript-language-server", "vtsls", "..."],
       "prettier": {
         "allowed": true,
+      },
+      // Apply ESLint's safe fixes when the file is formatted. Silent in a project
+      // with no ESLint config, which is what makes it safe to have on by default.
+      //
+      // Biome's equivalent is deliberately NOT here. Unlike ESLint, Biome with no
+      // `biome.json` still lints using its own recommended rules, so enabling it
+      // globally would rewrite code in projects that chose ESLint and Prettier and
+      // never asked for Biome's opinions. In a project that does use Biome, add
+      // this to its `.wu/settings.json` and drop the ESLint line -- running both
+      // linters' fix-all over one language is the one combination to avoid:
+      //
+      //   "code_actions_on_format": {
+      //     "source.fixAll.biome": true,
+      //     "source.organizeImports.biome": true
+      //   }
+      "code_actions_on_format": {
+        "source.fixAll.eslint": true,
       },
     },
     "SystemVerilog": {

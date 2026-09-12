@@ -5662,12 +5662,12 @@ fn cowork_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Shell",
-                    description: "The shell the agent runs commands in. Left unset it uses the one configured under Terminal, so a command the agent runs behaves like one you would type yourself — set this only to give the agent a different shell.",
+                    description: "The shell the agent runs commands in. \"Terminal\" follows the shell configured under Terminal, so a command the agent runs behaves like one you would type yourself. Pick another only to give the agent a different shell from your own.",
                     field: Box::new(SettingField {
                         json_path: Some("cowork.shell$"),
                         pick: |settings_content| {
                             Some(
-                                &dynamic_variants::<settings::Shell>()[settings_content
+                                &dynamic_variants::<settings::AgentShell>()[settings_content
                                     .cowork
                                     .as_ref()?
                                     .shell
@@ -5687,40 +5687,42 @@ fn cowork_page() -> SettingsPage {
                                 .cowork
                                 .get_or_insert_default()
                                 .shell
-                                .get_or_insert_with(settings::Shell::default);
+                                .get_or_insert_with(settings::AgentShell::default);
                             let default_shell = if cfg!(target_os = "windows") {
                                 "powershell.exe"
                             } else {
                                 "sh"
                             };
+                            // Switching between the two that name a program keeps the name, so
+                            // adding arguments does not make the user type it again.
                             *settings_value = match value {
-                                settings::ShellDiscriminants::System => settings::Shell::System,
-                                settings::ShellDiscriminants::Program => {
+                                settings::AgentShellDiscriminants::Terminal => {
+                                    settings::AgentShell::Terminal
+                                }
+                                settings::AgentShellDiscriminants::System => {
+                                    settings::AgentShell::System
+                                }
+                                settings::AgentShellDiscriminants::Program => {
                                     let program = match settings_value {
-                                        settings::Shell::Program(program) => program.clone(),
-                                        settings::Shell::WithArguments { program, .. } => {
+                                        settings::AgentShell::Program(program) => program.clone(),
+                                        settings::AgentShell::WithArguments { program, .. } => {
                                             program.clone()
                                         }
                                         _ => String::from(default_shell),
                                     };
-                                    settings::Shell::Program(program)
+                                    settings::AgentShell::Program(program)
                                 }
-                                settings::ShellDiscriminants::WithArguments => {
+                                settings::AgentShellDiscriminants::WithArguments => {
                                     let (program, args) = match settings_value {
-                                        settings::Shell::Program(program) => {
+                                        settings::AgentShell::Program(program) => {
                                             (program.clone(), vec![])
                                         }
-                                        settings::Shell::WithArguments { program, args, .. } => {
+                                        settings::AgentShell::WithArguments { program, args } => {
                                             (program.clone(), args.clone())
                                         }
                                         _ => (String::from(default_shell), vec![]),
                                     };
-                                    settings::Shell::WithArguments {
-                                        program,
-                                        args,
-                                        // The agent's shell has no tab to title.
-                                        title_override: None,
-                                    }
+                                    settings::AgentShell::WithArguments { program, args }
                                 }
                             };
                         },
@@ -5737,12 +5739,13 @@ fn cowork_page() -> SettingsPage {
                             .discriminant() as usize,
                     )
                 },
-                fields: dynamic_variants::<settings::Shell>()
+                fields: dynamic_variants::<settings::AgentShell>()
                     .into_iter()
                     .map(|variant| match variant {
-                        settings::ShellDiscriminants::System => vec![],
-                        settings::ShellDiscriminants::Program
-                        | settings::ShellDiscriminants::WithArguments => vec![SettingItem {
+                        settings::AgentShellDiscriminants::Terminal
+                        | settings::AgentShellDiscriminants::System => vec![],
+                        settings::AgentShellDiscriminants::Program
+                        | settings::AgentShellDiscriminants::WithArguments => vec![SettingItem {
                             files: USER,
                             title: "Program",
                             description: "The shell program to run. Arguments, if any, are set in settings.json.",
@@ -5750,11 +5753,11 @@ fn cowork_page() -> SettingsPage {
                                 json_path: Some("cowork.shell"),
                                 pick: |settings_content| {
                                     match settings_content.cowork.as_ref()?.shell.as_ref()? {
-                                        settings::Shell::Program(program) => Some(program),
-                                        settings::Shell::WithArguments { program, .. } => {
+                                        settings::AgentShell::Program(program) => Some(program),
+                                        settings::AgentShell::WithArguments { program, .. } => {
                                             Some(program)
                                         }
-                                        settings::Shell::System => None,
+                                        _ => None,
                                     }
                                 },
                                 write: |settings_content, value, _| {
@@ -5767,8 +5770,10 @@ fn cowork_page() -> SettingsPage {
                                         .shell
                                         .as_mut()
                                     {
-                                        Some(settings::Shell::Program(program)) => *program = value,
-                                        Some(settings::Shell::WithArguments {
+                                        Some(settings::AgentShell::Program(program)) => {
+                                            *program = value
+                                        }
+                                        Some(settings::AgentShell::WithArguments {
                                             program, ..
                                         }) => *program = value,
                                         _ => return,

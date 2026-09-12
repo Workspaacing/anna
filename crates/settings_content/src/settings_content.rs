@@ -1009,12 +1009,8 @@ pub struct CoworkSettingsContent {
     pub verification: Option<CoworkVerificationSettingsContent>,
     /// The shell the agent runs commands in.
     ///
-    /// Left unset, the agent uses whatever `terminal.shell` is set to, so a command it runs
-    /// behaves the same as one you would type in a terminal yourself. Set it to name a different
-    /// program, with or without arguments.
-    ///
-    /// Default: unset, meaning `terminal.shell`
-    pub shell: Option<Shell>,
+    /// Default: terminal
+    pub shell: Option<AgentShell>,
     /// Approve every request the agent makes without asking.
     ///
     /// The agent asks before running a command, because nothing in the editor can undo one. With
@@ -1023,6 +1019,43 @@ pub struct CoworkSettingsContent {
     ///
     /// Default: false
     pub auto_approve: Option<bool>,
+}
+
+/// Which shell a Cowork agent runs commands in.
+///
+/// The same three choices as `terminal.shell`, plus the one that should be the default: follow
+/// whatever the terminal is set to, so a command the agent runs behaves like one the user would
+/// type themselves. "Automatic" has to be a value rather than the absence of one, or it cannot be
+/// offered as a choice.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::EnumDiscriminants,
+)]
+#[strum_discriminants(derive(strum::VariantArray, strum::VariantNames, strum::FromRepr))]
+#[serde(rename_all = "snake_case")]
+pub enum AgentShell {
+    /// Use whatever `terminal.shell` is set to.
+    #[default]
+    Terminal,
+    /// Use the system's default shell, whatever the terminal is set to.
+    System,
+    /// Use a specific program with no arguments.
+    Program(String),
+    /// Use a specific program with arguments.
+    WithArguments {
+        /// The program to run.
+        program: String,
+        /// The arguments to pass to the program.
+        args: Vec<String>,
+    },
 }
 
 /// The checks that run after a Cowork agent writes, changes or deletes something.

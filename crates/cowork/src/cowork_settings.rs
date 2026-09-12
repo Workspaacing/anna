@@ -12,6 +12,7 @@ pub struct CoworkSettings {
     pub verification: VerificationSettings,
     /// `None` means "whatever the terminal is set to", which is the default.
     pub shell: Option<Shell>,
+    // (resolved from `AgentShell::Terminal` to `None` in `from_settings`)
     pub auto_approve: bool,
 }
 
@@ -49,26 +50,25 @@ impl Settings for CoworkSettings {
                     dependency_audit: verification.dependency_audit.unwrap(),
                 }
             },
-            shell: cowork.shell.clone().map(settings_shell_to_task_shell),
+            shell: cowork.shell.clone().and_then(agent_shell_to_task_shell),
             auto_approve: cowork.auto_approve.unwrap(),
         }
     }
 }
 
-/// The settings enum and the runtime enum describe the same three choices but are separate types,
-/// so that settings can be deserialized without depending on the task crate.
-fn settings_shell_to_task_shell(shell: settings::Shell) -> Shell {
+/// `None` for the choice that means "follow the terminal", which the caller resolves by reading
+/// `terminal.shell` instead. The other three map onto the runtime enum, which is a separate type so
+/// that settings can be deserialized without depending on the task crate.
+fn agent_shell_to_task_shell(shell: settings::AgentShell) -> Option<Shell> {
     match shell {
-        settings::Shell::System => Shell::System,
-        settings::Shell::Program(program) => Shell::Program(program),
-        settings::Shell::WithArguments {
+        settings::AgentShell::Terminal => None,
+        settings::AgentShell::System => Some(Shell::System),
+        settings::AgentShell::Program(program) => Some(Shell::Program(program)),
+        settings::AgentShell::WithArguments { program, args } => Some(Shell::WithArguments {
             program,
             args,
-            title_override,
-        } => Shell::WithArguments {
-            program,
-            args,
-            title_override,
-        },
+            // The agent's shell has no terminal tab to title.
+            title_override: None,
+        }),
     }
 }
