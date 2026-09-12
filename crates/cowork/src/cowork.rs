@@ -18,6 +18,7 @@ mod image;
 mod inline_calls;
 mod github_tools;
 mod gitleaks;
+mod outdated;
 mod model_selector;
 mod new_thread_dialog;
 mod permission;
