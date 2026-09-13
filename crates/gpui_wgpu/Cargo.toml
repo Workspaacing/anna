@@ -44,7 +44,7 @@ wgpu = { workspace = true, features = ["webgl"] }
 
 [dev-dependencies]
 criterion.workspace = true
-naga = { version = "29.0.4", features = ["wgsl-in"] }
+naga = { version = "30.0.0", features = ["wgsl-in"] }
 
 [[bench]]
 name = "layout_line"
