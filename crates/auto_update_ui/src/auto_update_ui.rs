@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use auto_update::{AutoUpdater, release_notes_url};
+use auto_update::{AutoUpdateEvent, AutoUpdater, release_notes_url};
 use gpui::{
-    App, DismissEvent, EventEmitter, FocusHandle, Focusable, TaskExt, Window, actions,
-    prelude::*,
+    App, DismissEvent, EventEmitter, FocusHandle, Focusable, PromptLevel, TaskExt, Window,
+    actions, prelude::*,
 };
 use release_channel::ReleaseChannel;
 use semver::Version;
 use ui::{AnnouncementToast, ListBulletItem, prelude::*};
+use util::ResultExt as _;
 use workspace::{
     Workspace,
     notifications::{
@@ -27,6 +28,7 @@ actions!(
 
 pub fn init(cx: &mut App) {
     notify_if_app_was_updated(cx);
+    ask_about_updates(cx);
     cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         workspace.register_action(|workspace, _: &ViewReleaseNotesLocally, window, cx| {
             view_release_notes_locally(workspace, window, cx);
@@ -39,6 +41,94 @@ pub fn init(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Asks before an update is downloaded, and answers a check the user started either way, so
+/// "Check for Updates" never ends in silence.
+fn ask_about_updates(cx: &mut App) {
+    let Some(updater) = AutoUpdater::get(cx) else {
+        return;
+    };
+    cx.subscribe(&updater, |updater, event: &AutoUpdateEvent, cx| {
+        let Some(window) = cx
+            .active_window()
+            .or_else(|| cx.windows().into_iter().next())
+        else {
+            return;
+        };
+        match event.clone() {
+            AutoUpdateEvent::UpdateAvailable { version } => {
+                let running = display_version(updater.read(cx).current_version());
+                let message = format!("Anna {version} is available");
+                let detail = format!(
+                    "You have Anna {running}. Download and install the update now? You will be asked to restart when it is ready."
+                );
+                let Some(answer) = window
+                    .update(cx, |_, window, cx| {
+                        window.prompt(
+                            PromptLevel::Info,
+                            &message,
+                            Some(&detail),
+                            &["Update", "Later"],
+                            cx,
+                        )
+                    })
+                    .log_err()
+                else {
+                    return;
+                };
+                cx.spawn(async move |cx| {
+                    let Ok(choice) = answer.await else {
+                        return;
+                    };
+                    updater.update(cx, |updater, cx| {
+                        if choice == 0 {
+                            updater.approve(version, cx);
+                        } else {
+                            updater.decline(version);
+                        }
+                    });
+                })
+                .detach();
+            }
+            AutoUpdateEvent::UpToDate { version } => {
+                let detail = format!("Anna {} is the newest version.", display_version(version));
+                window
+                    .update(cx, |_, window, cx| {
+                        drop(window.prompt(
+                            PromptLevel::Info,
+                            "Anna is up to date",
+                            Some(&detail),
+                            &["OK"],
+                            cx,
+                        ));
+                    })
+                    .log_err();
+            }
+            AutoUpdateEvent::CheckFailed { error } => {
+                let detail = error.to_string();
+                window
+                    .update(cx, |_, window, cx| {
+                        drop(window.prompt(
+                            PromptLevel::Warning,
+                            "Could not check for updates",
+                            Some(&detail),
+                            &["OK"],
+                            cx,
+                        ));
+                    })
+                    .log_err();
+            }
+        }
+    })
+    .detach();
+}
+
+/// The version as a person reads it, without the channel and commit it was built from.
+fn display_version(mut version: Version) -> Version {
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    version
 }
 
 fn view_release_notes_locally(
