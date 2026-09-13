@@ -3,13 +3,31 @@ on:
   push:
     tags:
       - v*
+    # Pushes to main only build, to refresh the cache the next release restores. GitHub
+    # evaluates path filters for branch pushes but not for tag pushes.
+    branches:
+      - main
+    paths:
+      - Cargo.lock
+      - '**/Cargo.toml'
+      - rust-toolchain.toml
+      - .cargo/config.toml
+      - .github/workflows/release.yml
+  schedule:
+    # GitHub evicts caches that go unused for 7 days.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
 jobs:
   check_version:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +41,7 @@ jobs:
 
   bundle_mac:
     needs: check_version
+    if: ${{ !cancelled() && needs.check_version.result != 'failure' }}
     runs-on: macos-14
     timeout-minutes: 300
     steps:
@@ -31,6 +50,15 @@ jobs:
         run: rustup show
       - name: Install lld
         run: brew install lld
+      # A tag restores the caches saved on main, but a cache saved by a tag is only visible
+      # to that tag, so only main saves and tags do not crowd main's caches out of the quota.
+      - name: Restore the Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-aarch64
+          add-job-id-key: 'false'
+          cache-on-failure: 'true'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Use the stable release channel
         run: echo stable > crates/wu/RELEASE_CHANNEL
       # Signing and notarization only happen when these secrets exist.
@@ -53,14 +81,16 @@ jobs:
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
           APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
         run: script/bundle-mac aarch64-apple-darwin
-      - uses: actions/upload-artifact@v4
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
         with:
           name: macos-aarch64
           path: |
             target/aarch64-apple-darwin/release/Anna-aarch64.dmg
             target/anna-remote-server-macos-aarch64.gz
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
         with:
           name: macos-aarch64-dsym
           path: target/aarch64-apple-darwin/release/Anna.dSYM.zip
@@ -68,6 +98,7 @@ jobs:
 
   bundle_linux:
     needs: check_version
+    if: ${{ !cancelled() && needs.check_version.result != 'failure' }}
     strategy:
       fail-fast: false
       matrix:
@@ -87,11 +118,19 @@ jobs:
         run: ./script/linux
       - name: Install Rust toolchain
         run: rustup show
+      - name: Restore the Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-${{ matrix.arch }}
+          add-job-id-key: 'false'
+          cache-on-failure: 'true'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Use the stable release channel
         run: echo stable > crates/wu/RELEASE_CHANNEL
       - name: Bundle
         run: ./script/bundle-linux
-      - uses: actions/upload-artifact@v4
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
           path: |
@@ -101,19 +140,28 @@ jobs:
 
   bundle_windows:
     needs: check_version
+    if: ${{ !cancelled() && needs.check_version.result != 'failure' }}
     runs-on: windows-2022
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
         run: rustup show
+      - name: Restore the Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows-x86_64
+          add-job-id-key: 'false'
+          cache-on-failure: 'true'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Use the stable release channel
         run: Set-Content -Path crates/wu/RELEASE_CHANNEL -Value stable -NoNewline
         shell: pwsh
       - name: Bundle
         run: script/bundle-windows.ps1 -Architecture x86_64
         shell: pwsh
-      - uses: actions/upload-artifact@v4
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
           path: |
@@ -123,6 +171,7 @@ jobs:
 
   release:
     needs: [bundle_mac, bundle_linux, bundle_windows]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
