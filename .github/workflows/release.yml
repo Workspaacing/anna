@@ -1,4 +1,5 @@
 name: release
+run-name: "${{ startsWith(github.ref, 'refs/tags/') && format('Release {0}', github.ref_name) || 'Warm the release build cache' }}"
 on:
   push:
     tags:
@@ -30,7 +31,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check that the tag matches the crate version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/wu/Cargo.toml | head -1)
@@ -45,7 +46,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         run: rustup show
       - name: Install lld
@@ -82,7 +83,7 @@ jobs:
           APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
         run: script/bundle-mac aarch64-apple-darwin
       - if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-aarch64
           path: |
@@ -90,7 +91,7 @@ jobs:
             target/anna-remote-server-macos-aarch64.gz
           if-no-files-found: error
       - if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-aarch64-dsym
           path: target/aarch64-apple-darwin/release/Anna.dSYM.zip
@@ -113,7 +114,7 @@ jobs:
       CC: clang
       CXX: clang++
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Linux dependencies
         run: ./script/linux
       - name: Install Rust toolchain
@@ -130,7 +131,7 @@ jobs:
       - name: Bundle
         run: ./script/bundle-linux
       - if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: |
@@ -144,7 +145,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         run: rustup show
       - name: Restore the Rust build cache
@@ -161,7 +162,7 @@ jobs:
         run: script/bundle-windows.ps1 -Architecture x86_64
         shell: pwsh
       - if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
           path: |
@@ -174,15 +175,15 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
       - name: Keep debug symbols out of the release assets
         run: find artifacts -name '*.dSYM.zip' -delete
       - name: Create the GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: .github/release/body.md
           generate_release_notes: true
