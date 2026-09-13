@@ -177,8 +177,8 @@ impl NodeRuntime {
                     // and/or have shared tracking of when internet is available.
                     Box::new(UnavailableNodeRuntime {
                         error_message: format!(
-                            "failure while downloading and/or installing Zed managed Node.js, \
-                            restart Zed to retry: {}",
+                            "failure while downloading and/or installing Wu managed Node.js, \
+                            restart Wu to retry: {}",
                             err
                         )
                         .into(),
@@ -658,7 +658,7 @@ impl ManagedNodeRuntime {
                         true
                     } else {
                         log::warn!(
-                            "Zed managed Node.js binary at {} failed check with output: {:?}",
+                            "Wu managed Node.js binary at {} failed check with output: {:?}",
                             node_binary.display(),
                             output
                         );
@@ -667,7 +667,7 @@ impl ManagedNodeRuntime {
                 }
                 Err(err) => {
                     log::warn!(
-                        "Zed managed Node.js binary at {} failed check, so re-downloading it. \
+                        "Wu managed Node.js binary at {} failed check, so re-downloading it. \
                         Error: {}",
                         node_binary.display(),
                         err

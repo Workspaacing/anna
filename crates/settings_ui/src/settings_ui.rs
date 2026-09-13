@@ -13,7 +13,7 @@ use gpui::{
     WindowHandle, WindowOptions, actions, div, list, point, prelude::*, px, uniform_list,
 };
 
-use language::Buffer;
+use language::{Buffer, KEYBIND_CONTEXT_LANGUAGE_NAME};
 use platform_title_bar::PlatformTitleBar;
 use project::{Project, ProjectPath, Worktree, WorktreeId};
 use release_channel::ReleaseChannel;
@@ -1555,7 +1555,7 @@ fn all_language_names(cx: &App) -> Vec<SharedString> {
         .languages
         .language_names()
         .into_iter()
-        .filter(|name| name.as_ref() != "Wu Keybind Context")
+        .filter(|name| name.as_ref() != KEYBIND_CONTEXT_LANGUAGE_NAME)
         .map(Into::into)
         .collect()
 }

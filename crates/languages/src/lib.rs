@@ -420,3 +420,34 @@ fn load_config(name: &str) -> LanguageConfig {
     let grammars_loaded = cfg!(any(feature = "load-grammars", test));
     grammars::load_config_for_feature(name, grammars_loaded)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn test_keybind_context_language_resolves_by_shared_name(cx: &mut TestAppContext) {
+        let languages = Arc::new(LanguageRegistry::new(cx.executor()));
+        languages.register_native_grammars([("rust", tree_sitter_rust::LANGUAGE)]);
+        cx.update(|cx| {
+            register_language(
+                &languages,
+                "zed-keybind-context",
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                cx,
+            );
+        });
+
+        let language = languages
+            .language_for_name(KEYBIND_CONTEXT_LANGUAGE_NAME)
+            .await
+            .expect("the keymap editor's lookup name should resolve to the registered language");
+        assert_eq!(language.name().as_ref(), KEYBIND_CONTEXT_LANGUAGE_NAME);
+        assert!(language.grammar().is_some());
+    }
+}

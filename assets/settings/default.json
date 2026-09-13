@@ -1843,9 +1843,10 @@
   //
   "file_types": {
     "JSONC": [
+      "**/.wu/*.json",
       "**/.zed/*.json",
       "**/.vscode/**/*.json",
-      "**/{zed,Zed}/{settings,keymap,tasks,debug}.json",
+      "**/{wu,Wu,zed,Zed}/{settings,keymap,tasks,debug}.json",
       "tsconfig*.json",
     ],
     "Markdown": [".rules", ".cursorrules", ".windsurfrules", ".clinerules"],

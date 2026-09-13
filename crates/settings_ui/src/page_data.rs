@@ -214,7 +214,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "CLI Default Open Behavior",
-                description: "How `zed <path>` opens directories when no flag is specified.",
+                description: "How `wu <path>` opens directories when no flag is specified.",
                 field: Box::new(SettingField {
                     json_path: Some("cli_default_open_behavior"),
                     pick: |settings_content| {

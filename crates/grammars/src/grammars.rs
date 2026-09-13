@@ -95,3 +95,16 @@ pub fn load_queries(name: &str) -> LanguageQueries {
         Some(QueryFileContents::new(query_file, contents))
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_keybind_context_config_name_matches_shared_constant() {
+        assert_eq!(
+            load_config("zed-keybind-context").name.as_ref(),
+            language_core::KEYBIND_CONTEXT_LANGUAGE_NAME
+        );
+    }
+}
