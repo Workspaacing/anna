@@ -63,6 +63,30 @@ pub struct PermissionRequest {
 
 pub enum PermissionEvent {
     Changed,
+    /// The user is being asked. Carries the request so the thread can record what was wanted.
+    Asked(PermissionRequest),
+    /// A request was settled, and by what.
+    Decided {
+        request: PermissionRequest,
+        decision: Decision,
+        by: DecidedBy,
+    },
+}
+
+/// What settled a permission request, which is what an exported session log needs to say about it:
+/// a command that ran because the level allows it is a different story from one the user approved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecidedBy {
+    /// The user answered the card.
+    User,
+    /// The permission level does not ask about this consequence.
+    Level,
+    /// The user allowed this scope earlier.
+    Grant,
+    /// Another request arrived while this one was open and replaced it.
+    Displaced,
+    /// The turn was stopped while the question was open.
+    Cancelled,
 }
 
 /// Whether this level stops to ask about a command with this consequence.
@@ -179,19 +203,37 @@ impl PermissionBroker {
         // A request that leaves the project is asked about whatever the level says and whatever
         // was allowed before: neither was given with that in view.
         if !request.always_ask {
-            let level = &CoworkSettings::get_global(cx).permission;
-            if !asks(level, request.consequence) || self.is_granted(&request.scope) {
+            let level_asks = asks(
+                &CoworkSettings::get_global(cx).permission,
+                request.consequence,
+            );
+            if !level_asks || self.is_granted(&request.scope) {
                 let _ = sender.send(Decision::Always);
+                cx.emit(PermissionEvent::Decided {
+                    request,
+                    decision: Decision::Always,
+                    by: if level_asks {
+                        DecidedBy::Grant
+                    } else {
+                        DecidedBy::Level
+                    },
+                });
                 return receiver;
             }
         }
 
         // A request that arrives while another is open replaces it, and the displaced one is
         // refused rather than left to hang.
-        if let Some((_, displaced)) = self.pending.take() {
+        if let Some((displaced_request, displaced)) = self.pending.take() {
             let _ = displaced.send(Decision::Reject);
+            cx.emit(PermissionEvent::Decided {
+                request: displaced_request,
+                decision: Decision::Reject,
+                by: DecidedBy::Displaced,
+            });
         }
 
+        cx.emit(PermissionEvent::Asked(request.clone()));
         self.pending = Some((request, sender));
         cx.emit(PermissionEvent::Changed);
         cx.notify();
@@ -199,6 +241,10 @@ impl PermissionBroker {
     }
 
     pub fn resolve(&mut self, decision: Decision, cx: &mut Context<Self>) {
+        self.settle(decision, DecidedBy::User, cx);
+    }
+
+    fn settle(&mut self, decision: Decision, by: DecidedBy, cx: &mut Context<Self>) {
         let Some((request, sender)) = self.pending.take() else {
             return;
         };
@@ -207,9 +253,14 @@ impl PermissionBroker {
             if worth_remembering(request.consequence) {
                 self.remember(request.scope.clone(), cx);
             }
-            self.granted.insert(request.scope);
+            self.granted.insert(request.scope.clone());
         }
         let _ = sender.send(decision);
+        cx.emit(PermissionEvent::Decided {
+            request,
+            decision,
+            by,
+        });
         cx.emit(PermissionEvent::Changed);
         cx.notify();
     }
@@ -217,7 +268,7 @@ impl PermissionBroker {
     /// Refuses whatever is outstanding, for when the user interrupts the turn.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         if self.pending.is_some() {
-            self.resolve(Decision::Reject, cx);
+            self.settle(Decision::Reject, DecidedBy::Cancelled, cx);
         }
     }
 

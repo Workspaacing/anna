@@ -26,6 +26,7 @@ mod outdated;
 mod model_selector;
 mod permission;
 mod provider;
+mod session_log;
 mod thread;
 mod thread_view;
 mod tool;
@@ -62,6 +63,11 @@ actions!(
         OpenSettings,
         /// Refetches the models.dev catalog.
         RefreshCatalog,
+        /// Saves everything that happened in this Cowork thread to one Markdown file.
+        ExportSessionLog,
+        /// Saves every Cowork thread of this project, with everything that happened in each, to one
+        /// Markdown file.
+        ExportAllSessionLogs,
     ]
 );
 
@@ -91,6 +97,18 @@ pub fn init(cx: &mut App) {
             // inside that update, and opening a draft reads and updates the workspace again.
             window.defer(cx, move |window, cx| {
                 panel.update(cx, |panel, cx| panel.start_new_thread(window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &ExportAllSessionLogs, window, cx| {
+            let Some(panel) = workspace.panel::<CoworkPanel>(cx) else {
+                return;
+            };
+            // Deferred for the same reason as `NewThread`: the export reads the workspace for the
+            // threads it has open.
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.export_threads(cowork_panel::ThreadSelection::ThisProject, window, cx)
+                });
             });
         });
     })

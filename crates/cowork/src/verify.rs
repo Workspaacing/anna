@@ -19,6 +19,7 @@ use language::{Buffer, Point};
 use regex::Regex;
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     rc::Rc,
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
@@ -314,6 +315,9 @@ struct SecretPattern {
     regex: &'static str,
 }
 
+/// The family whose pattern matches only a block's first line, so redaction has to find the rest.
+const PRIVATE_KEY_FAMILY: &str = "private key";
+
 /// Patterns chosen for precision rather than coverage.
 ///
 /// Every one of these has a fixed prefix or a structural marker, so a hit is almost certainly a real
@@ -359,7 +363,7 @@ static SECRET_PATTERNS: &[SecretPattern] = &[
     },
     SecretPattern {
         name: "private key block",
-        family: "private key",
+        family: PRIVATE_KEY_FAMILY,
         regex: r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----",
     },
     SecretPattern {
@@ -543,9 +547,245 @@ pub fn scan_secrets(text: &str) -> Vec<Finding> {
     findings
 }
 
+/// Text with every credential [`scan_secrets`] recognises replaced by a label naming its family.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Redacted {
+    pub text: String,
+    /// How many credentials were replaced, by family.
+    pub counts: BTreeMap<&'static str, usize>,
+}
+
+impl Redacted {
+    pub fn total(&self) -> usize {
+        self.counts.values().sum()
+    }
+}
+
+/// The label an assigned high-entropy literal is replaced with; it has no pattern family of its own.
+const ASSIGNMENT_FAMILY: &str = "assigned secret";
+
+/// How far past a private key's first line its closing line is looked for. A 4096-bit RSA key in
+/// PEM is about 3.3 KB; anything this far away is not the same block.
+const MAX_PRIVATE_KEY_BYTES: usize = 16 * 1024;
+
+/// Replaces every credential the secret scan would report with `[REDACTED: <family>]`.
+///
+/// For text that is about to leave Wu in a file the user passes on, such as an exported session log.
+/// It reuses the scan's own patterns, so what the scan calls a credential is exactly what is hidden,
+/// and a pattern added there is redacted here without anyone remembering to.
+pub fn redact_secrets(text: &str) -> Redacted {
+    let mut counts = BTreeMap::new();
+    let mut redacted = text.to_owned();
+
+    for (_, family, regex) in COMPILED_PATTERNS.iter() {
+        let label = format!("[REDACTED: {family}]");
+        let (next, replaced) = if *family == PRIVATE_KEY_FAMILY {
+            redact_private_keys(&redacted, regex, &label)
+        } else {
+            let mut replaced = 0;
+            let next = regex
+                .replace_all(&redacted, |_: &regex::Captures| {
+                    replaced += 1;
+                    label.clone()
+                })
+                .into_owned();
+            (next, replaced)
+        };
+        if replaced > 0 {
+            *counts.entry(*family).or_insert(0) += replaced;
+            redacted = next;
+        }
+    }
+
+    if let Some(assignment) = ASSIGNMENT.as_ref() {
+        let label = format!("[REDACTED: {ASSIGNMENT_FAMILY}]");
+        let mut replaced = 0;
+        let next = assignment
+            .replace_all(&redacted, |captures: &regex::Captures| {
+                let (Some(whole), Some(value)) = (captures.get(0), captures.get(2)) else {
+                    // Unreachable with this pattern, whose value group is not optional; whatever
+                    // matched is kept rather than deleted.
+                    return captures
+                        .get(0)
+                        .map_or_else(String::new, |whole| whole.as_str().to_owned());
+                };
+                let original = whole.as_str().to_owned();
+                if !looks_random(value.as_str()) {
+                    return original;
+                }
+                let value_start = value.start() - whole.start();
+                let value_end = value.end() - whole.start();
+                match (original.get(..value_start), original.get(value_end..)) {
+                    (Some(before), Some(after)) => {
+                        replaced += 1;
+                        format!("{before}{label}{after}")
+                    }
+                    _ => original,
+                }
+            })
+            .into_owned();
+        if replaced > 0 {
+            *counts.entry(ASSIGNMENT_FAMILY).or_insert(0) += replaced;
+            redacted = next;
+        }
+    }
+
+    Redacted {
+        text: redacted,
+        counts,
+    }
+}
+
+/// Replaces private key blocks whole, not just the line the pattern matches.
+///
+/// Hiding only `-----BEGIN RSA PRIVATE KEY-----` would leave the key itself in the file. The block
+/// runs to its closing line when there is one nearby; without one — a block cut short, or pasted
+/// without its end — it runs to the end of its line and over the base64 lines that follow, which is
+/// what a key body is. Both shapes occur: a key in a file has real line breaks, and a key inside a
+/// tool call's JSON arguments is one line with escaped ones.
+fn redact_private_keys(text: &str, header: &Regex, label: &str) -> (String, usize) {
+    let mut out = String::with_capacity(text.len());
+    let mut copied_up_to = 0;
+    let mut replaced = 0;
+
+    for found in header.find_iter(text) {
+        // A header inside a block already replaced.
+        if found.start() < copied_up_to {
+            continue;
+        }
+        let end = private_key_block_end(text, found.end());
+        if let Some(before) = text.get(copied_up_to..found.start()) {
+            out.push_str(before);
+        }
+        out.push_str(label);
+        copied_up_to = end;
+        replaced += 1;
+    }
+
+    if let Some(rest) = text.get(copied_up_to..) {
+        out.push_str(rest);
+    }
+    (out, replaced)
+}
+
+fn private_key_block_end(text: &str, header_end: usize) -> usize {
+    const END_MARKER: &str = "-----END ";
+    const DASHES: &str = "-----";
+
+    let Some(after_header) = text.get(header_end..) else {
+        return header_end;
+    };
+    let window = if after_header.len() <= MAX_PRIVATE_KEY_BYTES {
+        after_header
+    } else {
+        // Cut on a character boundary: `get` refuses a cut inside a character, and falling back
+        // to the whole text would quietly lift the limit.
+        let boundary = (0..=MAX_PRIVATE_KEY_BYTES)
+            .rev()
+            .find(|index| after_header.is_char_boundary(*index))
+            .unwrap_or(0);
+        after_header.get(..boundary).unwrap_or("")
+    };
+
+    if let Some(marker) = window.find(END_MARKER)
+        && !window.get(..marker).unwrap_or("").contains("-----BEGIN ")
+        && let Some(close) = window
+            .get(marker + END_MARKER.len()..)
+            .and_then(|rest| rest.find(DASHES))
+    {
+        return header_end + marker + END_MARKER.len() + close + DASHES.len();
+    }
+
+    let is_base64 = |line: &str| {
+        let line = line.trim_end_matches('\r');
+        !line.is_empty()
+            && line
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "+/=".contains(character))
+    };
+
+    let mut end = match after_header.find('\n') {
+        Some(newline) => header_end + newline,
+        None => return text.len(),
+    };
+    while let Some(line_start) = end.checked_add(1)
+        && let Some(rest) = text.get(line_start..)
+    {
+        let line = rest.split('\n').next().unwrap_or("");
+        if !is_base64(line) {
+            break;
+        }
+        end = line_start + line.len();
+    }
+    end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redaction_hides_what_the_scan_finds_and_names_its_family() {
+        let redacted = redact_secrets(concat!(
+            "const a = \"AKIAIOSFODNN7EXAMPLE\";\n",
+            "k = \"sk-ant-api03-0123456789abcdefghijklmnop\"\n",
+            "nothing to see here\n",
+        ));
+
+        assert!(!redacted.text.contains("AKIAIOSFODNN7EXAMPLE"), "{}", redacted.text);
+        assert!(!redacted.text.contains("sk-ant-api03"), "{}", redacted.text);
+        assert!(redacted.text.contains("[REDACTED: aws]"));
+        assert!(redacted.text.contains("[REDACTED: sk-prefixed key]"));
+        assert!(redacted.text.contains("nothing to see here"));
+        assert_eq!(redacted.counts.get("aws"), Some(&1));
+        assert_eq!(
+            redacted.counts.get("sk-prefixed key"),
+            Some(&1),
+            "an Anthropic key is one credential, not also an OpenAI one"
+        );
+        assert_eq!(redacted.total(), 2);
+    }
+
+    #[test]
+    fn a_redacted_private_key_takes_its_body_with_it() {
+        let in_a_file = concat!(
+            "before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n",
+            "VTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qKhbwKfBstIs+bMY2Zkp18gnTxK\n",
+            "-----END RSA PRIVATE KEY-----\n",
+            "after\n",
+        );
+        let redacted = redact_secrets(in_a_file);
+        assert_eq!(redacted.text, "before\n[REDACTED: private key]\nafter\n");
+        assert_eq!(redacted.total(), 1);
+
+        // Inside a tool call's JSON the whole block is one line with escaped line breaks.
+        let in_json = r#""content": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n""#;
+        let redacted = redact_secrets(in_json);
+        assert!(!redacted.text.contains("b3BlbnNzaC1rZXktdjEAAAAA"), "{}", redacted.text);
+        assert_eq!(redacted.text, r#""content": "[REDACTED: private key]\n""#);
+
+        // A block that ends the text, with nothing after its closing line, is still found whole.
+        let at_the_end = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIBkg4LVWM9nuwNSk3yByxZpYRTBnVJk5VNKBYZBkjAZRoAoGCCqGSM49\n-----END EC PRIVATE KEY-----";
+        assert_eq!(redact_secrets(at_the_end).text, "[REDACTED: private key]");
+
+        // Cut short: no closing line, so the base64 lines that follow go instead.
+        let truncated = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nnext line of prose\n";
+        let redacted = redact_secrets(truncated);
+        assert_eq!(redacted.text, "[REDACTED: private key]\nnext line of prose\n");
+    }
+
+    #[test]
+    fn a_random_assignment_keeps_its_name_and_loses_its_value() {
+        let redacted = redact_secrets("API_KEY = \"f3Kq9vZ2xLpR7wN4mB8tY6sJ1cH5dG0a\"\n");
+
+        assert_eq!(redacted.text, "API_KEY = \"[REDACTED: assigned secret]\"\n");
+        assert_eq!(redacted.total(), 1);
+
+        let placeholder = redact_secrets("api_key = \"your-api-key-here\"\n");
+        assert_eq!(placeholder.total(), 0, "a placeholder is not a secret");
+    }
 
     /// A TypeScript project with one open file, and nothing attached but what a test injects.
     async fn typescript_project(

@@ -1,5 +1,5 @@
 use crate::{
-    Cancel, SelectModel, Submit,
+    Cancel, ExportSessionLog, SelectModel, Submit,
     catalog::ModelRef,
     checkpoint,
     cowork_settings::CoworkSettings,
@@ -8,8 +8,9 @@ use crate::{
         self, Attachment, AttachmentKind, CompletionEvent, CompletionRequest, Message, Role,
         StopReason, ToolCall, ToolResult,
     },
-    permission::{Decision, PermissionBroker, PermissionEvent},
-    thread::{CoworkStore, Thread, ThreadId},
+    permission::{Decision, DecidedBy, PermissionBroker, PermissionEvent, PermissionRequest},
+    session_log::{self, LogContent, ThreadLog},
+    thread::{ActivityKind, CoworkStore, Thread, ThreadId},
     tool::{ToolContext, ToolKind, ToolRegistry},
     verify::{CheckReport, Finding, Severity},
 };
@@ -208,10 +209,13 @@ impl CoworkThreadView {
             .collect();
 
         let permissions = cx.new(|cx| PermissionBroker::new(thread.metadata.project.clone(), cx));
-        // A question the agent is waiting on has to reach the screen, and it is the broker that
-        // knows when one arrives.
+        // A question the agent is waiting on has to reach the screen, and the question and its
+        // answer the thread's activity; it is the broker that knows when either happens.
         let permissions_subscription =
-            cx.subscribe(&permissions, |_, _, _: &PermissionEvent, cx| cx.notify());
+            cx.subscribe(&permissions, |this, _, event: &PermissionEvent, cx| {
+                this.record_permission(event, cx);
+                cx.notify();
+            });
 
         // Only the events that can change the branch. Statuses update with every file the agent
         // writes, and repainting the whole thread for each of those would be for nothing.
@@ -315,6 +319,8 @@ impl CoworkThreadView {
         // picked: the model can be changed afterwards, and a rewind, fork or prefill brings back
         // attachments chosen for another one. The provider would reject the whole request.
         if let Some(refusal) = self.refuse_unreadable_attachments(cx) {
+            self.thread
+                .record(ActivityKind::AttachmentsRefused, refusal.clone());
             self.error = Some(refusal.into());
             cx.notify();
             return;
@@ -323,7 +329,22 @@ impl CoworkThreadView {
         self.input.update(cx, |editor, cx| editor.clear(window, cx));
         self.error = None;
         let attachments = self.pending_attachments.take();
+        // The model is named because it can change between messages, and which model a message
+        // went to is the first thing to check when one of them misbehaves.
+        let sent = format!(
+            "Message {} sent to {}: {} characters, {} attachment(s){}",
+            self.thread.messages.len() + 1,
+            self.thread.metadata.model.qualified(),
+            prompt.chars().count(),
+            attachments.len(),
+            attachments
+                .iter()
+                .map(|attachment| format!(" {} ({})", attachment.name, attachment.media_type))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         self.push_message(Role::User, prompt, cx);
+        self.thread.record(ActivityKind::MessageSent, sent);
         if !attachments.is_empty() {
             if let Some(stored) = self.thread.messages.last_mut() {
                 stored.attachments = attachments.clone();
@@ -362,6 +383,10 @@ impl CoworkThreadView {
 
         // Dropping the task cancels the request; whatever streamed so far is kept.
         if self.completion.take().is_some() {
+            self.thread.record(
+                ActivityKind::TurnCancelled,
+                "Stopped by the user; whatever streamed so far is kept",
+            );
             self.persist(cx);
             cx.notify();
         }
@@ -448,6 +473,7 @@ impl CoworkThreadView {
             cx.emit(CoworkThreadEvent::TitleChanged);
         }
         cx.notify();
+        self.thread.record(ActivityKind::Rewound, format!("Rewound to message {} ({})", index + 1, scope.describe()));
     }
 
     /// Opens the picture at `index` among the ones waiting to be sent.
@@ -563,6 +589,7 @@ impl CoworkThreadView {
             // user is about to type.
             view.update(cx, |view, cx| view.prefill(text, attachments, window, cx));
         });
+        self.thread.record(ActivityKind::Forked, format!("Forked at message {} into a new thread", index + 1));
     }
 
     /// Copy, rewind and fork, under one of the user's messages.
@@ -660,6 +687,88 @@ impl CoworkThreadView {
     fn answer_permission(&mut self, decision: Decision, cx: &mut Context<Self>) {
         self.permissions
             .update(cx, |permissions, cx| permissions.resolve(decision, cx));
+    }
+
+    /// Writes a permission question, and what settled it, into the thread's activity: the only
+    /// place an exported log can learn what the agent wanted to run and why it did or did not.
+    fn record_permission(&mut self, event: &PermissionEvent, cx: &App) {
+        match event {
+            PermissionEvent::Changed => {}
+            PermissionEvent::Asked(request) => self.thread.record(
+                ActivityKind::PermissionRequested,
+                format!("Asked the user: {}", describe_permission_request(request)),
+            ),
+            PermissionEvent::Decided {
+                request,
+                decision,
+                by,
+            } => {
+                let outcome = match (*decision, *by) {
+                    (Decision::Once, DecidedBy::User) => "Allowed once by the user".to_owned(),
+                    (Decision::Always, DecidedBy::User) => format!(
+                        "Allowed by the user for every `{}` command from now on",
+                        request.scope
+                    ),
+                    (Decision::Reject, DecidedBy::User) => "Denied by the user".to_owned(),
+                    (_, DecidedBy::Level) => format!(
+                        "Allowed without asking: the {} permission level does not ask about this",
+                        permission_label(&CoworkSettings::get_global(cx).permission)
+                    ),
+                    (_, DecidedBy::Grant) => format!(
+                        "Allowed without asking: `{}` was allowed earlier",
+                        request.scope
+                    ),
+                    (_, DecidedBy::Displaced) => {
+                        "Denied: another request replaced it before it was answered".to_owned()
+                    }
+                    (_, DecidedBy::Cancelled) => {
+                        "Denied: the turn was stopped while it was open".to_owned()
+                    }
+                };
+                let kind = if decision.is_allowed() {
+                    ActivityKind::PermissionAllowed
+                } else {
+                    ActivityKind::PermissionDenied
+                };
+                self.thread.record(
+                    kind,
+                    format!("{outcome}: {}", describe_permission_request(request)),
+                );
+            }
+        }
+    }
+
+    /// This thread as an exported log sees it, with what only an open view knows: the reasoning,
+    /// the checks on each result, the error on screen and the branch.
+    pub(crate) fn thread_log(&self, cx: &App) -> ThreadLog {
+        ThreadLog {
+            thread: self.thread.clone(),
+            reasoning: self
+                .messages
+                .iter()
+                .map(|message| message.reasoning.clone())
+                .collect(),
+            current_error: self.error.as_ref().map(|error| error.to_string()),
+            branch: self.branch_name(cx).map(|branch| branch.to_string()),
+            open_in_view: true,
+        }
+    }
+
+    fn export_session_log(
+        &mut self,
+        _: &ExportSessionLog,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let log = self.thread_log(cx);
+        session_log::export(
+            "cowork-session",
+            &self.thread.metadata.title,
+            Task::ready(LogContent::Session(log)),
+            self.fs.clone(),
+            self.workspace.clone(),
+            cx,
+        );
     }
 
     /// What the agent is doing right now, while it is still doing it.
@@ -1290,6 +1399,13 @@ impl CoworkThreadView {
                 };
                 if let Some(repeated) = Self::repeating(&mut recent, &calls) {
                     this.update(cx, |this, cx| {
+                        this.thread.record(
+                            ActivityKind::RepeatedCallsStopped,
+                            format!(
+                                "The model asked to {repeated} {} times in a row",
+                                Self::MAX_IDENTICAL_CALLS
+                            ),
+                        );
                         this.fail(
                             anyhow!(
                                 "Stopped: the model asked to {repeated} {} times in a row without \
@@ -1644,8 +1760,14 @@ impl CoworkThreadView {
 
     fn fail(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
         log::warn!("cowork: completion failed: {error:#}");
-        self.error = Some(format!("{error:#}").into());
+        let message = format!("{error:#}");
+        self.thread
+            .record(ActivityKind::TurnFailed, message.clone());
+        self.error = Some(message.into());
         self.completion = None;
+        // Written at once, so the record of the failure outlives the window it happened in. Some
+        // failures end a turn nothing else would save: a missing key, or the repeated-call guard.
+        self.persist(cx);
         cx.notify();
     }
 
@@ -1661,11 +1783,24 @@ impl CoworkThreadView {
             self.thread.messages.pop();
         }
         self.fail(error, cx);
-        self.persist(cx);
     }
 
     fn finish(&mut self, cx: &mut Context<Self>) {
         self.completion = None;
+        self.thread.record(
+            ActivityKind::TurnFinished,
+            match self.thread.metadata.context_tokens {
+                Some(tokens) => format!(
+                    "The model ended its turn at message {}; the provider reported {tokens} tokens \
+                     of context",
+                    self.thread.messages.len()
+                ),
+                None => format!(
+                    "The model ended its turn at message {}",
+                    self.thread.messages.len()
+                ),
+            },
+        );
         self.persist(cx);
         cx.emit(CoworkThreadEvent::TitleChanged);
         cx.notify();
@@ -1714,6 +1849,15 @@ impl CoworkThreadView {
                     .gap_1()
                     .children(self.render_context_meter(cx))
                     .child(self.render_changes_button(cx))
+                    .child(
+                        IconButton::new("cowork-export-session-log", IconName::Download)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Export session log"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.export_session_log(&ExportSessionLog, window, cx)
+                            })),
+                    )
                     .child(self.render_permission_toggle(cx)),
             )
             .when(is_streaming, |this| {
@@ -2704,7 +2848,7 @@ fn render_reasoning(
 }
 
 /// The two or three words on the button.
-fn permission_label(level: &AgentPermission) -> &'static str {
+pub(crate) fn permission_label(level: &AgentPermission) -> &'static str {
     match level {
         AgentPermission::Ask => "Ask",
         AgentPermission::Standard => "Standard",
@@ -2715,7 +2859,7 @@ fn permission_label(level: &AgentPermission) -> &'static str {
 
 /// The sentence in the menu and the tooltip, which says what the level actually does rather than
 /// what it is called — a name alone does not tell anyone where the line is.
-fn permission_detail(level: &AgentPermission) -> &'static str {
+pub(crate) fn permission_detail(level: &AgentPermission) -> &'static str {
     match level {
         AgentPermission::Ask => "Ask before every command",
         AgentPermission::Standard => "Ask before anything that changes something",
@@ -3029,6 +3173,15 @@ enum RewindScope {
 }
 
 impl RewindScope {
+    /// As the menu names it, for the activity timeline.
+    fn describe(self) -> &'static str {
+        match self {
+            RewindScope::ConversationAndCode => "conversation and code",
+            RewindScope::Conversation => "conversation only",
+            RewindScope::Code => "code only",
+        }
+    }
+
     fn rewinds_conversation(self) -> bool {
         self != RewindScope::Code
     }
@@ -3040,6 +3193,20 @@ impl RewindScope {
 
 /// Names the toast a rewind leaves, so a second rewind replaces it rather than stacking another.
 struct RewindNotice;
+
+/// A permission request in full, for the activity timeline: what was wanted, how far it reaches and
+/// what "always" would cover, then the specifics — for a command, the command — on lines of their own.
+fn describe_permission_request(request: &PermissionRequest) -> String {
+    let boundary = if request.always_ask {
+        ", reaches outside the project"
+    } else {
+        ""
+    };
+    format!(
+        "{} (tool `{}`, {:?}, scope `{}`{boundary})\n{}",
+        request.title, request.tool, request.consequence, request.scope, request.detail
+    )
+}
 
 /// Every file checkpoint recorded in these messages, oldest first.
 fn checkpoints_from(messages: &[Message]) -> Vec<checkpoint::Checkpoint> {
@@ -3363,6 +3530,7 @@ impl Render for CoworkThreadView {
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::select_model))
+            .on_action(cx.listener(Self::export_session_log))
             .size_full()
             .bg(colors.editor_background)
             .child(self.render_header(is_streaming, cx))

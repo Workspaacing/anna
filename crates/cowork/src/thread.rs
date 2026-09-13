@@ -105,9 +105,86 @@ impl ThreadMetadata {
 pub struct Thread {
     pub metadata: ThreadMetadata,
     pub messages: Vec<Message>,
+    /// What happened in this thread that the messages do not show: failures, questions asked and
+    /// how they were answered, cancellations, rewinds and forks, each with the time it happened.
+    ///
+    /// Kept apart from `messages` rather than as a timestamp on each message. A rewind truncates the
+    /// messages, and the record that the conversation used to be longer — and what went wrong in the
+    /// part that was cut — is exactly what a diagnosis needs; it would be cut along with them. It
+    /// also keeps the wire types untouched: messages are what every provider request is built from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activity: Vec<ActivityEntry>,
+}
+
+/// The most activity entries a thread keeps.
+///
+/// The whole thread is rewritten on every save, so a list that only ever grew would make every save
+/// of a long-lived conversation slower. Diagnosing a session needs the recent past, and at this size
+/// that covers hundreds of turns — an agent on the most permissive level records an automatic
+/// approval for every command it runs.
+pub const MAX_ACTIVITY_ENTRIES: usize = 2000;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    /// Unix seconds.
+    pub at: u64,
+    pub kind: ActivityKind,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    MessageSent,
+    TurnFinished,
+    TurnFailed,
+    TurnCancelled,
+    PermissionRequested,
+    PermissionAllowed,
+    PermissionDenied,
+    Rewound,
+    Forked,
+    AttachmentsRefused,
+    RepeatedCallsStopped,
+}
+
+impl ActivityKind {
+    /// The same name the kind is stored under, so an exported log and the database agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActivityKind::MessageSent => "message_sent",
+            ActivityKind::TurnFinished => "turn_finished",
+            ActivityKind::TurnFailed => "turn_failed",
+            ActivityKind::TurnCancelled => "turn_cancelled",
+            ActivityKind::PermissionRequested => "permission_requested",
+            ActivityKind::PermissionAllowed => "permission_allowed",
+            ActivityKind::PermissionDenied => "permission_denied",
+            ActivityKind::Rewound => "rewound",
+            ActivityKind::Forked => "forked",
+            ActivityKind::AttachmentsRefused => "attachments_refused",
+            ActivityKind::RepeatedCallsStopped => "repeated_calls_stopped",
+        }
+    }
 }
 
 impl Thread {
+    /// Adds to the activity timeline, dropping the oldest entries past [`MAX_ACTIVITY_ENTRIES`].
+    pub fn record(&mut self, kind: ActivityKind, detail: impl Into<String>) {
+        self.record_at(now_seconds(), kind, detail);
+    }
+
+    fn record_at(&mut self, at: u64, kind: ActivityKind, detail: impl Into<String>) {
+        self.activity.push(ActivityEntry {
+            at,
+            kind,
+            detail: detail.into(),
+        });
+        let excess = self.activity.len().saturating_sub(MAX_ACTIVITY_ENTRIES);
+        if excess > 0 {
+            self.activity.drain(..excess);
+        }
+    }
+
     /// Keeps the summary that the panel lists in sync with the messages the thread view holds.
     pub fn refresh_metadata(&mut self) {
         self.metadata.message_count = self.messages.len();
@@ -881,6 +958,15 @@ impl CoworkStore {
         cx: &mut Context<Self>,
     ) -> Thread {
         let mut thread = self.blank_thread(source.model.clone(), source.project.clone());
+        thread.record(
+            ActivityKind::Forked,
+            format!(
+                "Started as a fork of “{}” (thread {}), carrying its first {} message(s)",
+                source.title,
+                source.id.as_str(),
+                messages.len()
+            ),
+        );
         thread.messages = messages;
         thread.metadata.forked = true;
         // A fork taken at the very first message has no prompt to be titled from yet.
@@ -909,6 +995,7 @@ impl CoworkStore {
                 forked: false,
             },
             messages: Vec::new(),
+            activity: Vec::new(),
         }
     }
 
@@ -1177,6 +1264,79 @@ mod tests {
                 forked: false,
             },
             messages,
+            activity: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_thread_stored_before_the_activity_timeline_existed_still_loads() {
+        // The shape an earlier build wrote: no `activity`, and messages with no field beyond the
+        // ones they always had. Failing to parse it would lose the conversation outright.
+        let stored = r#"{
+            "metadata": {
+                "id": "0001726000000000-1",
+                "title": "Fix the parser",
+                "model": { "provider_id": "anthropic", "model_id": "claude-sonnet-4-5" },
+                "created_at": 1726000000,
+                "updated_at": 1726000100,
+                "message_count": 2,
+                "preview": "Done."
+            },
+            "messages": [
+                { "role": "user", "text": "Fix the parser" },
+                { "role": "assistant", "text": "Done." }
+            ]
+        }"#;
+
+        let thread: Thread = serde_json::from_str(stored).expect("an old thread still parses");
+
+        assert_eq!(thread.messages.len(), 2);
+        assert!(thread.activity.is_empty());
+    }
+
+    #[test]
+    fn an_empty_timeline_is_not_written_at_all() {
+        // Otherwise every thread saved from now on grows an `"activity": []` for nothing.
+        let raw = serde_json::to_string(&thread_with(Vec::new())).expect("a thread serializes");
+        assert!(!raw.contains("activity"), "got: {raw}");
+    }
+
+    #[test]
+    fn the_activity_timeline_keeps_only_the_most_recent_entries() {
+        let mut thread = thread_with(Vec::new());
+        for at in 0..(MAX_ACTIVITY_ENTRIES as u64 + 10) {
+            thread.record_at(at, ActivityKind::PermissionAllowed, format!("entry {at}"));
+        }
+
+        assert_eq!(thread.activity.len(), MAX_ACTIVITY_ENTRIES);
+        assert_eq!(
+            thread.activity.first().map(|entry| entry.at),
+            Some(10),
+            "the oldest entries are the ones dropped"
+        );
+        assert_eq!(
+            thread.activity.last().map(|entry| entry.at),
+            Some(MAX_ACTIVITY_ENTRIES as u64 + 9)
+        );
+    }
+
+    #[test]
+    fn an_activity_kind_is_named_the_way_it_is_stored() {
+        for kind in [
+            ActivityKind::MessageSent,
+            ActivityKind::TurnFinished,
+            ActivityKind::TurnFailed,
+            ActivityKind::TurnCancelled,
+            ActivityKind::PermissionRequested,
+            ActivityKind::PermissionAllowed,
+            ActivityKind::PermissionDenied,
+            ActivityKind::Rewound,
+            ActivityKind::Forked,
+            ActivityKind::AttachmentsRefused,
+            ActivityKind::RepeatedCallsStopped,
+        ] {
+            let stored = serde_json::to_string(&kind).expect("a kind serializes");
+            assert_eq!(stored, format!("\"{}\"", kind.as_str()));
         }
     }
 

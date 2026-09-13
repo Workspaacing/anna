@@ -1,9 +1,12 @@
 use crate::{
-    NewThread, OpenSettings, SelectModel, ToggleFocus,
+    ExportAllSessionLogs, NewThread, OpenSettings, SelectModel, ToggleFocus,
     catalog::ModelRef,
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
-    thread::{CatalogState, CoworkStore, CoworkStoreEvent, ThreadId, ThreadMetadata, format_age},
+    session_log::{self, ExportedThread, LogContent, ThreadLog},
+    thread::{
+        CatalogState, CoworkStore, CoworkStoreEvent, Thread, ThreadId, ThreadMetadata, format_age,
+    },
     thread_view::CoworkThreadView,
 };
 use editor::{Editor, EditorEvent};
@@ -11,11 +14,13 @@ use fs::Fs;
 use project::Project;
 use gpui::{
     Action, AsyncWindowContext, App, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
-    PromptLevel, Subscription, WeakEntity, actions, uniform_list,
+    PromptLevel, Subscription, Task, WeakEntity, actions, uniform_list,
 };
 use settings::{DockSide, Settings as _};
-use std::sync::Arc;
-use ui::{ListItem, ListItemSpacing, Tooltip, prelude::*};
+use std::{path::Path, sync::Arc};
+use ui::{
+    ContextMenu, ContextMenuEntry, ListItem, ListItemSpacing, PopoverMenu, Tooltip, prelude::*,
+};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -37,6 +42,24 @@ actions!(
         OpenSelectedThread,
     ]
 );
+
+/// Which threads an export of many covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadSelection {
+    /// The threads the panel lists for this project.
+    ThisProject,
+    /// Every stored thread, whatever project it was about.
+    AllProjects,
+}
+
+/// A thread on its way into an export: already in hand from its view, or still being read back.
+enum PendingThread {
+    Open(ThreadLog),
+    Stored {
+        metadata: ThreadMetadata,
+        load: Task<anyhow::Result<Thread>>,
+    },
+}
 
 pub struct CoworkPanel {
     store: Entity<CoworkStore>,
@@ -553,6 +576,167 @@ impl CoworkPanel {
         }
     }
 
+    fn export_all_session_logs(
+        &mut self,
+        _: &ExportAllSessionLogs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.export_threads(ThreadSelection::ThisProject, window, cx);
+    }
+
+    /// Saves many threads to one log file, each with everything its own export would show.
+    ///
+    /// A thread open in this window is taken from its view, which knows what is never stored:
+    /// reasoning, check reports, the error on screen. The rest are read back from the database,
+    /// and one that cannot be read is reported in its place rather than ending the export — the
+    /// file is wanted most exactly when something is broken.
+    pub(crate) fn export_threads(
+        &mut self,
+        selection: ThreadSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folders = self.project_folders(cx);
+        let mut threads = self
+            .store
+            .read(cx)
+            .threads()
+            .iter()
+            .filter(|thread| {
+                selection == ThreadSelection::AllProjects || thread.belongs_to(&folders)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if threads.is_empty() {
+            self.report_error("There are no Cowork threads to export yet.".to_owned(), cx);
+            return;
+        }
+        // Oldest first, so the file reads in the order the work happened.
+        threads.sort_by_key(|thread| thread.created_at);
+
+        let folder_names = folders
+            .iter()
+            .map(|folder| {
+                Path::new(folder)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| folder.clone())
+            })
+            .collect::<Vec<_>>();
+        let (scope, subject) = match (selection, folder_names.first()) {
+            (ThreadSelection::ThisProject, Some(first)) => (
+                format!("the threads of this project ({})", folder_names.join(", ")),
+                first.clone(),
+            ),
+            (ThreadSelection::ThisProject, None) => (
+                "every stored thread: no folder is open in this window, so none are filtered out"
+                    .to_owned(),
+                "all-projects".to_owned(),
+            ),
+            (ThreadSelection::AllProjects, _) => (
+                "every stored thread, from every project".to_owned(),
+                "all-projects".to_owned(),
+            ),
+        };
+
+        let open_views = self
+            .workspace
+            .upgrade()
+            .map(|workspace| {
+                workspace
+                    .read(cx)
+                    .items_of_type::<CoworkThreadView>(cx)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let store = self.store.read(cx);
+        let mut pending = Vec::new();
+        for metadata in threads {
+            let open = open_views
+                .iter()
+                .find(|view| view.read(cx).thread_id() == &metadata.id);
+            pending.push(match open {
+                Some(view) => PendingThread::Open(view.read(cx).thread_log(cx)),
+                None => PendingThread::Stored {
+                    load: store.load_thread(metadata.id.clone(), cx),
+                    metadata,
+                },
+            });
+        }
+
+        let content = cx.spawn(async move |_, _| {
+            let mut exported = Vec::new();
+            for thread in pending {
+                exported.push(match thread {
+                    PendingThread::Open(log) => ExportedThread::Loaded(log),
+                    PendingThread::Stored { metadata, load } => match load.await {
+                        Ok(thread) => ExportedThread::Loaded(ThreadLog::stored(thread)),
+                        Err(error) => {
+                            log::warn!("cowork: could not read a thread to export: {error:#}");
+                            ExportedThread::Failed {
+                                metadata,
+                                error: format!("{error:#}"),
+                            }
+                        }
+                    },
+                });
+            }
+            LogContent::AllThreads {
+                scope,
+                threads: exported,
+            }
+        });
+
+        session_log::export(
+            "cowork-all-threads",
+            &subject,
+            content,
+            self.fs.clone(),
+            self.workspace.clone(),
+            cx,
+        );
+    }
+
+    /// A menu rather than a button: this project's threads are the usual want, but a problem that
+    /// spans projects needs the other choice, and both belong in the same place.
+    fn render_export_menu(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let panel = cx.weak_entity();
+
+        PopoverMenu::new("cowork-export-threads")
+            .trigger(
+                IconButton::new("cowork-export-threads-trigger", IconName::Download)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Export all threads")),
+            )
+            .menu(move |window, cx| {
+                let panel = panel.clone();
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    let export = |selection: ThreadSelection| {
+                        let panel = panel.clone();
+                        move |window: &mut Window, cx: &mut App| {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    panel.export_threads(selection, window, cx)
+                                })
+                                .log_err();
+                        }
+                    };
+
+                    menu.header("Export all threads to one log file")
+                        .item(
+                            ContextMenuEntry::new("This project's threads")
+                                .handler(export(ThreadSelection::ThisProject)),
+                        )
+                        .item(
+                            ContextMenuEntry::new("All projects")
+                                .handler(export(ThreadSelection::AllProjects)),
+                        )
+                }))
+            })
+            .anchor(gpui::Anchor::TopRight)
+    }
+
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
         h_flex()
             .w_full()
@@ -576,6 +760,7 @@ impl CoworkPanel {
                                 this.new_thread(&NewThread, window, cx)
                             })),
                     )
+                    .child(self.render_export_menu(cx))
                     .child(
                         IconButton::new("cowork-settings", IconName::Settings)
                             .icon_size(IconSize::Small)
@@ -916,6 +1101,7 @@ impl Render for CoworkPanel {
             .on_action(cx.listener(Self::select_next_thread))
             .on_action(cx.listener(Self::select_previous_thread))
             .on_action(cx.listener(Self::open_selected_thread))
+            .on_action(cx.listener(Self::export_all_session_logs))
             .size_full()
             .bg(cx.theme().colors().panel_background)
             .child(self.render_header(cx))
