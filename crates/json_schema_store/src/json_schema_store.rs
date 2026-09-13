@@ -12,7 +12,17 @@ use project::{LspStore, lsp_store::LocalLspAdapterDelegate};
 use settings::{LSP_SETTINGS_SCHEMA_URL_PREFIX, Settings as _, SettingsLocation};
 use util::schemars::{AllowTrailingCommas, DefaultDenyUnknownFields};
 
-const SCHEMA_URI_PREFIX: &str = "wu://schemas/";
+const SCHEMA_URI_PREFIX: &str = "anna://schemas/";
+
+/// Users' settings written by earlier releases still carry `"$schema": "wu://schemas/…"`,
+/// which must resolve to the same schemas.
+const LEGACY_SCHEMA_URI_PREFIX: &str = "wu://schemas/";
+
+/// Returns the schema path of an `anna://schemas/…` or legacy `wu://schemas/…` URI.
+fn schema_path_from_uri(uri: &str) -> Option<&str> {
+    uri.strip_prefix(SCHEMA_URI_PREFIX)
+        .or_else(|| uri.strip_prefix(LEGACY_SCHEMA_URI_PREFIX))
+}
 
 const TSCONFIG_SCHEMA: &str = include_str!("schemas/tsconfig.json");
 const PACKAGE_JSON_SCHEMA: &str = include_str!("schemas/package.json");
@@ -101,22 +111,23 @@ enum ChangedSchemas {
 
 impl SchemaStore {
     fn notify_schema_changed(&mut self, changed_schemas: ChangedSchemas, cx: &mut App) {
-        let uris_to_invalidate = match changed_schemas {
-            ChangedSchemas::Settings => {
-                let settings_uri_prefix = &format!("{SCHEMA_URI_PREFIX}settings");
-                let project_settings_uri = &format!("{SCHEMA_URI_PREFIX}project_settings");
-                DYNAMIC_SCHEMA_CACHE
-                    .write()
-                    .extract_if(|uri, _| {
-                        uri == project_settings_uri || uri.starts_with(settings_uri_prefix)
+        // The cache is keyed by the URI the language server asked for, which may
+        // use the legacy prefix, and that is the URI it has to be told about.
+        let uris_to_invalidate: Vec<_> = match changed_schemas {
+            ChangedSchemas::Settings => DYNAMIC_SCHEMA_CACHE
+                .write()
+                .extract_if(|uri, _| {
+                    schema_path_from_uri(uri).is_some_and(|path| {
+                        path == "project_settings" || path.starts_with("settings")
                     })
-                    .map(|(url, _)| url)
-                    .collect()
-            }
+                })
+                .map(|(url, _)| url)
+                .collect(),
             ChangedSchemas::DebugTasks => DYNAMIC_SCHEMA_CACHE
                 .write()
-                .remove_entry(&format!("{SCHEMA_URI_PREFIX}debug_tasks"))
-                .map_or_else(Vec::new, |(uri, _)| vec![uri]),
+                .extract_if(|uri, _| schema_path_from_uri(uri) == Some("debug_tasks"))
+                .map(|(url, _)| url)
+                .collect(),
         };
 
         if uris_to_invalidate.is_empty() {
@@ -142,7 +153,7 @@ pub fn handle_schema_request(
     uri: String,
     cx: &mut AsyncApp,
 ) -> Task<Result<String>> {
-    let path = match uri.strip_prefix(SCHEMA_URI_PREFIX) {
+    let path = match schema_path_from_uri(&uri) {
         Some(path) => path,
         None => return Task::ready(Err(anyhow::anyhow!("Invalid schema URI: {}", uri))),
     };
@@ -428,10 +439,8 @@ pub fn all_schema_file_associations(
             "url": format!("{SCHEMA_URI_PREFIX}settings"),
         },
         {
-            "fileMatch": [
-                paths::local_settings_file_relative_path(),
-                paths::legacy_local_settings_file_relative_path()
-            ],
+            // `.anna/settings.json`, `.wu/settings.json` and `.zed/settings.json`.
+            "fileMatch": paths::local_settings_file_relative_paths(),
             "url": format!("{SCHEMA_URI_PREFIX}project_settings"),
         },
         {
@@ -439,19 +448,25 @@ pub fn all_schema_file_associations(
             "url": format!("{SCHEMA_URI_PREFIX}keymap"),
         },
         {
-            "fileMatch": [
-                schema_file_match(paths::tasks_file()),
-                paths::local_tasks_file_relative_path(),
-                paths::legacy_local_tasks_file_relative_path()
-            ],
+            "fileMatch": std::iter::once(serde_json::json!(schema_file_match(paths::tasks_file())))
+                .chain(
+                    paths::local_tasks_file_relative_paths()
+                        .iter()
+                        .map(|path| serde_json::json!(path)),
+                )
+                .collect::<Vec<_>>(),
             "url": format!("{SCHEMA_URI_PREFIX}tasks"),
         },
         {
-            "fileMatch": [
-                schema_file_match(paths::debug_scenarios_file()),
-                paths::local_debug_file_relative_path(),
-                paths::legacy_local_debug_file_relative_path()
-            ],
+            "fileMatch": std::iter::once(serde_json::json!(schema_file_match(
+                paths::debug_scenarios_file()
+            )))
+            .chain(
+                paths::local_debug_file_relative_paths()
+                    .iter()
+                    .map(|path| serde_json::json!(path)),
+            )
+            .collect::<Vec<_>>(),
             "url": format!("{SCHEMA_URI_PREFIX}debug_tasks"),
         },
         {
@@ -608,6 +623,16 @@ mod tests {
     use language::FakeLspAdapter;
     use project::Project;
     use settings::SettingsStore;
+
+    #[test]
+    fn test_schema_path_from_uri_accepts_the_legacy_prefix() {
+        assert_eq!(
+            schema_path_from_uri("anna://schemas/settings/lsp/rust-analyzer/settings"),
+            Some("settings/lsp/rust-analyzer/settings")
+        );
+        assert_eq!(schema_path_from_uri("wu://schemas/tasks"), Some("tasks"));
+        assert_eq!(schema_path_from_uri("https://json.schemastore.org/tasks"), None);
+    }
 
     #[gpui::test]
     async fn test_project_settings_schema_includes_available_lsp_adapters(cx: &mut TestAppContext) {

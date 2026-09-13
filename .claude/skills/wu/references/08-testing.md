@@ -1,6 +1,6 @@
-# Wu — Testing, Test Infrastructure & Performance Measurement
+# Anna — Testing, Test Infrastructure & Performance Measurement
 
-Repo: `C:/Users/USER/Documents/wu-main` (Rust fork of Zed). Read-only survey.
+Repo: `C:/Users/USER/Documents/wu-main` (Rust, built on Zed). Read-only survey.
 Toolchain pinned: `rust-toolchain.toml` -> **1.97.1** (stable, minimal profile).
 
 Scale of the test suite (measured):
@@ -581,10 +581,10 @@ cargo perf-compare --save=out.md after before
 
 ### 5.4 Scripts
 
-- `script/cargo` — a **Node** wrapper around cargo that injects `--timings` for `build/check/run/test` and post-processes `target/cargo-timings/*.html` (upload to Snowflake for Zed staff). **It is a pure passthrough unless `git remote -v` mentions `zed-industries/zed`, which is false in this fork**, so in Wu it is functionally just `cargo`. `./script/cargo --init` installs a shell alias (bash/zsh/fish/PowerShell). Not worth using here.
+- `script/cargo` — a **Node** wrapper around cargo that injects `--timings` for `build/check/run/test` and post-processes `target/cargo-timings/*.html` (upload to Snowflake for Zed staff). **It is a pure passthrough unless `git remote -v` mentions `zed-industries/zed`, which is false in this repo**, so in Anna it is functionally just `cargo`. `./script/cargo --init` installs a shell alias (bash/zsh/fish/PowerShell). Not worth using here.
 - `script/clippy` — `cargo clippy --workspace --release --all-targets --all-features -- --deny warnings`, plus `cargo shear`, `typos`, `buf lint/format` when locally installed. **`.rules` says: use `./script/clippy`, not `cargo clippy`.** Windows variant: `script/clippy.ps1`.
 - `script/histogram` — Python (pandas/matplotlib/seaborn). Parses `measurement: 12ms` lines out of log files and plots per-measurement histograms: `python script/histogram log1.txt log2.txt`.
-- `script/memory-benchmark` — **macOS only** (uses `footprint(1)`). Alternates launching Wu and Zed with throwaway `--user-data-dir`s and reports the median footprint. `RUNS=5 SETTLE_SECONDS=30 script/memory-benchmark`.
+- `script/memory-benchmark` — **macOS only** (uses `footprint(1)`). Alternates launching Anna and Zed with throwaway `--user-data-dir`s and reports the median footprint. `RUNS=5 SETTLE_SECONDS=30 script/memory-benchmark`.
 - `cargo xtask ...` (alias -> `tooling/xtask`): `clippy`, `licenses`, `package-conformity`, `publish-gpui`, `wsl-sandbox-tests`, `setup-webrtc`, `web-examples`.
 
 **When should an agent benchmark?** Only when the change is explicitly about performance (rendering, rope/sum-tree, worktree scan, search) or a reviewer asks. Benchmarks need release builds of large crates and take minutes to hours. Default to tests.
@@ -643,13 +643,13 @@ cargo perf-compare new old
 - `package(db)` runs in a `sequential-db-tests` group with `max-threads = 1`.
 - Priority boosts so the slowest start first: `worktree::test_random_worktree_changes` (100), `extension_host::test_extension_store_with_test_extension` (99).
 - 300s timeout overrides for: `test_rainbow_bracket_highlights`, `test_wrapped_invisibles_drawing`, `test_basic_following`, `test_random_diagnostics_blocks`, `extension_host::test_extension_store_with_test_extension`, `language_model::test_from_image_downscales_to_default_5mb_limit`, a list of `vim` tests, `editor::test_random_split_editor`, `editor::test_random_blocks`.
-- Some filters reference upstream Zed packages that no longer exist here (`collab`, `vim`, `language_model`) — harmless leftovers.
+- Some filters reference Zed packages that no longer exist here (`collab`, `vim`, `language_model`) — harmless leftovers.
 
 **If your new test legitimately takes >60s under nextest, add an override here rather than shrinking coverage.**
 
 ### Windows-specific
 
-- **No CI workflow runs tests in this repo** (`.github/workflows/` has only `release.yml` and `upstream-sync.yml`), so you are the CI. Run at least the affected crate locally.
+- **No CI workflow runs tests in this repo** (`.github/workflows/` has only `release.yml`), so you are the CI. Run at least the affected crate locally.
 - `#[cfg(unix)]` / `#[cfg(not(windows))]`-only tests exist in: `crates/fs/tests/integration/fs_tests.rs:594,614,798`, `crates/worktree/tests/integration/worktree_tests.rs:1170,1241`, `crates/project/tests/integration/project_tests.rs:71,192,13566,17474` (symlink behaviour — that file carries an explicit note that POSIX symlinks on Windows are opt-in), `crates/open_path_prompt/src/open_path_prompt_tests.rs:51,428`, `crates/editor/src/editor_tests.rs:18963`.
 - Windows-only branches: `crates/editor/src/test.rs:35` (test font Courier New instead of Helvetica), `EditorTestContext::root_path()` / `EditorLspTestContext::root_path()` -> `C:\root`, `crates/gpui/src/platform/test/window.rs:438`, `crates/project_panel/src/tests/undo.rs:32`, `crates/project/tests/integration/lsp_store.rs:331`.
 - **Use `path!("/root/x")`, `uri!("file:///x")`, `line_endings!("a\nb")` in every new test with a literal.** A bare `"/root/x"` will pass on Linux/macOS and fail here.

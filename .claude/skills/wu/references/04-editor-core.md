@@ -1,11 +1,11 @@
-# Wu — Text / Editor / Language Core: Agent Field Guide
+# Anna — Text / Editor / Language Core: Agent Field Guide
 
-Repo: `C:/Users/USER/Documents/wu-main` (Rust fork of Zed; upstream pin in `UPSTREAM_VERSION`).
+Repo: `C:/Users/USER/Documents/wu-main` (Rust, built on Zed).
 Scope: `sum_tree`, `rope`, `text`, `language_core`, `language`, `languages`, `grammars`, `multi_buffer`,
 `buffer_diff`, `editor`, `lsp`, `lsp_locations`, `project`, `worktree`, `search`, `diagnostics`,
 `outline`, `snippet`, `snippet_provider`, `prettier`, `syntax_theme`, `call_hierarchy`, `language_tools`.
 
-> **Read this before trusting upstream-Zed knowledge.** This fork has diverged in three
+> **Read this before trusting Zed knowledge.** Anna has diverged from Zed in three
 > load-bearing ways that will silently break code written from Zed memory:
 > 1. **`ExcerptId` no longer exists.** `multi_buffer::Anchor` is an enum (`Min` / `Excerpt(ExcerptAnchor)` / `Max`)
 >    keyed by `PathKey`/`PathKeyIndex` + `text::Anchor`. See "MultiBuffer" below.
@@ -16,7 +16,7 @@ Scope: `sum_tree`, `rope`, `text`, `language_core`, `language`, `languages`, `gr
 >
 > Also: `crates/editor/src/editor.rs` has been split — `input.rs`, `selection.rs`, `clipboard.rs`,
 > `completions.rs`, `code_actions.rs`, `navigation.rs`, `rewrap.rs`, `diagnostics.rs`, `config.rs`,
-> `markdown_actions.rs`, `split.rs` are fork-local modules that don't exist upstream.
+> `markdown_actions.rs`, `split.rs` are Anna-local modules that don't exist in Zed.
 
 ---
 
@@ -284,7 +284,7 @@ instead: `impl<'a> Dimension<'a, YourSummary> for YourDim`.
 - Diagnostics: `diagnostic.rs` (`Diagnostic`, severity, `DiagnosticSourceKind`) and
   `diagnostic_set.rs` (`DiagnosticSet` = `SumTree<DiagnosticEntry<Anchor>>`, `DiagnosticGroup`).
 - `language_settings.rs` — `LanguageSettings`, `AllLanguageSettings`, `language_settings_at()`.
-- `modeline.rs` (781 lines) — vim/emacs modeline parsing (fork feature).
+- `modeline.rs` (781 lines) — vim/emacs modeline parsing (Anna feature).
 - Other notable files: `buffer/bracket_ranges.rs`, `buffer/row_chunk.rs` (`RowChunks` caching for
   tree-sitter), `outline.rs`, `runnable.rs`, `text_diff.rs`, `available_languages.rs`,
   `file_content.rs`, `proto.rs`.
@@ -352,7 +352,7 @@ Entry point `crates/editor/src/editor.rs` (12 380 lines); module list at `editor
 | `selections_collection` | `src/selections_collection.rs` (1 603) | `SelectionsCollection`, `MutableSelectionsCollection` |
 | `selection` | `src/selection.rs` (2 426) | `Editor::change_selections`, selection effects/history, editor-to-editor sync |
 | `input` | `src/input.rs` (3 094) | `handle_input`, autoclose, autosurround, IME |
-| `split` / `split_editor_view` | `src/split.rs` (6 485), `src/split_editor_view.rs` (695) | fork-specific side-by-side diff (companion display maps) |
+| `split` / `split_editor_view` | `src/split.rs` (6 485), `src/split_editor_view.rs` (695) | Anna-specific side-by-side diff (companion display maps) |
 | `inlays` | `src/inlays.rs`, `inlays/inlay_hints.rs` (5 191) | LSP inlay hint lifecycle |
 | `semantic_tokens` | `src/semantic_tokens.rs` (2 942) | LSP semantic token highlighting |
 | `hover_popover` / `hover_links` | (3 348 / 3 266) | hover docs; cmd-click go-to |
@@ -438,7 +438,7 @@ pub struct MyNewThing {
 
 Attribute forms in use: `#[action(name = "Toggle")]` to override the action name
 (`actions.rs:395`), `#[action(deprecated_aliases = ["..."])]` for renames
-(`crates/wu_actions/src/lib.rs:43`), `#[action(namespace = wu, no_json, no_register)]` for actions
+(`crates/wu_actions/src/lib.rs:43`), `#[action(namespace = anna, no_json, no_register)]` for actions
 dispatched only programmatically (`wu_actions/src/lib.rs:34`).
 Namespaces declared in `actions.rs`: `editor`, `go_to_line`, `debugger`, `markdown`.
 
@@ -1191,7 +1191,7 @@ executor stays responsive. Use it in any loop that can run over a whole large fi
 
 | Crate | Entry | Notes |
 |---|---|---|
-| `search` | `crates/search/src/search.rs:24` `init` | `buffer_search.rs` (4 313), `project_search.rs` (9 558), `text_finder/` (fork-local fuzzy text finder). Query type is `project::search::SearchQuery` (`crates/project/src/search.rs:76`) |
+| `search` | `crates/search/src/search.rs:24` `init` | `buffer_search.rs` (4 313), `project_search.rs` (9 558), `text_finder/` (Anna-local fuzzy text finder). Query type is `project::search::SearchQuery` (`crates/project/src/search.rs:76`) |
 | `diagnostics` | `crates/diagnostics/src/diagnostics.rs:69` `init` | project diagnostics multibuffer view, `buffer_diagnostics.rs`, `diagnostic_renderer.rs` (registered into the editor via `editor::diagnostics::set_diagnostic_renderer`, `editor/src/diagnostics.rs:32`) |
 | `outline` | `crates/outline/src/outline.rs` | outline picker; item types are `language::outline::{Outline, OutlineItem, SymbolPath}` (`crates/language/src/outline.rs:10,21,34`) |
 | `snippet` | `crates/snippet/src/snippet.rs:18` `Snippet::parse` | LSP snippet syntax parser -> `TabStop`s |

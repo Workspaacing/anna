@@ -2,10 +2,10 @@
 AppId={#AppId}
 AppName={#AppName}
 AppVerName={#AppDisplayName}
-AppPublisher=Farshed
-AppPublisherURL=https://github.com/Workspaacing/wu
-AppSupportURL=https://github.com/Workspaacing/wu/issues
-AppUpdatesURL=https://github.com/Workspaacing/wu/releases
+AppPublisher=Workspaacing
+AppPublisherURL=https://github.com/Workspaacing/anna
+AppSupportURL=https://github.com/Workspaacing/anna/issues
+AppUpdatesURL=https://github.com/Workspaacing/anna/releases
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
@@ -65,7 +65,7 @@ Name: "addtopath"; Description: "{cm:AddToPath}"; GroupDescription: "{cm:Other}"
 Name: "{app}"; AfterInstall: DisableAppDirInheritance
 
 [Files]
-Source: "{#ResourcesDir}\Wu.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
+Source: "{#ResourcesDir}\Anna.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion
 Source: "{#ResourcesDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: IsWindows11OrLater
@@ -1256,10 +1256,10 @@ Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}\command"; Valu
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{code:AddToPath|{app}\bin}"; Tasks: addtopath; Check: NeedsAddToPath(ExpandConstant('{app}\bin'))
 
 ; URI Scheme
-Root: HKCU; Subkey: "Software\Classes\wu"; ValueType: "string"; ValueData: "URL:wu Protocol"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\wu"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\wu\DefaultIcon"; ValueType: "string"; ValueData: "{app}\Wu.exe,1"
-Root: HKCU; Subkey: "Software\Classes\wu\shell\open\command"; ValueType: "string"; ValueData: """{app}\Wu.exe"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\anna"; ValueType: "string"; ValueData: "URL:anna Protocol"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\anna"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\anna\DefaultIcon"; ValueType: "string"; ValueData: "{app}\Anna.exe,1"
+Root: HKCU; Subkey: "Software\Classes\anna\shell\open\command"; ValueType: "string"; ValueData: """{app}\Anna.exe"" ""%1"""
 
 [Code]
 function WizardNotSilent(): Boolean;
@@ -1377,8 +1377,7 @@ procedure RemoveAppxPackage();
 var
   RemoveAppxPackageResultCode: Integer;
 begin
-  ShellExec('', 'powershell.exe', '-Command ' + AddQuotes('Remove-AppxPackage -Package ''{#AppxFullName}'''), '', SW_HIDE, ewWaitUntilTerminated, RemoveAppxPackageResultCode);
-  if not WizardIsTaskSelected('addcontextmenufiles') then begin
+  ShellExec('', 'powershell.exe', '-Command ' + AddQuotes('Remove-AppxPackage -Package ''{#AppxFullName}'''), '', SW_HIDE, ewWaitUntilTerminated, RemoveAppxPackageResultCode);  if not WizardIsTaskSelected('addcontextmenufiles') then begin
     RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\{#RegValueName}ContextMenu');
   end;
 end;

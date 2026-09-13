@@ -7,11 +7,10 @@ use git::repository::DEFAULT_WORKTREE_DIRECTORY;
 use gpui::{AsyncApp, BorrowAppContext, Context, Entity, EventEmitter, Subscription, Task};
 use lsp::{DEFAULT_LSP_REQUEST_TIMEOUT_SECS, LanguageServerName};
 use paths::{
-    EDITORCONFIG_NAME, debug_task_file_name, legacy_local_debug_file_relative_path,
-    legacy_local_settings_file_relative_path, legacy_local_tasks_file_relative_path,
-    local_debug_file_relative_path, local_settings_file_relative_path,
-    local_tasks_file_relative_path, local_vscode_launch_file_relative_path,
-    local_vscode_tasks_file_relative_path, resolve_local_config_path, task_file_name,
+    EDITORCONFIG_NAME, debug_task_file_name, local_debug_file_relative_paths,
+    local_settings_file_relative_path, local_settings_file_relative_paths,
+    local_tasks_file_relative_paths, local_vscode_launch_file_relative_path,
+    local_vscode_tasks_file_relative_path, resolve_local_config_paths, task_file_name,
 };
 use rpc::{
     AnyProtoClient, TypedEnvelope,
@@ -980,9 +979,9 @@ impl SettingsObserver {
             return;
         };
 
-        struct LocalSettingsFile {
-            path: &'static RelPath,
-            legacy_path: Option<&'static RelPath>,
+        struct LocalSettingsFile<'a> {
+            // Highest precedence first; only the first one that exists is loaded.
+            paths: &'a [&'static RelPath],
             kind: LocalSettingsKind,
             // How many trailing path components to strip to get the directory
             // the settings are keyed by.
@@ -990,32 +989,27 @@ impl SettingsObserver {
         }
         let local_settings_files = [
             LocalSettingsFile {
-                path: local_settings_file_relative_path(),
-                legacy_path: Some(legacy_local_settings_file_relative_path()),
+                paths: local_settings_file_relative_paths(),
                 kind: LocalSettingsKind::Settings,
                 directory_depth: local_settings_file_relative_path().components().count(),
             },
             LocalSettingsFile {
-                path: local_tasks_file_relative_path(),
-                legacy_path: Some(legacy_local_tasks_file_relative_path()),
+                paths: local_tasks_file_relative_paths(),
                 kind: LocalSettingsKind::Tasks,
                 directory_depth: 1,
             },
             LocalSettingsFile {
-                path: local_vscode_tasks_file_relative_path(),
-                legacy_path: None,
+                paths: &[local_vscode_tasks_file_relative_path()],
                 kind: LocalSettingsKind::Tasks,
                 directory_depth: 1,
             },
             LocalSettingsFile {
-                path: local_debug_file_relative_path(),
-                legacy_path: Some(legacy_local_debug_file_relative_path()),
+                paths: local_debug_file_relative_paths(),
                 kind: LocalSettingsKind::Debug,
                 directory_depth: 1,
             },
             LocalSettingsFile {
-                path: local_vscode_launch_file_relative_path(),
-                legacy_path: None,
+                paths: &[local_vscode_launch_file_relative_path()],
                 kind: LocalSettingsKind::Debug,
                 directory_depth: 1,
             },
@@ -1031,47 +1025,54 @@ impl SettingsObserver {
             let mut load_path = path.clone();
             let mut removed = change == &PathChange::Removed;
             let matched_file = local_settings_files.iter().find_map(|file| {
-                let matched_path = [Some(file.path), file.legacy_path]
-                    .into_iter()
-                    .flatten()
+                let matched_path = file
+                    .paths
+                    .iter()
+                    .copied()
                     .find(|candidate| path.ends_with(candidate))?;
                 let project_dir = strip_components(path, matched_path.components().count())?;
                 Some((file, project_dir))
             });
             let (settings_dir, kind) = if let Some((file, project_dir)) = matched_file {
-                if let Some(legacy_path) = file.legacy_path {
+                if file.paths.len() > 1 {
                     let exists = |candidate: &RelPath| snapshot.entry_for_path(candidate).is_some();
-                    let file_path: Arc<RelPath> = project_dir.join(file.path).into();
-                    let legacy_file_path: Arc<RelPath> = project_dir.join(legacy_path).into();
-                    let active_path = resolve_local_config_path(
-                        file_path.clone(),
-                        legacy_file_path.clone(),
-                        exists,
-                    );
-                    // A `.zed` file shadowed by its `.wu` counterpart has no effect. Its
-                    // removal still falls through so the `.zed` directory gets cleared,
-                    // e.g. when `.zed` was renamed to `.wu` in one batch.
-                    if active_path == file_path
-                        && *path != file_path
-                        && exists(&file_path)
+                    let candidate_paths = file
+                        .paths
+                        .iter()
+                        .map(|candidate| Arc::<RelPath>::from(project_dir.join(candidate)))
+                        .collect::<Vec<_>>();
+                    let Some(active_path) =
+                        resolve_local_config_paths(candidate_paths.iter().cloned(), exists)
+                    else {
+                        continue;
+                    };
+                    let precedence = |candidate: &Arc<RelPath>| {
+                        candidate_paths.iter().position(|other| other == candidate)
+                    };
+                    // A file shadowed by a higher-precedence one (a `.zed` file next to
+                    // `.anna` or `.wu`) has no effect. Its removal still falls through so
+                    // its directory gets cleared, e.g. when `.zed` was renamed in one batch.
+                    if exists(&active_path)
+                        && precedence(path) > precedence(&active_path)
                         && !removed
                     {
                         continue;
                     }
-                    let shadowed_path = if active_path == file_path {
-                        legacy_file_path
-                    } else {
-                        file_path
-                    };
-                    // Tasks and debug configs are keyed by their `.wu` or `.zed` directory,
-                    // so the directory that lost precedence has to be cleared explicitly.
-                    if let Some(shadowed_dir) =
-                        strip_components(&shadowed_path, file.directory_depth)
-                        && strip_components(&active_path, file.directory_depth).as_ref()
-                            != Some(&shadowed_dir)
-                        && (exists(&shadowed_path) || shadowed_path == *path)
+                    // Tasks and debug configs are keyed by their `.anna`, `.wu` or `.zed`
+                    // directory, so every directory that lost precedence has to be cleared
+                    // explicitly.
+                    let active_dir = strip_components(&active_path, file.directory_depth);
+                    for shadowed_path in candidate_paths
+                        .iter()
+                        .filter(|candidate| **candidate != active_path)
                     {
-                        settings_updates.push((shadowed_dir, file.kind, None));
+                        if let Some(shadowed_dir) =
+                            strip_components(shadowed_path, file.directory_depth)
+                            && active_dir.as_ref() != Some(&shadowed_dir)
+                            && (exists(shadowed_path) || shadowed_path == path)
+                        {
+                            settings_updates.push((shadowed_dir, file.kind, None));
+                        }
                     }
                     removed = !exists(&active_path);
                     load_path = active_path;
@@ -1136,12 +1137,12 @@ impl SettingsObserver {
                                     let zed_tasks = TaskTemplates::try_from(vscode_tasks)
                                         .with_context(|| {
                                             format!(
-                                        "converting VSCode tasks into Wu ones, file {abs_path:?}"
+                                        "converting VSCode tasks into Anna ones, file {abs_path:?}"
                                     )
                                         })?;
                                     serde_json::to_string(&zed_tasks).with_context(|| {
                                         format!(
-                                            "serializing Wu tasks into JSON, file {abs_path:?}"
+                                            "serializing Anna tasks into JSON, file {abs_path:?}"
                                         )
                                     })
                                 } else if abs_path.ends_with(local_vscode_launch_file_relative_path().as_std_path()) {
@@ -1153,12 +1154,12 @@ impl SettingsObserver {
                                     let zed_tasks = DebugTaskFile::try_from(vscode_tasks)
                                         .with_context(|| {
                                             format!(
-                                        "converting VSCode debug tasks into Wu ones, file {abs_path:?}"
+                                        "converting VSCode debug tasks into Anna ones, file {abs_path:?}"
                                     )
                                         })?;
                                     serde_json::to_string(&zed_tasks).with_context(|| {
                                         format!(
-                                            "serializing Wu tasks into JSON, file {abs_path:?}"
+                                            "serializing Anna tasks into JSON, file {abs_path:?}"
                                         )
                                     })
                                 } else {

@@ -1,6 +1,6 @@
-# Wu — Settings, Keymaps, Actions, Themes, Tasks, Snippets
+# Anna — Settings, Keymaps, Actions, Themes, Tasks, Snippets
 
-Repo: `C:/Users/USER/Documents/wu-main` (fork of Zed, upstream pin in `UPSTREAM_VERSION` = `01acd0ee8e906dd0ec8b526fe08da94444a5e2af`).
+Repo: `C:/Users/USER/Documents/wu-main` (built on Zed).
 Everything below is READ-ONLY analysis; no project files were modified.
 
 ---
@@ -14,13 +14,13 @@ Everything below is READ-ONLY analysis; no project files were modified.
    Only 10 call sites of `::register(cx)` remain, all inside `#[cfg(test)]` blocks in `git_ui`/`git_ui_core`.
 3. **`SettingsSources` no longer exists.** Layering is done *before* the typed structs are built, by
    `MergeFrom` on `SettingsContent`. `from_settings` receives one already-merged `&SettingsContent`.
-4. **`script/update-json-schemas` has NOTHING to do with Wu's settings schema.** It only re-downloads
-   `tsconfig.json` / `package.json` from SchemaStore. Wu's settings/keymap/tasks/theme schemas are
-   generated **at runtime** from `schemars` derives and served over a `wu://schemas/...` URI to the
+4. **`script/update-json-schemas` has NOTHING to do with Anna's settings schema.** It only re-downloads
+   `tsconfig.json` / `package.json` from SchemaStore. Anna's settings/keymap/tasks/theme schemas are
+   generated **at runtime** from `schemars` derives and served over an `anna://schemas/...` URI (`wu://schemas/...` still resolves to the same schemas) to the
    JSON language server. **There is no schema file to regenerate and commit.**
 5. **Task variables were NOT renamed.** They are still `$ZED_FILE`, `$ZED_WORKTREE_ROOT`, ... —
    `ZED_VARIABLE_NAME_PREFIX = "ZED_"` in `crates/task/src/task.rs:254`.
-6. Project-local config dir is `.wu/` (with `.zed/` kept as a legacy fallback, and `.vscode/` for imports).
+6. Project-local config dir is `.anna/` (with `.wu/` and then `.zed/` kept as legacy fallbacks, and `.vscode/` for imports).
 7. The default keymap has already been re-tuned to be VS Code-like; the `keymaps/*/vscode.json`
    base keymaps are now just small *delta overlays*.
 
@@ -37,12 +37,12 @@ Top-level: `C:/Users/USER/Documents/wu-main/assets/`
 | `assets/icons/` | 191 top-level `.svg` + `LICENSES` | UI icon set |
 | `assets/icons/file_icons/` | 81 | file-type icons |
 | `assets/icons/knockouts/` | 6 | `dot_bg/fg`, `triangle_bg/fg`, `x_bg/fg` |
-| `assets/images/` | 4 | `wu_icon.png`, `wu_logo.svg`, `screenshot-dark.png`, `screenshot-light.png` |
+| `assets/images/` | 4 | `wu_icon.png` (raster, not renamed yet), `anna_logo.svg`, `screenshot-dark.png`, `screenshot-light.png` |
 | `assets/keymaps/` | 19 | see section 3 |
 | `assets/settings/` | 9 | see below |
 | `assets/themes/` | 10 | 4 theme families + licenses |
 
-**There is no `assets/sounds/` and no `assets/prompts/` directory** (both exist upstream in Zed; Wu strips
+**There is no `assets/sounds/` and no `assets/prompts/` directory** (both exist in Zed; Anna strips
 collab audio and the agent prompt templates).
 
 ### Fonts
@@ -68,14 +68,14 @@ Default theme in `assets/settings/default.json:9-14`:
 |---|---|
 | `default.json` (2378 lines) | `settings::default_settings()` — `crates/settings/src/settings.rs:133` |
 | `default_semantic_token_rules.json` | `settings::default_semantic_token_rules()` — `settings.rs:137` |
-| `initial_user_settings.json` | template written to `~/.config/Wu/settings.json` on first run |
-| `initial_local_settings.json` | template for `.wu/settings.json` |
+| `initial_user_settings.json` | template written to `config_dir()/settings.json` (`%APPDATA%\Anna\settings.json` on Windows) on first run |
+| `initial_local_settings.json` | template for `.anna/settings.json` |
 | `initial_server_settings.json` | remote/server settings template |
 | `initial_tasks.json` | template for `tasks.json` (fully commented reference) |
 | `initial_local_debug_tasks.json`, `initial_debug_tasks.json` | debug.json templates |
 | `initial_worktree_setup_tasks.json` | tasks with `"hooks": ["create_worktree"]` |
 
-`default.json` begins with `"$schema": "wu://schemas/settings"`.
+`default.json` begins with `"$schema": "anna://schemas/settings"`.
 
 ### Embedding
 Two separate `RustEmbed` roots — this matters:
@@ -162,7 +162,7 @@ default.json
       <- platform_overrides[macos|linux|windows]
   <- active settings profile
   <- server settings           (remote)
-  <- project settings (.wu/settings.json), deepest directory wins
+  <- project settings (.anna/settings.json), deepest directory wins
 ```
 
 Precedence is also encoded in `impl Ord for SettingsFile` (`settings_store.rs:187`), with variants
@@ -220,7 +220,8 @@ There is **no** free function `settings::get::<T>(cx)` in this tree.
 
 ### 2.5 Config file locations (`crates/paths/src/paths.rs`)
 
-`APP_NAME = "Wu"` (`paths.rs:19`). `config_dir()` is `%APPDATA%\Wu` on Windows, XDG config on Linux.
+`APP_NAME = "Anna"` (`paths.rs:19`). `config_dir()` is `%APPDATA%\Anna` on Windows, XDG config on Linux
+(the old `Wu` folders are copied over on first run and left in place as a backup).
 
 | Purpose | Path |
 |---|---|
@@ -234,11 +235,12 @@ There is **no** free function `settings::get::<T>(cx)` in this tree.
 | Snippets | `config_dir()/snippets/` (`:399`) |
 | Prompts | `config_dir()/prompts/` (`:407`) |
 | Global agent file | `config_dir()/AGENTS.md` (`:344`) |
-| Project settings | `.wu/settings.json` (`:532`), legacy `.zed/settings.json` (`:540`) |
-| Project tasks | `.wu/tasks.json` (`:547`), legacy `.zed/tasks.json` (`:555`), VS Code `.vscode/tasks.json` (`:562`) |
-| Project debug | `.wu/debug.json` (`:578`), legacy `.zed/debug.json` (`:586`) |
+| Project settings | `.anna/settings.json`, legacy `.wu/settings.json` then `.zed/settings.json` |
+| Project tasks | `.anna/tasks.json`, legacy `.wu/tasks.json` then `.zed/tasks.json`, VS Code `.vscode/tasks.json` |
+| Project debug | `.anna/debug.json`, legacy `.wu/debug.json` then `.zed/debug.json` |
 
-`paths::resolve_local_config_path` (`:519`) picks `.wu` over `.zed` unless only `.zed` exists.
+`paths::resolve_local_config_path` (`:519`) picks `.anna` over `.wu` over `.zed`: a legacy folder is used
+only when no higher-priority folder has the file.
 
 ---
 
@@ -303,7 +305,7 @@ rather than at your field.
 
 (`assets/settings/default.json:274`.) This is mandatory in practice, because `from_settings`
 implementations call `.unwrap()`. Keep the comment: `default.json` doubles as the reference doc
-(`wu: open default settings`).
+(`anna: open default settings`).
 
 ### Step 5 — Fix `vscode_import.rs`
 
@@ -384,11 +386,11 @@ Available renderers: `render_toggle_button`, `render_text_field`, `render_dropdo
 show it. Types listed without a renderer fall back to `UnimplementedSettingField`, which renders an
 "Edit in settings.json" button (`settings_ui.rs:446-470`).
 
-### Step 9 — Project-level (`.wu/settings.json`) opt-in
+### Step 9 — Project-level (`.anna/settings.json`) opt-in
 
 Only fields reachable from `ProjectSettingsContent` (`crates/settings_content/src/project.rs:41-78`) —
 `all_languages`, `worktree` (both flattened), `lsp`, `dap`, `terminal`, `load_direnv`,
-`git_hosting_providers` — are accepted in `.wu/settings.json`. `SettingsStore::set_local_settings`
+`git_hosting_providers` — are accepted in `.anna/settings.json`. `SettingsStore::set_local_settings`
 parses that file as `ProjectSettingsContent` (`crates/settings/src/settings_store.rs:1060-1063`), so a
 user-only top-level key there is a parse error. If the setting must be project-overridable it has to
 live under `ProjectSettingsContent` and its own `flattened_deserialize!` (`project.rs:72-78`).
@@ -396,7 +398,7 @@ live under `ProjectSettingsContent` and its own `flattened_deserialize!` (`proje
 ### Step 10 — Schema regeneration: nothing to run
 
 The user-settings schema is `SettingsStore::json_schema()` (`settings_store.rs:1247`), generated from
-the `schemars` derive on `UserSettingsContent` at runtime and served as `wu://schemas/settings` by
+the `schemars` derive on `UserSettingsContent` at runtime and served as `anna://schemas/settings` by
 `crates/json_schema_store/src/json_schema_store.rs`. Just rebuild and restart.
 `script/update-json-schemas` is **not** for this (see section 6).
 
@@ -429,7 +431,7 @@ the `schemars` derive on `UserSettingsContent` at runtime and served as `wu://sc
 
 ```rust
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna)]
 #[serde(deny_unknown_fields)]
 pub struct OpenBrowser { pub url: Arc<str> }
 ```
@@ -438,13 +440,14 @@ pub struct OpenBrowser { pub url: Arc<str> }
 - `#[action(...)]` options (`action.rs:71-88`): `namespace = x`, `name = "X"`, `no_json`,
   `no_register`, `deprecated_aliases = ["old::Name"]`, `deprecated = "message"`.
 - Deprecated aliases in practice: `crates/wu_actions/src/lib.rs:40-62`
-  (`wu_actions::OpenSettingsEditor` -> `wu::OpenSettings`, and similar). Registering an alias that
+  (`wu_actions::OpenSettingsEditor` -> `anna::OpenSettings`, and similar; every former `wu::` name is
+  also kept as an alias of its `anna::` action). Registering an alias that
   collides with a real registered action panics at `App` creation (`action.rs:298-322`).
 - `#[serde(deny_unknown_fields)]` is preferred over the global `DefaultDenyUnknownFields` transform for
   actions, so that a bad action argument fails just that binding rather than the whole keymap
   (`crates/settings/src/keymap_file.rs:603-606`).
 
-Where actions live: `crates/wu_actions/src/lib.rs` (736 lines: the `wu::` namespace plus submodule
+Where actions live: `crates/wu_actions/src/lib.rs` (736 lines: the `anna::` namespace plus submodule
 namespaces such as `wu_actions::settings_profile_selector::Toggle`), `crates/menu/src/menu.rs`
 (`menu::`), and inline `actions!(...)` in each feature crate.
 
@@ -494,7 +497,7 @@ namespaces such as `wu_actions::settings_profile_selector::Toggle`), `crates/men
   `keymaps/linux/*` (`crates/settings/src/base_keymap_setting.rs:110-122`, the
   `#[cfg(not(target_os = "macos"))]` arm). `TextMate` returns `None` on non-macOS.
 
-`assets/keymaps/linux/vscode.json:2-4` states it explicitly: the Wu default keymap is close to the VS
+`assets/keymaps/linux/vscode.json:2-4` states it explicitly: the Anna default keymap is close to the VS
 Code one, so the overlay only contains the bindings where the two diverge. Confirmed by
 `assets/keymaps/default-windows.json`: `ctrl-p` -> `file_finder::Toggle`, `ctrl-b` ->
 `workspace::ToggleLeftDock`, ctrl-backtick -> `terminal_panel::Toggle`, `ctrl-shift-f` ->
@@ -526,7 +529,7 @@ is stale** relative to `default.json` and to the `#[default] Zed` variant.
    (the message says these are currently not used).
 
 It uses `git grep`, so it only sees tracked files. **It is not wired into CI** — `.github/workflows/`
-contains only `release.yml` and `upstream-sync.yml`, neither of which runs it. It is a manual dev script.
+contains only `release.yml`, which does not run it. It is a manual dev script.
 
 ### 4.6 RECIPE B — Add a new action plus a default keybinding
 
@@ -580,10 +583,10 @@ pub struct DoTheThing { pub loudly: bool }
    human-readable names from `command_palette::humanize_action_name` (`:1663`). The command palette is
    the same; `crates/command_palette_hooks` only maintains an opt-in *hide* list.
 
-7. **Schema — nothing to regenerate.** `wu://schemas/keymap` is built from the action inventory
+7. **Schema — nothing to regenerate.** `anna://schemas/keymap` is built from the action inventory
    (`KeymapFile::generate_json_schema_from_inventory`, `crates/settings/src/keymap_file.rs:622`) and
    from the live app (`generate_json_schema_for_registered_actions`, `:602`). Per-action argument
-   schemas are served at `wu://schemas/action/<namespace>__<Name>` and are also file-associated to a
+   schemas are served at `anna://schemas/action/<namespace>__<Name>` and are also file-associated to a
    synthetic `<namespace>__<Name>.json` filename
    (`crates/json_schema_store/src/json_schema_store.rs:492-502`).
 
@@ -614,7 +617,7 @@ pub struct DoTheThing { pub loudly: bool }
 | `crates/theme_settings` | `ThemeSettings` (the `Settings` impl), `ThemeFamilyContent`/`ThemeContent` (`src/schema.rs:25-37`), content-to-runtime refinement, bundled and user theme loading |
 | `crates/settings_content/src/theme.rs` | **`ThemeStyleContent`, `ThemeColorsContent`, `StatusColorsContent`, `HighlightStyleContent`, `PlayerColorContent`, `AccentContent`** — the actual JSON schema types |
 | `crates/syntax_theme` | `SyntaxTheme` — `Vec<HighlightStyle>` plus a `BTreeMap<capture_name, index>` |
-| `crates/theme_importer` | CLI: VS Code theme into Wu theme JSON |
+| `crates/theme_importer` | CLI: VS Code theme into Anna theme JSON |
 | `crates/theme_selector` | theme and icon-theme pickers |
 | `crates/theme_extension` | `ExtensionThemeProxy` so extensions can ship themes |
 | `crates/schema_generator` | CLI that prints the `theme` / `icon_theme` / `project` JSON schemas |
@@ -633,7 +636,7 @@ Loading paths:
   (`crates/theme_settings/src/theme_settings.rs:202-221`) — `registry.assets().list("themes/")`,
   `serde_json::from_slice::<ThemeFamilyContent>`, then `refine_theme_family`.
 - **User**: `crates/wu/src/main.rs:1621-1662` — reads every file in `paths::themes_dir()`
-  (`%APPDATA%\Wu\themes`), creating the directory if missing, then `load_user_theme` and `reload_theme`.
+  (`%APPDATA%\Anna\themes`), creating the directory if missing, then `load_user_theme` and `reload_theme`.
   Uses `serde_json_lenient`, so comments and trailing commas are fine.
 - **Extensions**: `crates/theme_extension/src/theme_extension.rs` via `ExtensionThemeProxy`.
 
@@ -710,7 +713,7 @@ Defaults are `.ZedMono` (Lilex) and `.ZedSans` (IBM Plex Sans) —
 5. `crates/wu/src/wu.rs:5449` (`test_bundled_settings_and_themes`) loads every bundled theme and asserts
    `theme.name` equals the registry key and that `DEFAULT_DARK_THEME` exists.
 
-**User theme** — drop the JSON into `%APPDATA%\Wu\themes\`.
+**User theme** — drop the JSON into `%APPDATA%\Anna\themes\`.
 
 **Import a VS Code theme**
 
@@ -747,26 +750,26 @@ and `path()` returning `icons/{file_stem}.svg` (`:203-206`). Two tests enforce t
 
 ## 6. JSON schemas — `crates/json_schema_store` and `script/update-json-schemas`
 
-`crates/json_schema_store/src/json_schema_store.rs` (644 lines). URI prefix: `wu://schemas/`.
+`crates/json_schema_store/src/json_schema_store.rs` (644 lines). URI prefix: `anna://schemas/` (`wu://schemas/` still accepted).
 
 **Static or lazily cached** (`resolve_static_schema`, `:167-222`):
 
 | URI | Source |
 |---|---|
-| `wu://schemas/tsconfig` | `src/schemas/tsconfig.json` (checked in, from SchemaStore) |
-| `wu://schemas/package_json` | `src/schemas/package.json` (checked in, from SchemaStore) |
-| `wu://schemas/tasks` | `task::TaskTemplates::generate_json_schema()` |
-| `wu://schemas/snippets` | `snippet_provider::format::VsSnippetsFile::generate_json_schema()` |
-| `wu://schemas/jsonc` | `generate_jsonc_schema()` |
-| `wu://schemas/keymap` | `settings::KeymapFile::generate_json_schema_from_inventory()` |
-| `wu://schemas/action/<ns>__<Name>` | per-action argument schema, cached in `ACTION_SCHEMA_CACHE` |
-| `wu://schemas/zed_inspector_style` | debug builds only |
+| `anna://schemas/tsconfig` | `src/schemas/tsconfig.json` (checked in, from SchemaStore) |
+| `anna://schemas/package_json` | `src/schemas/package.json` (checked in, from SchemaStore) |
+| `anna://schemas/tasks` | `task::TaskTemplates::generate_json_schema()` |
+| `anna://schemas/snippets` | `snippet_provider::format::VsSnippetsFile::generate_json_schema()` |
+| `anna://schemas/jsonc` | `generate_jsonc_schema()` |
+| `anna://schemas/keymap` | `settings::KeymapFile::generate_json_schema_from_inventory()` |
+| `anna://schemas/action/<ns>__<Name>` | per-action argument schema, cached in `ACTION_SCHEMA_CACHE` |
+| `anna://schemas/zed_inspector_style` | debug builds only |
 
 **Dynamic** (`resolve_dynamic_schema`, `:224-395`, cached in `DYNAMIC_SCHEMA_CACHE`):
-`wu://schemas/settings` (needs fonts, themes, icon themes, languages, LSP adapters, action names,
-documentation and deprecations), `wu://schemas/settings/lsp/<adapter>/initialization_options`,
-`wu://schemas/settings/lsp/<adapter>/settings`, `wu://schemas/project_settings`,
-`wu://schemas/debug_tasks`, `wu://schemas/keymap`, `wu://schemas/tasks`.
+`anna://schemas/settings` (needs fonts, themes, icon themes, languages, LSP adapters, action names,
+documentation and deprecations), `anna://schemas/settings/lsp/<adapter>/initialization_options`,
+`anna://schemas/settings/lsp/<adapter>/settings`, `anna://schemas/project_settings`,
+`anna://schemas/debug_tasks`, `anna://schemas/keymap`, `anna://schemas/tasks`.
 Cache invalidation: `notify_schema_changed` fires on `ExtensionsInstalledChanged` and on `DapRegistry`
 changes (`:100-136`), then pushes `notify_schemas_changed` to every live `LspStore`.
 
@@ -786,7 +789,7 @@ script/update-json-schemas [schemastore-commit]
 It changes into `crates/json_schema_store/src/schemas`, resolves a SchemaStore commit through the
 GitHub API, curls `tsconfig.json` and `package.json`, rewrites `json.schemastore.org` to
 `www.schemastore.org`, and prints a changelog snippet. **That is all it does.** It requires `curl`,
-`jq` and network access. It is irrelevant to Wu settings, keymap, task, snippet and theme schemas.
+`jq` and network access. It is irrelevant to Anna settings, keymap, task, snippet and theme schemas.
 
 ---
 
@@ -808,8 +811,8 @@ invisible in the GUI editor until you add a `SettingItem` with `json_path` / `pi
 `SettingField` also drives the "which file is this set in" indicator and "reset to default", via
 `SettingsStore::get_value_from_file` and `raw_default_settings()` (`settings_ui.rs:189-215`).
 
-Actions: the `settings_editor::*` namespace plus `wu::OpenSettings`, `wu::OpenSettingsFile`,
-`wu::OpenProjectSettings`, `OpenSettingsAt` and `OpenSettingsPage` (`settings_ui.rs:394-442`).
+Actions: the `settings_editor::*` namespace plus `anna::OpenSettings`, `anna::OpenSettingsFile`,
+`anna::OpenProjectSettings`, `OpenSettingsAt` and `OpenSettingsPage` (`settings_ui.rs:394-442`).
 
 ---
 
@@ -824,7 +827,7 @@ Actions: the `settings_editor::*` namespace plus `wu::OpenSettings`, `wu::OpenSe
 `shell` (`system`, or an object with `program`, or `with_arguments` with `program` and `args`),
 `show_summary`, `show_command`, `save` (`all` / `current` / `none`), `hooks`.
 
-`hooks` is a Wu addition: `TaskHook::CreateWorktree`, JSON value `"create_worktree"` with alias
+`hooks` is an Anna addition: `TaskHook::CreateWorktree`, JSON value `"create_worktree"` with alias
 `"create_git_worktree"` (`task_template.rs:93-98`). Template file for it:
 `assets/settings/initial_worktree_setup_tasks.json`.
 `TaskTemplates(pub Vec<TaskTemplate>)` has `FILE_NAME = "tasks.json"` and `generate_json_schema()`
@@ -839,14 +842,14 @@ Actions: the `settings_editor::*` namespace plus `wu::OpenSettings`, `wu::OpenSe
 `ZED_ROW`, `ZED_COLUMN`, `ZED_PICK_PID`, `ZED_MAIN_GIT_WORKTREE`, `ZED_GIT_SHA`, `ZED_GIT_SHA_SHORT`,
 `ZED_GIT_REPOSITORY_NAME`, `ZED_GIT_REPOSITORY_PATH`, `ZED_GIT_REF`, `ZED_CUSTOM_<NAME>`.
 The `${ZED_FILE:default_value}` default syntax is supported (`task_template.rs:336`).
-**They were NOT renamed to `$WU_*`.**
+**They were NOT renamed to `$WU_*` (or `$ANNA_*`).**
 
 ### Files and sources
 
-- Global: `%APPDATA%\Wu\tasks.json`
-- Project: `.wu/tasks.json` (legacy `.zed/tasks.json`, plus `.vscode/tasks.json` import via
+- Global: `%APPDATA%\Anna\tasks.json`
+- Project: `.anna/tasks.json` (legacy `.wu/tasks.json` then `.zed/tasks.json`, plus `.vscode/tasks.json` import via
   `crates/task/src/vscode_format.rs`)
-- Debug: `%APPDATA%\Wu\debug.json`, `.wu/debug.json` (`crates/task/src/debug_format.rs`,
+- Debug: `%APPDATA%\Anna\debug.json`, `.anna/debug.json` (`crates/task/src/debug_format.rs`,
   `vscode_debug_format.rs`)
 - Loader: `crates/task/src/static_source.rs` (`StaticSource` plus `TrackedFile<TaskTemplates>` over a
   watched-file channel). `SettingsStore::set_local_settings` explicitly **rejects**
@@ -868,13 +871,13 @@ The `${ZED_FILE:default_value}` default syntax is supported (`task_template.rs:3
 
   `prefix`, `body` and `description` each accept a string or an array of strings
   (`ListOrDirect`, `:38-52`).
-- **Locations**: `paths::snippets_dir()` is `%APPDATA%\Wu\snippets\`. The file stem is the language
+- **Locations**: `paths::snippets_dir()` is `%APPDATA%\Anna\snippets\`. The file stem is the language
   name; `snippets.json` is the global all-languages file
   (`crates/snippet_provider/src/lib.rs:27-33`). Project-local snippet directories are also supported
   through `SnippetProvider::watch_directory`.
 - **Body parsing**: `crates/snippet/src/snippet.rs` — `Snippet::parse` handles `$1`,
   `${1:default}`, choice syntax with pipes, and `$0` as the final tabstop.
-- **Schema**: `wu://schemas/snippets`, associated to `<snippets_dir>/*.json`
+- **Schema**: `anna://schemas/snippets`, associated to `<snippets_dir>/*.json`
   (`crates/json_schema_store/src/json_schema_store.rs:456-465`).
 - Extensions can ship snippets: `crates/snippet_provider/src/extension_snippet.rs`.
 - UI: `crates/snippets_ui`.
@@ -898,7 +901,7 @@ Declared in the user settings file:
 ```
 
 - Types: `SettingsProfile` and `ProfileBase` — `crates/settings_content/src/settings_content.rs:376-402`.
-  `base` is `"user"` (default: apply on top of the user settings) or `"default"` (apply on top of Wu
+  `base` is `"user"` (default: apply on top of the user settings) or `"default"` (apply on top of Anna
   defaults, ignoring user customizations entirely).
 - The active profile is a gpui global `ActiveSettingsProfileName(String)`
   (`crates/settings/src/settings.rs:58-61`);
@@ -939,10 +942,10 @@ Declared in the user settings file:
    into `assets/keymaps/default-windows.json`.
 8. **`script/check-keymaps` is not in CI** and uses `git grep`, so untracked keymap edits are invisible
    to it. `super-`, `win-` and `fn-` are banned everywhere; `cmd-` is banned outside the macOS files.
-9. **`.wu/settings.json` only accepts `ProjectSettingsContent`.** Putting `theme` or `ui_font_size`
+9. **Project `settings.json` (`.anna/`, or legacy `.wu/` / `.zed/`) only accepts `ProjectSettingsContent`.** Putting `theme` or `ui_font_size`
    there is a parse/schema error. The accepted subset is `all_languages` and `worktree` (both
    flattened) plus `lsp`, `dap`, `terminal`, `load_direnv`, `git_hosting_providers`.
-10. **Task variables are `ZED_*`, not `WU_*`.** Do not "fix" them; `.zed/tasks.json` compatibility and
+10. **Task variables are `ZED_*`, not `ANNA_*` or `WU_*`.** Do not "fix" them; `.zed/tasks.json` compatibility and
     the `runnables.scm` ecosystem depend on it.
 11. **`Vec` merges by overwrite, not append.** A user setting a one-element array replaces the whole
     default array. Use `ExtendingVec` or `ExtendingSet` for additive behavior
@@ -952,7 +955,7 @@ Declared in the user settings file:
 13. **Adding an action in a new namespace fails `test_action_namespaces`**
     (`crates/wu/src/wu.rs:5330`). It also fails on any action declared without a namespace.
 14. **Theme files have no local JSON schema.** They point at
-    `https://zed.dev/schema/themes/v0.2.0.json`; there is no `wu://schemas/theme` file association in
+    `https://zed.dev/schema/themes/v0.2.0.json`; there is no `anna://schemas/theme` file association in
     `crates/json_schema_store/src/json_schema_store.rs:406-503`. If you add fields to
     `ThemeStyleContent`, no local editor validation picks them up.
 15. **Settings UI coverage is unenforced.** No test asserts that every `SettingsContent` field appears
@@ -985,8 +988,8 @@ Declared in the user settings file:
 | `ThemeStyleContent` / `ThemeColorsContent` in `settings_content/src/theme.rs` | Rebuild; then `cargo run -p schema_generator -- theme` if you publish the theme schema externally. Update every bundled theme JSON that used a renamed key. |
 | `IconThemeFamilyContent` | `cargo run -p schema_generator -- icon_theme` |
 | `ProjectSettingsContent` | `cargo run -p schema_generator -- project` (only if publishing); otherwise just rebuild. |
-| `TaskTemplate` / `DebugTaskFile` | Rebuild. Schema is `wu://schemas/tasks` and `debug_tasks`, runtime-generated. Consider updating the docs in `assets/settings/initial_tasks.json`. |
-| `VsCodeSnippet` / `VsSnippetsFile` | Rebuild; `wu://schemas/snippets` is runtime-generated. |
+| `TaskTemplate` / `DebugTaskFile` | Rebuild. Schema is `anna://schemas/tasks` and `debug_tasks`, runtime-generated. Consider updating the docs in `assets/settings/initial_tasks.json`. |
+| `VsCodeSnippet` / `VsSnippetsFile` | Rebuild; `anna://schemas/snippets` is runtime-generated. |
 | An SVG in `assets/icons/` | Add or remove the matching `IconName` variant in `crates/icons/src/icons.rs`; `cargo test -p icons`. |
 | A `.ttf` in `assets/fonts/` | Rebuild (auto-loaded by `Assets::load_fonts`). |
 | SchemaStore-sourced `tsconfig.json` / `package.json` | `script/update-json-schemas [commit]` — needs curl, jq and network; it rewrites the two files under `crates/json_schema_store/src/schemas/`. |
@@ -994,7 +997,7 @@ Declared in the user settings file:
 | Anything under `crates/settings_content` | `cargo test -p settings_content` (`flatten_collision_probe`). |
 | Formatting of any `assets/**/*.json` | `script/prettier` (the repo uses Prettier for JSON/JSONC/MD/YAML). |
 
-CI note: `.github/workflows/` contains only `release.yml` and `upstream-sync.yml`. Neither runs tests,
+CI note: `.github/workflows/` contains only `release.yml`. It runs no tests,
 clippy, nor `check-keymaps` — **all of the above are local/manual gates.**
 
 ---
@@ -1022,12 +1025,12 @@ crates/settings_macros/src/settings_macros.rs      # MergeFrom / RegisterSetting
 crates/settings_json/src/settings_json.rs          # comment-preserving JSON edits
 crates/settings_ui/src/page_data.rs                # GUI settings page tree
 crates/settings_ui/src/settings_ui.rs              # SettingField, renderers, USER/PROJECT masks
-crates/json_schema_store/src/json_schema_store.rs  # wu://schemas/* server + file associations
+crates/json_schema_store/src/json_schema_store.rs  # anna://schemas/* server + file associations
 crates/schema_generator/src/main.rs                # theme/icon_theme/project schema CLI
 crates/gpui/src/action.rs                          # actions! macro, Action trait
 crates/gpui_macros/src/derive_action.rs            # #[action(...)] attribute parsing
 crates/gpui/src/keymap/context.rs                  # KeyBindingContextPredicate
-crates/wu_actions/src/lib.rs                       # wu:: namespace actions
+crates/wu_actions/src/lib.rs                       # anna:: namespace actions
 crates/keymap_editor/src/keymap_editor.rs          # in-app keymap UI (no registration needed)
 crates/theme/src/registry.rs                       # ThemeRegistry
 crates/theme/src/icon_theme.rs                     # default icon theme (Rust, not JSON)

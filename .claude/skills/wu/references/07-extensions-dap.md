@@ -1,4 +1,4 @@
-# 07 — Extension system & DAP stack in Wu
+# 07 — Extension system & DAP stack in Anna
 
 Paths are relative to the repo root unless stated.
 
@@ -11,7 +11,7 @@ Paths are relative to the repo root unless stated.
 
 ### Sandbox
 `WasmHost::build_wasi_ctx` (`crates/extension_host/src/wasm_host.rs:~635`):
-- Work dir `<data_dir>/extensions/work/<extension-id>` is preopened **read-write** twice — as `"."` and at its absolute path. `PWD` is set to it. `inherit_stdio()` is on, so extension `println!` goes to Wu's stdout.
+- Work dir `<data_dir>/extensions/work/<extension-id>` is preopened **read-write** twice — as `"."` and at its absolute path. `PWD` is set to it. `inherit_stdio()` is on, so extension `println!` goes to Anna's stdout.
 - Guest `chdir` is stubbed to `NOTSUP` (`crates/extension_api/src/extension_api.rs:276`).
 - Path escapes blocked by `WasmHost::writeable_path_from_extension` (lexical normalize + canonicalize nearest existing ancestor).
 
@@ -74,7 +74,7 @@ Test entry point: `crates/extension_host/src/extension_store_test.rs:765` `test_
 
 ## 3. Bundled extensions
 
-All three are workspace members (`Cargo.toml:173-176`) but are **not compiled into the Wu binary** — they are `cdylib` wasm crates published to the registry and installed at runtime. No bundling step exists in `script/bundle-mac`, `script/bundle-linux`, `script/bundle-windows.ps1`, and `assets/` contains no extensions.
+All three are workspace members (`Cargo.toml:173-176`) but are **not compiled into the Anna binary** — they are `cdylib` wasm crates published to the registry and installed at runtime. No bundling step exists in `script/bundle-mac`, `script/bundle-linux`, `script/bundle-windows.ps1`, and `assets/` contains no extensions.
 
 | Extension | Demonstrates | API dep |
 |---|---|---|
@@ -98,11 +98,11 @@ All three are workspace members (`Cargo.toml:173-176`) but are **not compiled in
 - `capabilities`
 - Host imports available to guests: `download-file`, `make-file-executable`, `get-settings`, `set-language-server-installation-status`, `github`, `http-client` (incl. streaming), `nodejs`, `process`, `platform`, `dap` (`resolve-tcp-template`), plus `worktree` / `project` / `key-value-store` resources.
 
-**Present but dead in Wu:**
+**Present but dead in Anna:**
 - `language_model_providers` in the manifest + `ExtensionLanguageModelProviderProxy` (`extension_host_proxy.rs:406`). **Nothing calls `register_language_model_provider_proxy`**, and `crates/extension_cli/src/main.rs:469` hard-rejects manifests using it (`LanguageModelProvidersUnsupported`).
 - `suggest-docs-packages` / `index-docs` WIT exports exist in every WIT version and in the `Extension` trait, but have **no host consumer**.
 
-**Stripped relative to upstream Zed** (verified: zero hits for `slash-command`, `slash_command`, `context-server`, `context_server`, `SlashCommand`, `ContextServer` in `crates/extension*`, `crates/extension_api/wit/**`, `extensions/`):
+**Stripped relative to Zed** (verified: zero hits for `slash-command`, `slash_command`, `context-server`, `context_server`, `SlashCommand`, `ContextServer` in `crates/extension*`, `crates/extension_api/wit/**`, `extensions/`):
 - Slash commands, context servers / MCP, agent servers, indexed docs providers. No `agent`, `assistant`, `language_model`, `slash_command`, `context_server`, `indexed_docs` crates exist.
 
 Only surviving trace: `cloud_api_types::ExtensionProvides` (`crates/cloud_api_types/src/extension.rs:36-64`) keeps `ContextServers`, `AgentServers`, `SlashCommands`, `IndexedDocsProviders` marked deprecated with an `is_deprecated()` helper, because the remote registry still returns them. `crates/extensions_ui/src/extensions_ui.rs:1343-1349` filters them (plus `Grammars`) out of the category buttons.
@@ -118,9 +118,9 @@ Layout under `paths::extensions_dir()` = `<data_dir>/extensions` (`crates/paths/
 
 **Discovery/reload**: `ExtensionStore::new` starts an fs watcher on `installed/` (`FS_WATCH_LATENCY` 100 ms) pushing ids into `reload_tx`; a loop debounces `RELOAD_DEBOUNCE_DURATION` (200 ms) then `rebuild_extension_index` → `extensions_updated` (diffs old/new index, unloads then loads themes/icon themes/languages/grammars/snippets/LSPs/DAP adapters/locators). `ReloadExtensions` action registered in `extension_host::init`.
 
-**Dev extensions**: `install_dev_extension(path)` (`extension_host.rs:1087`) loads the manifest, uninstalls any non-dev extension with the same id, compiles with `CompileExtensionOptions::dev()`, then **symlinks** `installed/<id>` to the source dir. `rebuild_dev_extension` recompiles in place. UI actions: `wu::InstallDevExtension`, `wu::RebuildDevExtension { extension_id }` (`crates/extensions_ui/src/extensions_ui.rs:48,57`).
+**Dev extensions**: `install_dev_extension(path)` (`extension_host.rs:1087`) loads the manifest, uninstalls any non-dev extension with the same id, compiles with `CompileExtensionOptions::dev()`, then **symlinks** `installed/<id>` to the source dir. `rebuild_dev_extension` recompiles in place. UI actions: `anna::InstallDevExtension`, `anna::RebuildDevExtension { extension_id }` (`crates/extensions_ui/src/extensions_ui.rs:48,57`).
 
-### Network — Wu points at Zed's registry
+### Network — Anna points at Zed's registry
 `fetch_extensions_from_api` (`extension_host.rs:781`) and the install/upgrade endpoints use `HttpClientWithUrl::build_zed_api_url` (`crates/http_client/src/http_client.rs:277`), mapping base `https://zed.dev` to **`https://api.zed.dev`**. The base comes from `ClientSettings::server_url` (`crates/client/src/client.rs:37`), default `"server_url": "https://zed.dev"` (`assets/settings/default.json:2248`), overridable via `ZED_SERVER_URL`.
 
 Endpoints:
@@ -147,7 +147,7 @@ Pipeline (`main.rs:41-155`): load `extension.toml` → `ExtensionBuilder::compil
 
 Validation rules that bite: description required and **strictly longer than the name**; at least one non-empty author; `repository` must parse as a URL with a host; themes and icon themes must be the **only** feature in their extension; `language_model_providers` rejected outright.
 
-There is **no publish/upload step**. Publishing is the registry's job; Wu has no publishing pipeline of its own.
+There is **no publish/upload step**. Publishing is the registry's job; Anna has no publishing pipeline of its own.
 
 ## 7. `crates/grammars` — built-in grammars
 
@@ -175,7 +175,7 @@ Extension grammar compilation (`compile_grammar`, `extension_builder.rs:293`): `
 
 ## 8. `language_extension` / `theme_extension` — host-side glue
 
-- `crates/language_extension/src/language_extension.rs`: `init(lsp_access, proxy, language_registry)` registers one `LanguageServerRegistryProxy` as the grammar proxy, language proxy, **and** language-server proxy. `LspAccess` enum (`ViaLspStore` / `ViaWorkspaces` / `Noop`) is how the extension host reaches live `LspStore`s to restart servers on reload; Wu uses `ViaWorkspaces` (`crates/wu/src/main.rs:549`).
+- `crates/language_extension/src/language_extension.rs`: `init(lsp_access, proxy, language_registry)` registers one `LanguageServerRegistryProxy` as the grammar proxy, language proxy, **and** language-server proxy. `LspAccess` enum (`ViaLspStore` / `ViaWorkspaces` / `Noop`) is how the extension host reaches live `LspStore`s to restart servers on reload; Anna uses `ViaWorkspaces` (`crates/wu/src/main.rs:549`).
 - `crates/language_extension/src/extension_lsp_adapter.rs` (765 lines) wraps a wasm extension as a `LspAdapter`.
 - `crates/theme_extension/src/theme_extension.rs`: `ThemeRegistryProxy` bridging to `theme::ThemeRegistry` + `theme_settings::{load_user_theme, reload_theme, reload_icon_theme}`.
 
@@ -183,7 +183,7 @@ Init order in `crates/wu/src/main.rs`: `extension::init` (508) → `debug_adapte
 
 ## 9. `crates/extensions_ui`
 
-`extensions_ui.rs` (1418 lines) is the `ExtensionsPage` workspace item, opened by `wu::Extensions` with an optional `ExtensionCategoryFilter`. Fuzzy filter over installed + remote, category buttons from `ExtensionProvides::iter()` minus deprecated/`Grammars`, `InstallDevExtension` (directory picker), `RebuildDevExtension`, version picker (`extension_version_selector.rs`), cards (`components/extension_card.rs`), and "feature upsells" linking to **`https://zed.dev/docs/...`** (lines 1015-1068) — stale upstream links. `extension_suggest.rs` maps ~50 file extensions to registry ids and shows an install notification.
+`extensions_ui.rs` (1418 lines) is the `ExtensionsPage` workspace item, opened by `anna::Extensions` with an optional `ExtensionCategoryFilter`. Fuzzy filter over installed + remote, category buttons from `ExtensionProvides::iter()` minus deprecated/`Grammars`, `InstallDevExtension` (directory picker), `RebuildDevExtension`, version picker (`extension_version_selector.rs`), cards (`components/extension_card.rs`), and "feature upsells" linking to **`https://zed.dev/docs/...`** (lines 1015-1068) — stale links into Zed's docs. `extension_suggest.rs` maps ~50 file extensions to registry ids and shows an install notification.
 
 ## 10. DAP stack
 
@@ -194,13 +194,13 @@ Init order in `crates/wu/src/main.rs`: `extension::init` (508) → `debug_adapte
 - **`crates/debugger_tools`** — `dap_log.rs`, the DAP protocol log viewer (gated by `log_dap_communications` / `format_dap_log_messages`).
 
 **Configuration & startup.** Scenarios are `task::DebugScenario { adapter, label, build?, config (flattened JSON), tcp_connection? }` (`crates/task/src/debug_format.rs:265`), grouped in a `DebugTaskFile` (bare JSON array). Sources:
-- Project: **`.wu/debug.json`** (`crates/paths/src/paths.rs:578`), legacy fallback **`.zed/debug.json`** (`:586`), and **`.vscode/launch.json`** import (`:594`, `crates/task/src/vscode_debug_format.rs`).
+- Project: **`.anna/debug.json`** (`crates/paths/src/paths.rs`), legacy fallbacks **`.wu/debug.json`** then **`.zed/debug.json`**, and **`.vscode/launch.json`** import (`:594`, `crates/task/src/vscode_debug_format.rs`).
 - Global: `<config_dir>/debug.json` (`paths::debug_scenarios_file()`, `:335`).
 - JSON schema generated from the live `DapRegistry` and bound to those filenames in `crates/json_schema_store/src/json_schema_store.rs:381,451-453`.
 
 Launch flow: `DebugPanel::start_session(scenario, task_context, ...)` (`crates/debugger_ui/src/debugger_panel.rs:175`) → `DapRegistry::global(cx).adapter(&scenario.adapter)` → `dap_store.new_session(...)` → adapter `get_binary` (download if needed) → transport. Locators (`crates/project/src/debugger/locators/{cargo,go,node,python}.rs` + extension-provided) turn a build task into a filled-in `DebugScenario`.
 
-**`debug.plist`** (repo root) is a macOS entitlements plist with only `com.apple.security.get-task-allow = true`. **Nothing references it** — `script/bundle-mac` signs with `crates/wu/resources/zed.entitlements`. Orphan from upstream.
+**`debug.plist`** (repo root) is a macOS entitlements plist with only `com.apple.security.get-task-allow = true`. **Nothing references it** — `script/bundle-mac` signs with `crates/wu/resources/zed.entitlements`. Orphan inherited from Zed.
 
 ## 11. Tests & fixtures
 
@@ -214,7 +214,7 @@ Launch flow: `DebugPanel::start_session(scenario, task_context, ...)` (`crates/d
 
 ## 12. Footguns
 
-1. **Wu talks to `api.zed.dev`.** Extension browse/install/auto-update all go there, and `/extensions/updates` sends the installed-extension id list. `"auto_install_extensions": {"html": true}` triggers a download on first run. To honour the "no telemetry" promise, change `extension_host.rs:781,951,996` + `http_client.rs:277`.
+1. **Anna talks to `api.zed.dev`.** Extension browse/install/auto-update all go there, and `/extensions/updates` sends the installed-extension id list. `"auto_install_extensions": {"html": true}` triggers a download on first run. To honour the "no telemetry" promise, change `extension_host.rs:781,951,996` + `http_client.rs:277`.
 2. **Release-channel gate on the API version.** In-tree `RELEASE_CHANNEL` is `dev`, so local builds accept v0.8.0; a release build caps at v0.7.0 and refuses v0.8.0 with a confusing error. `extensions/test-extension` uses the path dep, so v0.8.0, so it **will not load in a stable build**.
 3. **Capability asymmetry.** `download_file` and `npm:install` are gated only by settings-level `granted_extension_capabilities`, which defaults to `*`/`**`. Declaring them in `extension.toml` is decorative. Only `process:exec` is double-checked.
 4. **Never edit an existing `wit/since_vX.Y.Z/` dir or its `since_vX_Y_Z.rs` bindings** — that silently breaks every published extension pinned to that version. Add a new dir, a new host module, a new arm in `Extension::instantiate_async`, bump `zed_extension_api` + `MIN/MAX_VERSION`, and note it in `crates/extension_api/PENDING_CHANGES.md`.

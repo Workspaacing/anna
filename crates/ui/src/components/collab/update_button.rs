@@ -100,19 +100,19 @@ impl UpdateButton {
     }
 
     pub fn checking() -> Self {
-        Self::new(IconName::LoadCircle, "Checking for Wu Updates…")
+        Self::new(IconName::LoadCircle, "Checking for Anna Updates…")
             .icon_animate(true)
             .disabled(true)
     }
 
     pub fn downloading(progress: Option<f32>) -> Self {
-        Self::new(IconName::Download, "Downloading Wu Update…")
+        Self::new(IconName::Download, "Downloading Anna Update…")
             .progress(progress)
             .disabled(true)
     }
 
     pub fn installing(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::LoadCircle, "Installing Wu Update…")
+        Self::new(IconName::LoadCircle, "Installing Anna Update…")
             .icon_animate(true)
             .tooltip(version)
             .disabled(true)

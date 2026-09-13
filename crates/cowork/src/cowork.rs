@@ -1,4 +1,4 @@
-//! Cowork is Wu's native AI pairing surface.
+//! Cowork is Anna's native AI pairing surface.
 //!
 //! It is split in two, matching how the rest of the workspace is organized: a dock panel
 //! ([`CoworkPanel`]) owns the session history, search and provider status, while each conversation
@@ -49,9 +49,9 @@ use workspace::Workspace;
 actions!(
     cowork,
     [
-        /// Toggles focus on the Cowork panel.
+        /// Toggles focus on the Anna panel.
         ToggleFocus,
-        /// Starts a new Cowork thread in the center pane.
+        /// Starts a new Anna thread in the center pane.
         NewThread,
         /// Sends the composed message to the model.
         Submit,
@@ -59,13 +59,13 @@ actions!(
         Cancel,
         /// Chooses the model for the active thread.
         SelectModel,
-        /// Opens the Cowork page of the settings window.
+        /// Opens the Anna page of the settings window.
         OpenSettings,
         /// Refetches the models.dev catalog.
         RefreshCatalog,
-        /// Saves everything that happened in this Cowork thread to one Markdown file.
+        /// Saves everything that happened in this Anna thread to one Markdown file.
         ExportSessionLog,
-        /// Saves every Cowork thread of this project, with everything that happened in each, to one
+        /// Saves every Anna thread of this project, with everything that happened in each, to one
         /// Markdown file.
         ExportAllSessionLogs,
     ]

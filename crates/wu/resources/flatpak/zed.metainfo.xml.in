@@ -5,16 +5,19 @@
     <project_license>Apache-2.0 and GPL-3.0-or-later</project_license>
 
     <name>$APP_NAME</name>
-    <summary>The fast, native code editor that doesn't get in your way</summary>
-    <developer id="me.farshed">
-        <name translate="no">Farshed</name>
+    <summary>The AI engineering workspace</summary>
+    <developer id="com.workspaacing">
+        <name translate="no">Workspaacing</name>
     </developer>
     <description>
         <p>
-            Wu is a code editor for people who want the speed of a native app and the familiarity of VS Code. Built on the Zed engine, it keeps the editor core, GPU rendering, and language tooling, then strips out everything that isn't editing.
+            Anna plans, codes, tests and ships — natively, on your machine. It is a native code editor with an AI agent teammate inside it, also called Anna, built on the Zed engine: the editor core, GPU rendering, and language tooling.
         </p>
         <p>Features:</p>
         <ul>
+            <li>Agent: Reads, writes and edits files through the editor's buffers, runs shell commands at the permission level you choose, fetches web pages, and works with GitHub issues, pull requests, checks and security alerts.</li>
+            <li>Checked edits: Refuses to write credentials, formats with the project's own formatter, reads language server diagnostics, and checks edited dependencies against the OSV advisory database.</li>
+            <li>Your models: Any model in the models.dev catalog, using your own provider keys, with no account and no proxy.</li>
             <li>Performance: Written in Rust and rendered on the GPU. No Electron or webviews. Opens instantly and stays responsive on large files.</li>
             <li>Language-aware: Maintains a syntax tree for precise highlighting and auto-indent, with LSP support for autocompletion and refactoring.</li>
             <li>Lightweight: Uses noticeably less memory than comparable editors.</li>
@@ -32,10 +35,10 @@
     <content_rating type="oars-1.1" />
 
     <url type="homepage">https://wu.farshed.me</url>
-    <url type="bugtracker">https://github.com/Workspaacing/wu/issues</url>
+    <url type="bugtracker">https://github.com/Workspaacing/anna/issues</url>
     <url type="help">https://wu.farshed.me/docs</url>
-    <url type="contact">https://github.com/Workspaacing/wu/issues</url>
-    <url type="vcs-browser">https://github.com/Workspaacing/wu</url>
+    <url type="contact">https://github.com/Workspaacing/anna/issues</url>
+    <url type="vcs-browser">https://github.com/Workspaacing/anna</url>
 
     <supports>
         <internet>offline-only</internet>
@@ -48,12 +51,12 @@
 
     <screenshots>
         <screenshot type="default">
-            <caption>Wu with a project open, in the Catppuccin Mocha theme</caption>
-            <image>https://raw.githubusercontent.com/Workspaacing/wu/main/assets/images/screenshot-dark.png</image>
+            <caption>Anna with a project open, in the Catppuccin Mocha theme</caption>
+            <image>https://raw.githubusercontent.com/Workspaacing/anna/main/assets/images/screenshot-dark.png</image>
         </screenshot>
         <screenshot>
-            <caption>Wu with a project open, in the Catppuccin Latte theme</caption>
-            <image>https://raw.githubusercontent.com/Workspaacing/wu/main/assets/images/screenshot-light.png</image>
+            <caption>Anna with a project open, in the Catppuccin Latte theme</caption>
+            <image>https://raw.githubusercontent.com/Workspaacing/anna/main/assets/images/screenshot-light.png</image>
         </screenshot>
     </screenshots>
 

@@ -767,7 +767,7 @@ Positional example [DOC]: `/create-file config.json src "{ \"key\": \"value\" }"
 ## 4.2 What Cowork would need
 
 - **Command registry + slash-menu** in the composer: `/` opens a filterable list with `description` as subtitle.
-  Standard editor picker; Wu/Zed already has the component.
+  Standard editor picker; Anna/Zed already has the component.
 - **Template expander** with `$ARGUMENTS`, `$1..$n`, `@file`, `` !`shell` ``. Two hard requirements OpenCode does
   not clearly address:
   - **`!`shell`` must go through the permission broker.** Right now a repo-supplied `.opencode/commands/x.md`

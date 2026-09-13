@@ -123,8 +123,8 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
     }
 
     let (server, server_name) =
-        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
-    let url = format!("wu-cli://{server_name}");
+        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Anna spawn")?;
+    let url = format!("anna-cli://{server_name}");
 
     let request = {
         let mut paths = vec![];
@@ -134,7 +134,7 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
             match std::fs::canonicalize(&path) {
                 Ok(path) => paths.push(path.to_string_lossy().into_owned()),
                 Err(error) => {
-                    if path.starts_with("wu://")
+                    if path.starts_with("anna://")
                         || path.starts_with("http://")
                         || path.starts_with("https://")
                         || path.starts_with("file://")
@@ -179,7 +179,7 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
         .spawn({
             let exit_status = exit_status.clone();
             move || {
-                let (_, handshake) = server.accept().context("Handshake after Zed spawn")?;
+                let (_, handshake) = server.accept().context("Handshake after Anna spawn")?;
                 let (tx, rx) = (handshake.requests, handshake.responses);
 
                 tx.send(request)?;

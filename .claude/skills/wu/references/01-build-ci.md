@@ -8,13 +8,12 @@
 > `--default-host x86_64-pc-windows-msvc` instead. MSVC Build Tools 2022 + the Windows SDK are
 > required but do not need to be on `PATH`.
 
-# Wu — Build System, Toolchain, Lints, CI & Upstream Sync
+# Anna — Build System, Toolchain, Lints & CI
 
 Repo root: `C:/Users/USER/Documents/wu-main`
-Project: **Wu**, a hard fork of Zed (`crates/wu` replaces upstream `crates/zed`).
-Current version: `crates/wu/Cargo.toml` -> `version = "1.0.6"`.
+Project: **Anna** (renamed from Wu), built on Zed (`crates/wu` takes the place of Zed's `crates/zed`; crate names are not renamed yet).
+Current version: `crates/wu/Cargo.toml` -> `version = "1.0.0"`.
 Release channel in tree: `crates/wu/RELEASE_CHANNEL` -> `dev`.
-Upstream pin: `UPSTREAM_VERSION` -> `01acd0ee8e906dd0ec8b526fe08da94444a5e2af` (a Zed commit SHA, not a tag).
 
 ---
 
@@ -89,7 +88,7 @@ Encoded gotchas:
 - Overrides raise it to 300s for known-slow tests (`test_rainbow_bracket_highlights`, `test_wrapped_invisibles_drawing`, `test_basic_following`, `test_random_diagnostics_blocks`, `extension_host::test_extension_store_with_test_extension`, several `editor`/`vim` randomized tests).
 - `package(db)` runs in test-group `sequential-db-tests` with `max-threads = 1`.
 - Priority overrides run the slowest tests first (`worktree::test_random_worktree_changes` at priority 100).
-- Several overrides name crates that **no longer exist in this fork** (`collab`, `language_model`, `vim`). Harmless, but not a source of truth.
+- Several overrides name crates that **no longer exist in Anna** (`collab`, `language_model`, `vim`). Harmless, but not a source of truth.
 
 ---
 
@@ -197,8 +196,8 @@ Run after touching any keymap JSON. Requires a git repo (see section 7 trap 1).
 
 | Script | Platform | Output / notes |
 |---|---|---|
-| `script/bundle-mac [arch]` | macOS | `Wu-aarch64.dmg`, `Wu.dSYM.zip`, `target/wu-remote-server-macos-*.gz`. Signing/notarization only if `MACOS_CERTIFICATE` / `APPLE_NOTARIZATION_*` present, else ad-hoc signed. Identity is `Farshed`. |
-| `script/bundle-linux` | Linux | `target/release/wu-linux-<arch>.tar.gz` + remote-server gz. `--flatpak` flag. |
+| `script/bundle-mac [arch]` | macOS | `Anna-aarch64.dmg`, `Anna.dSYM.zip`, `target/anna-remote-server-macos-*.gz`. Signing/notarization only if `MACOS_CERTIFICATE` / `APPLE_NOTARIZATION_*` present, else ad-hoc signed. Identity is `Farshed`. |
+| `script/bundle-linux` | Linux | `target/release/anna-linux-<arch>.tar.gz` + remote-server gz. `--flatpak` flag. |
 | `script/bundle-freebsd` | FreeBSD | tar.gz |
 | `script/bundle-windows.ps1 -Architecture x86_64 or aarch64 [-Install]` | Windows | see below |
 | `script/install-linux` | Linux | bundle-linux + install into `~/.local` |
@@ -211,16 +210,16 @@ Run after touching any keymap JSON. Requires a git repo (see section 7 trap 1).
 - Builds `wu`, `cli`, `auto_update_helper`, then `explorer_command_injector` (with `--features stable --no-default-features` on the stable channel), then `remote_server`, all `--release --target <arch>-pc-windows-msvc`.
 - Requires: Windows 10/11 SDK (`makeappx.exe`), Inno Setup 6 at `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`, and network access (downloads AGS_SDK v6.3.0 and Microsoft ConPTY v1.23.13503.0).
 - Only `stable` and `dev` channels are supported; anything else errors and exits 1.
-- App identity strings must stay in sync with `crates/release_channel/src/lib.rs` (`app_identifier()`) and `crates/wu/src/wu/windows_only_instance.rs` (mutex `Wu-Editor-Stable-Instance-Mutex`).
+- App identity strings must stay in sync with `crates/release_channel/src/lib.rs` (`app_identifier()`) and `crates/wu/src/wu/windows_only_instance.rs` (mutex `Anna-Editor-Stable-Instance-Mutex`).
 
 ### Other scripts, quick reference
 - `script/linux`, `script/freebsd` - install OS build deps (apt/dnf/pacman/pkg); `script/remote-server` - installs `clang` on Debian; `script/install-cmake` - up-to-date CMake.
 - `script/download-wasi-sdk` - fetches WASI SDK v25 into `./target/wasi-sdk` for extension builds.
-- `script/bootstrap` / `script/bootstrap.ps1` - collab-server only: installs `sqlx-cli 0.7.2`, minio, foreman, then cd `crates/collab` and creates DBs. `crates/collab` does not exist in this fork, so both are dead. Do not run them.
-- `script/cargo` - Node wrapper adding `--timings` to `build|check|run|test`; it no-ops unless `git remote -v` mentions `zed-industries/zed`, so it is inert in Wu. `script/cargo --init` installs a shell alias (has a PowerShell branch). Not needed.
+- `script/bootstrap` / `script/bootstrap.ps1` - collab-server only: installs `sqlx-cli 0.7.2`, minio, foreman, then cd `crates/collab` and creates DBs. `crates/collab` does not exist in Anna, so both are dead. Do not run them.
+- `script/cargo` - Node wrapper adding `--timings` to `build|check|run|test`; it no-ops unless `git remote -v` mentions `zed-industries/zed`, so it is inert in Anna. `script/cargo --init` installs a shell alias (has a PowerShell branch). Not needed.
 - `script/new-crate <name> [apache|gpl]` - see section 3.
 - `script/get-crate-version <crate>` / `.ps1` - reads a version from `cargo metadata` (bash one needs `jq`).
-- `script/memory-benchmark` (macOS only, compares Wu vs Zed RSS), `script/metal-debug` (macOS), `script/histogram` + `script/analyze_highlights.py` (Python), `script/import-themes` (`cargo run -p theme_importer`), `script/verify-macos-document-icon`.
+- `script/memory-benchmark` (macOS only, compares Anna vs Zed RSS), `script/metal-debug` (macOS), `script/histogram` + `script/analyze_highlights.py` (Python), `script/import-themes` (`cargo run -p theme_importer`), `script/verify-macos-document-icon`.
 - `script/lib/blob-store.sh` - DigitalOcean Spaces upload helpers sourced by the bundle scripts; needs `DIGITALOCEAN_SPACES_*`, no-ops locally.
 
 ---
@@ -406,7 +405,7 @@ The lint library has UI tests (`tooling/lints/ui/*.rs` + matching `.stderr`) run
 | `licenses` | every workspace crate must have a `LICENSE-APACHE`/`LICENSE-GPL` symlink |
 | `package-conformity` | every crate must use `[lints] workspace = true`; every dep must be `workspace = true` (extensions exempt) |
 | `publish-gpui` | publishes GPUI and its deps to crates.io |
-| `wsl-sandbox-tests [--require-enforced] [--release]` | Windows-only; drives `windows_wsl::wrap_invocation`. BROKEN HERE - references a `sandbox` crate and `script/test-wsl-sandbox.ps1`, neither of which exists in this fork |
+| `wsl-sandbox-tests [--require-enforced] [--release]` | Windows-only; drives `windows_wsl::wrap_invocation`. BROKEN HERE - references a `sandbox` crate and `script/test-wsl-sandbox.ps1`, neither of which exists in this repo |
 | `setup-webrtc [--force] [--triple T] [--no-cargo-config]` | downloads the pinned `webrtc-sys` release into `.webrtc-sys/` and sets `LK_CUSTOM_WEBRTC` in `~/.cargo/config.toml` |
 | `web-examples [--release] [--port N] [--no-serve]` | builds and serves `crates/gpui/examples` for wasm |
 
@@ -435,10 +434,9 @@ If you edit `tooling/perf`: document everything including private items, give ev
 
 ## 5. CI gates - what will fail your PR
 
-There are exactly TWO workflows. Full `.github` inventory:
+There is exactly ONE workflow. Full `.github` inventory:
 ```
 .github/workflows/release.yml
-.github/workflows/upstream-sync.yml
 .github/pull_request_template.md
 .github/release/body.md
 .github/ISSUE_TEMPLATE/{10_bug_report,11_crash_report,config}.yml
@@ -458,18 +456,12 @@ Env: `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`. Permissions: `contents: w
    [ "v${version}" = "${GITHUB_REF_NAME}" ] || exit 1
    ```
    The git tag must exactly equal `v` + the `version` in `crates/wu/Cargo.toml`. Bump `crates/wu/Cargo.toml` before tagging.
-2. `bundle_mac` (macos-14, timeout 300 min): `rustup show`, `brew install lld`, `echo stable > crates/wu/RELEASE_CHANNEL`, optional provisioning profile from `secrets.MACOS_PROVISIONING_PROFILE`, then `script/bundle-mac aarch64-apple-darwin`. Uploads `Wu-aarch64.dmg` + `wu-remote-server-macos-aarch64.gz`, and separately `Wu.dSYM.zip`. `if-no-files-found: error`.
+2. `bundle_mac` (macos-14, timeout 300 min): `rustup show`, `brew install lld`, `echo stable > crates/wu/RELEASE_CHANNEL`, optional provisioning profile from `secrets.MACOS_PROVISIONING_PROFILE`, then `script/bundle-mac aarch64-apple-darwin`. Uploads `Anna-aarch64.dmg` + `anna-remote-server-macos-aarch64.gz`, and separately `Anna.dSYM.zip`. `if-no-files-found: error`.
 3. `bundle_linux` (matrix: ubuntu-22.04 x86_64, ubuntu-22.04-arm aarch64; 300 min; `CC=clang CXX=clang++`): `./script/linux`, `rustup show`, `echo stable > crates/wu/RELEASE_CHANNEL`, `./script/bundle-linux`.
 4. `bundle_windows` (windows-2022, 300 min): `rustup show`, `Set-Content -Path crates/wu/RELEASE_CHANNEL -Value stable -NoNewline`, then `script/bundle-windows.ps1 -Architecture x86_64` under `pwsh`.
 5. `release` (ubuntu-24.04): downloads all artifacts merged, deletes `*.dSYM.zip`, then `softprops/action-gh-release@v2` with `body_path: .github/release/body.md` and `generate_release_notes: true`.
 
 All three bundle jobs OVERWRITE `crates/wu/RELEASE_CHANNEL` to `stable` at build time; the file is `dev` in the tree.
-
-### `.github/workflows/upstream-sync.yml` - cron `0 6 * * *` + `workflow_dispatch`
-Permissions `contents: write`, `pull-requests: write`; concurrency group `upstream-sync`, `cancel-in-progress: false`.
-1. Reads `UPSTREAM_VERSION`, `git ls-remote --tags` against `zed-industries/zed`, filters `^v[0-9]+\.[0-9]+\.[0-9]+$`, `sort -V | tail -1` -> newest stable tag. Skips if already synced or if branch `sync/<tag>` already exists.
-2. `git switch -c sync/<tag>`, runs `script/upstream-sync <tag> | tee sync.log`. EXIT-CODE CONTRACT: 0 = clean, 2 = committed with conflict markers, >2 = hard failure (job aborts).
-3. Pushes and opens a PR titled `Sync Zed <tag>` (clean) or `Sync Zed <tag> (needs resolution)`; body embeds `sync.log` and ends with `Release Notes:` / `- N/A`.
 
 ### PR conventions reviewers enforce (`.github/pull_request_template.md` + `.rules`)
 - Sections: Objective / Solution / Testing / Self-Review Checklist / (optional) Showcase, then a final `Release Notes:` section.
@@ -502,44 +494,21 @@ Other `.rules` items that affect build/lint outcomes:
 
 ---
 
-## 6. Upstream sync - how it works
-
-`UPSTREAM_VERSION` holds the last-synced Zed point. It is currently a bare SHA (`01acd0ee8e906dd0ec8b526fe08da94444a5e2af`), not a `vX.Y.Z` tag; `script/upstream-sync` handles both (`ref_for()` maps `v[0-9]*` to `refs/tags/...`, anything else is used raw).
-
-`script/upstream-sync <zed-tag-or-sha>`:
-- NO Zed history ever enters this repo. It shallow-fetches (`--depth=1 --no-tags`) the base and target trees into `refs/upstream/{base,target}`, builds two synthetic commits with `git commit-tree`, runs `git merge-tree --write-tree --name-only`, and commits the result with HEAD as the ONLY parent.
-- Preconditions: git >= 2.38 and a clean working tree (`git status --porcelain --untracked-files=no` must be empty), else exit 1.
-- Ordering guard: compares `crates/zed/Cargo.toml` versions at base vs target, because stable branches fork from main before their tag commit is made so commit dates cannot order them. If target predates base it exits 0 with "nothing to sync".
-- DROPPED_PREFIXES - upstream additions under these are discarded and listed at the end:
-  `.agents/ .cloudflare/ .factory/ .github/ .wezel/ .zed/ assets/prompts/ assets/sounds/ ci/ docs/ extensions/ legal/ nix/ tooling/ crates/extension_api/wit/ Dockerfile compose.yml Procfile default.nix flake.lock flake.nix shell.nix livekit.yaml lychee.toml renovate.json REVIEWERS.conl GEMINI.md CONTRIBUTING.md CODE_OF_CONDUCT.md .mailmap .git-blame-ignore-revs`
-  PLUS: any `crates/<x>/...` whose crate dir does not exist in HEAD is dropped. That is the mechanism by which crates Wu deleted stay deleted.
-- REVIEW_PREFIXES = `crates/zed/` - exempt from dropping, because `crates/zed` became `crates/wu`. Rename detection maps most edits across; whatever falls through lands here and needs a human to port or discard.
-- PINNED_FILES = `crates/wu/RELEASE_CHANNEL` - Wu's version always wins.
-- `UPSTREAM_VERSION` is rewritten to the new target in the same commit.
-- Commit message: `Sync Zed <target>` + blank line + `Upstream range: <base>..<target>`.
-- Exit codes: 0 clean, 2 = some files committed WITH CONFLICT MARKERS (they are listed; resolve on the branch and `git commit --amend`), 1 = hard failure.
-- Built-in hint it prints: "If Cargo.lock is listed: `git checkout --theirs Cargo.lock && cargo check`".
-
-Resolving a sync PR: check out `sync/<tag>`, `git grep -n '<<<<<<<'`, resolve, `cargo check --workspace`, `./script/clippy`, then amend and force-push.
-
----
-
 ## 7. Traps / gotchas
 
 1. THIS WORKING COPY IS NOT A GIT REPOSITORY. `C:/Users/USER/Documents/wu-main/.git` does not exist; `git rev-parse --is-inside-work-tree` fails. Consequences:
    - `script/check-keymaps` (uses `git grep`) cannot run.
-   - `script/upstream-sync` cannot run.
    - `crates/wu/build.rs` degrades gracefully: it tries `git rev-parse HEAD` and, on failure, leaves the commit SHA unset. You can inject `ZED_COMMIT_SHA=<sha>` instead. The build still works.
    - `script/install-linux` and `script/cargo`'s `isZedRepo()` also degrade.
 2. NO PR CI. Nothing catches a broken build for you. Run `pwsh script/clippy.ps1 -p <crate>` and `cargo fmt --all` yourself.
 3. `script/clippy` uses `--release --all-targets --all-features`. Code that compiles under `cargo check` can still fail here: feature-gated code, `#[cfg(test)]` code, benches, examples, and `test-support` paths all get compiled. Always scope with `-p` while iterating; a full run is a coffee break at minimum.
 4. `script/clippy.ps1` is NOT equivalent to `script/clippy`. The PowerShell version skips `cargo shear`, `typos`, and `buf`. Do not assume parity.
 5. `typos.toml` DOES NOT EXIST, yet bash `script/clippy` runs `typos --config typos.toml` whenever `typos` is on PATH -> spurious failure. Likewise there is NO `deny.toml`, NO `.editorconfig`, and NO `typos`/`cargo-deny` config anywhere in the repo, despite those being common in Zed-family repos.
-6. MOST SCRIPTS ARE BASH-ONLY. PowerShell equivalents exist only for: `clippy`, `bootstrap`, `generate-licenses`, `get-crate-version`, `install-rustup`, `bundle-windows`. Everything else (`check-keymaps`, `prettier`, `new-crate`, `shellcheck-scripts`, `update-json-schemas`, `crate-dep-graph`, `upstream-sync`, all other bundle scripts, `download-wasi-sdk`, `install-cmake`, `linux`, `freebsd`, `remote-server`) needs Git Bash or WSL.
+6. MOST SCRIPTS ARE BASH-ONLY. PowerShell equivalents exist only for: `clippy`, `bootstrap`, `generate-licenses`, `get-crate-version`, `install-rustup`, `bundle-windows`. Everything else (`check-keymaps`, `prettier`, `new-crate`, `shellcheck-scripts`, `update-json-schemas`, `crate-dep-graph`, all other bundle scripts, `download-wasi-sdk`, `install-cmake`, `linux`, `freebsd`, `remote-server`) needs Git Bash or WSL.
 7. `script/new-crate` creates a SYMLINK (`ln -sf ../../LICENSE-GPL`). On Windows this needs Developer Mode or an elevated shell, and Git Bash needs `MSYS=winsymlinks:nativestrict`. If the symlink degrades to a plain copy, `cargo xtask licenses` reports "is not a symlink".
 8. DEAD / STALE scripts and config - do not trust these blindly:
    - `script/bootstrap`, `script/bootstrap.ps1` - target `crates/collab`, which does not exist here.
-   - `script/crate-dep-graph` - `--root=zed,cli,collab`, all wrong for this fork.
+   - `script/crate-dep-graph` - `--root=zed,cli,collab`, all wrong for this repo.
    - `cargo xtask wsl-sandbox-tests` - references a `sandbox` crate and `script/test-wsl-sandbox.ps1`, neither present.
    - `clippy.toml`'s `ignore-interior-mutability` names `agent_ui::context::AgentContextKey`; `crates/agent_ui` is gone.
    - `.wu/settings.json` sets `RUST_DEFAULT_PACKAGE_RUN: "zed"` (should be `wu`) and excludes `crates/agent/src/tools/evals/fixtures`, a path that no longer exists.
@@ -552,12 +521,12 @@ Resolving a sync PR: check out `sync/<tag>`, `git grep -n '<<<<<<<'`, resolve, `
 13. Adding a git dependency without a `rev` breaks convention (`calloop` is the sole exception, and only accidentally). Always pin by rev.
 14. `Cargo.lock` IS COMMITTED (339 KB) and `.wu/settings.json` marks `**/*.lock` read-only in the editor. Do not hand-edit; let cargo regenerate it, and prefer `cargo update -p <one-crate>` over a blanket `cargo update`.
 15. `.gitignore` hides generated artifacts you might otherwise think are missing: `/assets/*licenses.*`, `/crates/theme/schemas/theme.json`, `/inno`, `/crates/wu/test_fixtures/visual_tests/`, `.perf-runs`, `.webrtc-sys/`, `**/target`, `**/cargo-target`, `.claude/settings.local.json`, `/node_modules/`, `/script/node_modules`.
-16. `.gitattributes` forces `crates/wu/resources/windows/zed.sh` to LF (`text eol=lf`) - it becomes `bin/wu` inside the Windows bundle and must not get CRLF. It also marks `*.json linguist-language=JSON-with-Comments`.
+16. `.gitattributes` forces `crates/wu/resources/windows/zed.sh` to LF (`text eol=lf`) - it becomes `bin/anna` inside the Windows bundle and must not get CRLF. It also marks `*.json linguist-language=JSON-with-Comments`.
 17. TRAILING COMMAS AND COMMENTS IN THIS REPO'S JSON ARE INTENTIONAL (it is JSONC - see `.wu/tasks.json` and `.wu/settings.json`). Do not "fix" them, and do not run stock `prettier --parser=json` over `assets/**`; `script/prettier` passes `--parser=jsonc` for `assets/settings/default.json` specifically.
 18. The dylint lints need a nightly toolchain and a slow first build (`cargo dylint` downloads `nightly-2026-03-21` plus `rustc-dev`). Do not kick that off casually mid-task.
 19. `cargo shear` (run by bash `script/clippy` locally) fails on unused deps - if you remove the last use of a dependency, remove it from that crate's `Cargo.toml` too.
 20. `buf` lint/format targets `crates/proto/proto` (which does exist: `app.proto`, `buffer.proto`, `core.proto`, `debugger.proto`, `download.proto`, `git.proto`, `image.proto`, `lsp.proto`, `task.proto`, plus `buf.yaml`). If you touch a `.proto`, run `buf format -w crates/proto/proto` and `buf lint crates/proto/proto`.
-21. There is no `.github/workflows/ci.yml`, no `docs/src/development*` page in this fork, and `README.md` just points at Zed's development docs. Do not expect fork-specific build documentation to exist.
+21. There is no `.github/workflows/ci.yml`, no `docs/src/development*` page in this repo, and `README.md` just points at Zed's development docs. Do not expect Anna-specific build documentation to exist.
 
 ---
 
@@ -573,7 +542,6 @@ Resolving a sync PR: check out `sync/<tag>`, `git grep -n '<<<<<<<'`, resolve, `
 | `C:/Users/USER/Documents/wu-main/.config/nextest.toml` | 60s default test timeout + per-test overrides |
 | `C:/Users/USER/Documents/wu-main/.rules` | the coding rules every agent session is expected to follow (CLAUDE.md / AGENTS.md just contain the string `.rules`) |
 | `C:/Users/USER/Documents/wu-main/script/clippy` and `script/clippy.ps1` | the lint entrypoints |
-| `C:/Users/USER/Documents/wu-main/script/upstream-sync` | the entire fork-sync algorithm, incl. DROPPED_PREFIXES |
 | `C:/Users/USER/Documents/wu-main/script/bundle-windows.ps1` | Windows packaging, SDK / Inno Setup prerequisites |
 | `C:/Users/USER/Documents/wu-main/script/new-crate` | crate scaffolding + license policy |
 | `C:/Users/USER/Documents/wu-main/tooling/lints/README.md` and `tooling/lints/src/lib.rs` | the six custom lints |
@@ -581,5 +549,4 @@ Resolving a sync PR: check out `sync/<tag>`, `git grep -n '<<<<<<<'`, resolve, `
 | `C:/Users/USER/Documents/wu-main/tooling/xtask/src/tasks/package_conformity.rs` | workspace-dep + workspace-lints enforcement |
 | `C:/Users/USER/Documents/wu-main/tooling/perf/Cargo.toml` | the strict per-crate lint set |
 | `C:/Users/USER/Documents/wu-main/.github/workflows/release.yml` | the only automated version gate |
-| `C:/Users/USER/Documents/wu-main/.github/workflows/upstream-sync.yml` | nightly Zed sync automation |
 | `C:/Users/USER/Documents/wu-main/.wu/tasks.json` | the two tasks the project itself defines: `./script/clippy`, `cargo run --profile release-fast` |

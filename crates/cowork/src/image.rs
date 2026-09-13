@@ -128,7 +128,7 @@ pub fn attach_named(name: String, bytes: Vec<u8>) -> Result<Attachment> {
             })?,
         ),
         None => bail!(
-            "{name} is not an image Cowork can send. Models accept PNG, JPEG, GIF and WebP; this \
+            "{name} is not an image Anna can send. Models accept PNG, JPEG, GIF and WebP; this \
              file is none of them — convert it and try again."
         ),
     };

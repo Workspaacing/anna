@@ -7433,7 +7433,7 @@ impl Workspace {
     }
 }
 
-/// Wu opens maximized.
+/// Anna opens maximized.
 ///
 /// The restore size is GPUI's default rather than zero, so un-maximizing gives a usable window
 /// instead of a sliver.
@@ -7448,7 +7448,7 @@ fn default_window_bounds() -> WindowBounds {
 ///
 /// A `Fullscreen` or `Maximized` saved state is already what we would choose. A `Windowed` one is
 /// ambiguous: it is equally the result of the user dragging the window to a size they wanted and of
-/// the platform picking something arbitrary on first run. Wu resolves that towards maximized,
+/// the platform picking something arbitrary on first run. Anna resolves that towards maximized,
 /// because opening small on a large screen is the more annoying of the two mistakes.
 fn maximized_unless_placed(bounds: WindowBounds) -> WindowBounds {
     match bounds {
@@ -8426,11 +8426,13 @@ pub async fn apply_restored_multiworkspace_state(
 }
 
 actions!(
-    wu,
+    anna,
     [
-        /// Opens the Wu log file.
+        /// Opens the Anna log file.
+        #[action(deprecated_aliases = ["wu::OpenLog"])]
         OpenLog,
-        /// Reveals the Wu log file in the system file manager.
+        /// Reveals the Anna log file in the system file manager.
+        #[action(deprecated_aliases = ["wu::RevealLogInFileManager"])]
         RevealLogInFileManager
     ]
 );

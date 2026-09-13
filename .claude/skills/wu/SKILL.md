@@ -1,30 +1,31 @@
 ---
 name: wu
-description: Working knowledge of the Wu editor codebase (a Rust/GPUI fork of Zed, ~983k LOC across 163 crates). Load before writing, reviewing, or navigating any code in this repo - it documents the build/lint gates, the fork's divergences from upstream Zed (which will otherwise produce non-compiling code), crate ownership, step-by-step recipes for common changes, test harness usage, and the footguns. Use for any task touching crates/, extensions/, assets/, script/ or tooling/.
+description: Working knowledge of the Anna codebase (renamed from Wu; a Rust/GPUI editor built on Zed, ~983k LOC across 163 crates). Load before writing, reviewing, or navigating any code in this repo - it documents the build/lint gates, Anna's divergences from Zed (which will otherwise produce non-compiling code), crate ownership, step-by-step recipes for common changes, test harness usage, and the footguns. Use for any task touching crates/, extensions/, assets/, script/ or tooling/.
 ---
 
-# Wu codebase
+# Anna codebase
 
-Wu is a native code editor in Rust: a fork of [Zed](https://github.com/zed-industries/zed) that keeps
-the editor core and drops collaboration, accounts and telemetry. Repo `Workspaacing/wu`, docs at
-`wu.farshed.me`, version `1.0.6`, upstream pin in `UPSTREAM_VERSION` (`01acd0ee...`).
+Anna (renamed from Wu) is an AI engineering workspace in Rust, built on
+[Zed](https://github.com/zed-industries/zed); it keeps the editor core and drops collaboration,
+accounts and telemetry. Publisher Workspaacing; repo `Workspaacing/anna`, docs still at
+`wu.farshed.me` (a new domain is not decided), version `1.0.0`.
 
 - **983k LOC / 1213 `.rs` files / 163 crates**, edition **2024**, toolchain pinned to **1.97.1**.
 - Extra targets: `wasm32-wasip2` (extensions), `wasm32-unknown-unknown` (gpui web), `x86_64-unknown-linux-musl` (remote server).
 - Only two release channels exist: **`Dev`** and **`Stable`**. No Preview, no Nightly.
 - **This working copy is not a git repository** (no `.git`). Anything that shells out to git —
-  `script/check-keymaps`, `script/upstream-sync`, build-script SHA lookup — will not work until `git init`.
+  `script/check-keymaps`, build-script SHA lookup — will not work until `git init`.
 
 ## 0. Read this first: your Zed knowledge is partly wrong
 
-This fork restructured several core APIs. Writing from upstream-Zed memory produces code that does not
+Anna restructured several core APIs relative to Zed. Writing from Zed memory produces code that does not
 compile. The high-frequency ones:
 
-| You remember | Reality in Wu |
+| You remember | Reality in Anna |
 |---|---|
 | `Task` from `gpui` | re-exported from the **`scheduler`** crate |
 | `impl_actions!` / `impl_internal_actions!` | **deleted** — use `actions!` or `#[derive(Action)]` |
-| `NoAction`, `Unbind` | live in the **`wu`** namespace |
+| `NoAction`, `Unbind` | live in the **`anna`** namespace (old `wu::` names still resolve) |
 | `cx.spawn(|cx| async move {...})` | takes an `AsyncFnOnce`: `cx.spawn(async move |this, cx| ...)` |
 | app starts via `gpui::Application::new()` | `gpui_platform::application()` |
 | `ExcerptId` in multibuffer | **does not exist.** `multi_buffer::Anchor` is `Min \| Excerpt(ExcerptAnchor) \| Max`, keyed by `PathKey` + `text::Anchor`. Excerpts are declarative: `set_excerpts_for_path` replaces all excerpts for a path |
@@ -36,7 +37,7 @@ compile. The high-frequency ones:
 | `ReleaseChannel::{Preview,Nightly}` | only `Dev` and `Stable` |
 | blade / `gpui/wgpu` feature | Blade is gone; there is no `gpui/wgpu` feature |
 
-New in this fork: a **`View` trait** (`crates/gpui/src/view.rs:182`). `#[derive(IntoElement)]` emits
+New in Anna: a **`View` trait** (`crates/gpui/src/view.rs:182`). `#[derive(IntoElement)]` emits
 `ViewElement<Self>`, and `Entity<T: Render>` implements `IntoElement` directly, so `.child(entity)`
 works. Two views over the same entity must not be siblings.
 
@@ -111,7 +112,7 @@ pwsh script/clippy.ps1 -p <crate>    # Windows equivalent
 
 ### CI reality
 There is **no PR/push CI**. Only `.github/workflows/release.yml` (fires on `v*` tags, hard-fails unless
-the tag matches `version` in `crates/wu/Cargo.toml`) and `upstream-sync.yml` (nightly cron). Local
+the tag matches `version` in `crates/wu/Cargo.toml`). Local
 `./script/clippy` + human review are the only gates — so run them.
 
 ### Lints that will bite
@@ -147,23 +148,20 @@ taking `&App` / `&Context<T>` / `&mut Window`, or any `render` method).
 `NotifyResultExt::{notify_err, notify_app_err}` lives in `crates/workspace/src/notifications.rs:1531`,
 **not** in `util`. Most of `util` is a thin re-export of `crates/gpui_util/src/lib.rs` — grep there first.
 
-## 4. What Wu is not — do not add these back
+## 4. What Anna is not — do not add these back
 
 Removed wholesale, with no crate directories at all: Zed's agent/assistant stack (`zeta`, copilot,
 supermaven, `semantic_index`), collab/`call`/`channel`/livekit, telemetry/feedback, **vim and helix
 modes**, journal, REPL, devcontainers, extension slash commands, context servers/MCP, agent servers,
 indexed docs.
 
-`script/upstream-sync` encodes this policy: crates absent from HEAD are **auto-dropped on every sync**.
-Adding a stub crate named `agent` or `vim` would silently re-open that door.
-
-**AI is the one exception, and it is Wu's own.** `crates/cowork` is a first-party chat surface —
+**AI is the one exception, and it is Anna's own.** `crates/cowork` (shown to users as "Anna") is a first-party chat surface —
 a dock panel for history/search/provider status plus a workspace item per conversation. It is not
-upstream Zed code and must not be reconciled against it. Its rules:
+Zed code and must not be reconciled against it. Its rules:
 - Models come **only** from the models.dev catalog. Never hardcode a model list or a provider.
 - API keys are **read from environment variables** the catalog declares, never stored, never
   prompted for, never written to settings or the database.
-- Requests go straight to the chosen provider. No Wu-owned proxy, no Wu-owned endpoint.
+- Requests go straight to the chosen provider. No first-party proxy, no first-party endpoint.
 - No tool calls, no command execution, no file reads. Adding any of those is a product decision,
   not a refactor.
 See `crates/cowork/README.md` for the wire-protocol dispatch and its known limitation (providers
@@ -175,25 +173,32 @@ SSH/WSL remote editing (`set_connection` is called only from tests). `remote`/`r
 `logs_dir()/panics.log` only.
 
 ### Network calls that do exist
-- **auto_update** → `api.github.com/repos/Workspaacing/wu/releases`, 12h poll, SHA-256 verified. First-party, fine.
+- **auto_update** → `api.github.com/repos/Workspaacing/anna/releases`, 12h poll, SHA-256 verified. First-party, fine.
 - **extension host** → `https://api.zed.dev/extensions*`, via `server_url` default `https://zed.dev` +
   `build_zed_api_url` (`crates/http_client/src/http_client.rs:277`). The update check sends the list of
   installed extension ids, and `"auto_install_extensions": {"html": true}` downloads on first run.
   **This contradicts the README's "no telemetry" claim** — worth flagging before adding anything near it.
 - **cowork** → `https://models.dev/api.json` for the model catalog (cached 24h), then the model
-  provider's own endpoint for each completion. User-initiated and user-configured; no Wu endpoint
+  provider's own endpoint for each completion. User-initiated and user-configured; no first-party endpoint
   is involved.
 
 ### Naming and branding
-`paths::APP_NAME = "Wu"`; bundle ids `me.farshed.Wu{,-Dev}`; URL scheme `wu://`; project config `.wu/`
-with `.zed/` fallback; actions namespaced `wu::` via `crates/wu_actions`.
+`paths::APP_NAME = "Anna"` (data folders `Anna`/`anna`; on first run the old `Wu`/`wu` folders are
+copied over and left in place as a backup); publisher Workspaacing; bundle ids
+`com.workspaacing.Anna{,-Dev}`; Windows AppUserModelID `Workspaacing.Anna{,.Dev}` and single-instance id
+`Anna-Editor-{Stable,Dev}`; URL schemes `anna://` and `anna-cli://` (only `anna://` is registered; old `wu://` and `wu-cli://`
+links are still accepted); project config `.anna/`, then `.wu/`, then `.zed/`; actions namespaced `anna::` via
+`crates/wu_actions` (old `wu::` names still resolve through `deprecated_aliases`). The Cowork agent is
+shown to users as "Anna"; its crate, the `cowork` settings key and the `cowork::` action namespace keep
+the internal name. Crate names (`wu`, `wu_actions`, `wu_env_vars`) and Rust module names are not
+renamed yet.
 
 **There are zero `WU_*` env vars** — everything stayed `ZED_*` (`ZED_STATELESS`, `ZED_FILE`,
 `ZED_WORKTREE_ROOT`, `ZED_SERVER_URL`, `ZED_LOG`, `ZED_COMMIT_SHA`, ...). `crates/wu_env_vars` holds
 exactly one const. Task variables are still `$ZED_FILE`, `$ZED_WORKTREE_ROOT`. Do not "fix" these
 without checking every consumer.
 
-Known-harmless leftovers: `ZED_URL_SCHEME = "wu"`, `zed_urls::terms_of_service`, `base_keymap` serde
+Known-harmless leftovers: `zed_urls::terms_of_service`, `base_keymap` serde
 value still `"Zed"` (UI shows "Wu (Default)"), a `--zed` CLI flag, packaging files named `zed.iss` /
 `zed.desktop.in` / `zed.entitlements`, and `debug.plist` (an orphan; macOS signing uses
 `crates/wu/resources/zed.entitlements`).
@@ -221,7 +226,7 @@ Never copy GPL code into an Apache crate. `script/new-crate` enforces the split 
 | Themes | `theme`, `theme_settings`, `syntax_theme`, `theme_importer` |
 | Extensions (wasm) | `extension`, `extension_api`, `extension_host`, `extension_cli`, `*_extension` |
 | Debugger | `dap`, `dap_adapters`, `debugger_ui`, `debug_adapter_extension` |
-| AI threads (Wu-original) | `cowork` — panel + thread item, models.dev catalog, SSE streaming |
+| AI threads (Anna-original) | `cowork` — panel + thread item, models.dev catalog, SSE streaming |
 | Local SQLite | `db`, `sqlez`, `sqlez_macros` |
 | Logging | `zlog`, `zlog_settings`, `ztracing`, `etw_tracing` |
 | Fuzzy matching for pickers | `fuzzy` (String) or `fuzzy_nucleo` (SharedString) — **not interchangeable** |
@@ -271,10 +276,10 @@ Rules:
 - **A default in `assets/settings/default.json` is mandatory** — `from_settings` idiomatically
   `.unwrap()`s, so a missing key is a startup panic, not a fallback.
 - Layer order (`settings_store.rs:1315`, `recompute_values`): default → extension → global → user (+release-channel, +OS)
-  → profile → server → `.wu/settings.json` (deepest dir wins).
+  → profile → server → `.anna/settings.json` (deepest dir wins; legacy `.wu/`, then `.zed/`).
 - **Nothing to regenerate.** `script/update-json-schemas` only re-downloads SchemaStore's
-  `tsconfig.json`/`package.json`. Wu's own schemas are generated at runtime by `json_schema_store` and
-  served over `wu://schemas/...`.
+  `tsconfig.json`/`package.json`. Anna's own schemas are generated at runtime by `json_schema_store` and
+  served over `anna://schemas/...` (`wu://schemas/...` still accepted).
 - `crates/settings_ui` is optional and unenforced — skip it and the setting is JSON-only, silently.
   To surface it, add a `SettingsPageItem::SettingItem` in `crates/settings_ui/src/page_data.rs`;
   a whole new page is a `fn x_page() -> SettingsPage` plus one line in `settings_data()`. Renderers
@@ -378,7 +383,8 @@ Benchmarks: criterion (`harness=false`) in `benchmarks`, `rope`, `language`, `fu
 - `AbsPathBuf::canonicalize` deliberately **never returns `\\?\`** — git and Node LSPs choke on UNC.
   `SanitizedPath` (dunce) is the general laundering type. Component matching is case-insensitive via
   `component_matches_ignore_ascii_case` (security-relevant).
-- Config lives in `%APPDATA%\Wu`; data, logs and the DB under `%LOCALAPPDATA%\Wu`.
+- Config lives in `%APPDATA%\Anna`; data, logs and the DB under `%LOCALAPPDATA%\Anna` (copied from the
+  old `Wu` folders on first run).
 - Windows-specific code: `crates/explorer_command_injector`, `crates/etw_tracing`,
   `crates/windows_resources`, `crates/wu/src/wu/windows_only_instance.rs`.
 - In `platform_title_bar`, drag and double-click are owned by the platform layer — do not add handlers
@@ -427,8 +433,8 @@ Deep dives live beside this file in `references/`. Read the one matching your ta
 
 | File | Covers |
 |---|---|
-| `references/01-build-ci.md` | Cargo/workspace conventions, every `script/`, custom lints, xtask gates, release + upstream-sync |
-| `references/02-fork-delta.md` | Wu vs Zed, boot sequence with hook points, naming, licensing, removed features |
+| `references/01-build-ci.md` | Cargo/workspace conventions, every `script/`, custom lints, xtask gates, release |
+| `references/02-fork-delta.md` | Anna vs Zed, boot sequence with hook points, naming, licensing, removed features |
 | `references/03-gpui.md` | GPUI beyond `.rules`: `View` trait, platform seam, macros, element lifecycle, focus, globals, panics |
 | `references/04-editor-core.md` | Coordinate cheat sheet, `editor` module map, add-an-action recipe, test templates, 35 footguns |
 | `references/05-ui-workspace.md` | Full component vocabulary, `Item`/`Panel` contracts, 6 step-by-step recipes, crate appendix |

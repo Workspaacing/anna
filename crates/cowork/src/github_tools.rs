@@ -108,7 +108,7 @@ async fn connect(
 ) -> Result<github::Client> {
     let Some(token) = token.await? else {
         bail!(
-            "Wu is not connected to GitHub yet. Open GitHub from the side of the window and \
+            "Anna is not connected to GitHub yet. Open GitHub from the side of the window and \
              connect, then try again."
         );
     };

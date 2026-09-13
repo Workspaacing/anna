@@ -481,7 +481,7 @@ impl CoworkStore {
     }
 
     /// The credential to authenticate a request with. A key typed into Cowork wins over the
-    /// environment, so setting one in the UI takes effect without restarting Wu.
+    /// environment, so setting one in the UI takes effect without restarting Anna.
     pub fn api_key(&self, provider_id: &str) -> Option<String> {
         if let Some(key) = self.stored_keys.get(provider_id) {
             return Some(key.clone());

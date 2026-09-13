@@ -346,13 +346,13 @@ Ordered roughly by "blocks a demo" -> "blocks an enterprise sale".
 
 OpenCode's `%USERPROFILE%\.local\share\opencode` on Windows is a Unix-ism leaking onto a platform
 that has had a correct answer since 2001. Since Cowork is a Rust editor developed on Windows, use the
-`directories` crate (`ProjectDirs::from("dev", "Wu", "Cowork")`) and get:
+`directories` crate (`ProjectDirs::from("dev", "Anna", "Cowork")`) and get:
 
 | Purpose | Windows | macOS | Linux |
 |---|---|---|---|
-| Config | `%APPDATA%\Wu\Cowork\config` | `~/Library/Application Support/dev.Wu.Cowork` | `$XDG_CONFIG_HOME/cowork` (default `~/.config/cowork`) |
-| Sessions / data | `%APPDATA%\Wu\Cowork\data` | `~/Library/Application Support/dev.Wu.Cowork` | `$XDG_DATA_HOME/cowork` (default `~/.local/share/cowork`) |
-| Cache | `%LOCALAPPDATA%\Wu\Cowork\cache` | `~/Library/Caches/dev.Wu.Cowork` | `$XDG_CACHE_HOME/cowork` (default `~/.cache/cowork`) |
+| Config | `%APPDATA%\Anna\Cowork\config` | `~/Library/Application Support/dev.Anna.Cowork` | `$XDG_CONFIG_HOME/cowork` (default `~/.config/cowork`) |
+| Sessions / data | `%APPDATA%\Anna\Cowork\data` | `~/Library/Application Support/dev.Anna.Cowork` | `$XDG_DATA_HOME/cowork` (default `~/.local/share/cowork`) |
+| Cache | `%LOCALAPPDATA%\Anna\Cowork\cache` | `~/Library/Caches/dev.Anna.Cowork` | `$XDG_CACHE_HOME/cowork` (default `~/.cache/cowork`) |
 | Logs | `logs/` under the data root | same | same |
 | Credentials | OS keychain (see 2.2) | Keychain | Secret Service / kernel keyring |
 

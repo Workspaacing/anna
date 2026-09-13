@@ -825,7 +825,7 @@ pub(super) struct ConfigureMode {
 impl ConfigureMode {
     pub(super) fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let program = cx.new(|cx| {
-            InputField::new(window, cx, "ENV=Wu ~/bin/program --option")
+            InputField::new(window, cx, "ENV=Anna ~/bin/program --option")
                 .label("Program")
                 .tab_stop(true)
                 .tab_index(1)
@@ -1065,7 +1065,7 @@ impl DebugDelegate {
                     };
 
                     match path.components().next_back() {
-                        Some(".wu") | Some(".zed") => {
+                        Some(name) if paths::is_local_settings_folder_name(name) => {
                             path.push(RelPath::from_unix_str("debug.json").unwrap());
                         }
                         Some(".vscode") => {
@@ -1162,10 +1162,9 @@ impl DebugDelegate {
                         id: _,
                         directory_in_worktree: dir,
                         id_base: _,
-                    } => {
-                        dir.ends_with(RelPath::from_unix_str(".wu").unwrap())
-                            || dir.ends_with(RelPath::from_unix_str(".zed").unwrap())
-                    }
+                    } => dir
+                        .file_name()
+                        .is_some_and(paths::is_local_settings_folder_name),
                     _ => false,
                 });
 

@@ -190,7 +190,7 @@ pub struct SettingsContent {
 
     pub call_hierarchy: Option<CallHierarchySettingsContent>,
 
-    /// Settings for the Cowork panel and its AI threads.
+    /// Settings for the Anna panel and its AI threads.
     pub cowork: Option<CoworkSettingsContent>,
 
     pub git_panel: Option<GitPanelSettingsContent>,
@@ -207,8 +207,8 @@ pub struct SettingsContent {
     /// Default: true
     pub auto_update: Option<bool>,
 
-    /// This base keymap settings adjusts the default keybindings in Wu to be similar
-    /// to other common code editors. By default, Wu's keymap closely follows VSCode's
+    /// This base keymap settings adjusts the default keybindings in Anna to be similar
+    /// to other common code editors. By default, Anna's keymap closely follows VSCode's
     /// keymap, with minor adjustments, this corresponds to the "VSCode" setting.
     ///
     /// Default: VSCode
@@ -261,20 +261,20 @@ pub struct SettingsContent {
     /// Default: off
     pub reduce_motion: Option<ReduceMotionMode>,
 
-    /// The URL of the Wu server to connect to.
+    /// The URL of the server Anna connects to.
     pub server_url: Option<String>,
 
     /// The URL used as the key for credential storage.
     ///
     /// When set, credentials are stored under this URL instead of `server_url`.
-    /// This allows running multiple Wu instances side by side without them
+    /// This allows running multiple Anna instances side by side without them
     /// overwriting each other's keychain entries.
     pub credentials_url: Option<String>,
 
     /// Configuration for session-related features
     pub session: Option<SessionSettingsContent>,
 
-    /// Configuration of the terminal in Wu.
+    /// Configuration of the terminal in Anna.
     pub terminal: Option<TerminalSettingsContent>,
 
     pub title_bar: Option<TitleBarSettingsContent>,
@@ -292,12 +292,12 @@ pub struct SettingsContent {
 }
 
 /// Configuration for developer-oriented instrumentation tools that collect
-/// diagnostic data about a running Wu instance.
+/// diagnostic data about a running Anna instance.
 #[with_fallible_options]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct InstrumentationSettingsContent {
     /// Configuration for the performance profiler, accessed via the
-    /// `wu: open performance profiler` action.
+    /// `anna: open performance profiler` action.
     pub performance_profiler: Option<PerformanceProfilerSettingsContent>,
 }
 
@@ -395,7 +395,7 @@ pub enum ProfileBase {
     /// Apply profile settings on top of the user's current settings.
     #[default]
     User,
-    /// Apply profile settings on top of Wu's default settings, ignoring user customizations.
+    /// Apply profile settings on top of Anna's default settings, ignoring user customizations.
     Default,
 }
 
@@ -406,7 +406,7 @@ pub struct SettingsProfile {
     /// What base settings to start from before applying this profile's overrides.
     ///
     /// - `user`: Apply on top of user's settings (default)
-    /// - `default`: Apply on top of Wu's default settings, ignoring user customizations
+    /// - `default`: Apply on top of Anna's default settings, ignoring user customizations
     #[serde(default)]
     pub base: ProfileBase,
 
@@ -437,7 +437,7 @@ pub struct ExtensionsSettingsContent {
 
 /// Base key bindings scheme. Base keymaps can be overridden with user keymaps.
 ///
-/// Default: Wu
+/// Default: Anna
 #[derive(
     Copy,
     Clone,
@@ -466,7 +466,7 @@ pub enum BaseKeymapContent {
 
 impl strum::VariantNames for BaseKeymapContent {
     const VARIANTS: &'static [&'static str] = &[
-        "Wu",
+        "Anna",
         "VSCode",
         "JetBrains",
         "Sublime Text",
@@ -485,7 +485,7 @@ pub struct DebuggerSettingsContent {
     ///
     /// Default: line
     pub stepping_granularity: Option<SteppingGranularity>,
-    /// Whether the breakpoints should be reused across Wu sessions.
+    /// Whether the breakpoints should be reused across Anna sessions.
     ///
     /// Default: true
     pub save_breakpoints: Option<bool>,
@@ -497,7 +497,7 @@ pub struct DebuggerSettingsContent {
     ///
     /// Default: 2000ms
     pub timeout: Option<u64>,
-    /// Whether to log messages between active debug adapters and Wu
+    /// Whether to log messages between active debug adapters and Anna
     ///
     /// Default: true
     pub log_dap_communications: Option<bool>,
@@ -776,7 +776,7 @@ pub struct FileFinderSettingsContent {
     /// Default: true
     pub skip_focus_for_active_in_search: Option<bool>,
     /// Whether to use gitignored files when searching.
-    /// Only the file Wu had indexed will be used, not necessary all the gitignored files.
+    /// Only the file Anna had indexed will be used, not necessary all the gitignored files.
     ///
     /// Default: Smart
     pub include_ignored: Option<IncludeIgnoredContent>,
@@ -800,7 +800,7 @@ pub struct FileFinderSettingsContent {
 pub enum IncludeIgnoredContent {
     /// Use all gitignored files
     All,
-    /// Use only the files Wu had indexed
+    /// Use only the files Anna had indexed
     Indexed,
     /// Be smart and search for ignored when called from a gitignored worktree
     #[default]
@@ -979,33 +979,33 @@ pub struct MarkdownPreviewSettingsContent {
     pub max_width: Option<PixelSetting>,
 }
 
-/// Settings for the Cowork panel and its AI threads.
+/// Settings for the Anna panel and its AI threads.
 #[with_fallible_options]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
 pub struct CoworkSettingsContent {
-    /// Whether to show the Cowork panel button in the status bar.
+    /// Whether to show the Anna panel button in the status bar.
     ///
     /// Default: true
     pub button: Option<bool>,
-    /// The position of the Cowork panel.
+    /// The position of the Anna panel.
     ///
     /// Default: left
     pub dock: Option<DockSide>,
-    /// Customize default width (in pixels) taken by the Cowork panel.
+    /// Customize default width (in pixels) taken by the Anna panel.
     ///
     /// Default: 300
     pub default_width: Option<PixelSetting>,
-    /// The models.dev catalog Cowork reads its providers and models from.
+    /// The models.dev catalog Anna reads its providers and models from.
     ///
     /// Default: "https://models.dev/api.json"
     pub catalog_url: Option<String>,
-    /// Models hidden from Cowork's model selector, as `provider/model` identifiers. Listing the
+    /// Models hidden from Anna's model selector, as `provider/model` identifiers. Listing the
     /// hidden ones rather than the shown ones means models added to a provider later are available
     /// by default.
     ///
     /// Default: []
     pub disabled_models: Option<Vec<String>>,
-    /// The checks Cowork runs over the agent's own work.
+    /// The checks Anna runs over the agent's own work.
     pub verification: Option<CoworkVerificationSettingsContent>,
     /// The shell the agent runs commands in.
     ///
@@ -1050,7 +1050,7 @@ pub enum AgentPermission {
     Open,
 }
 
-/// Which shell a Cowork agent runs commands in.
+/// Which shell an Anna agent runs commands in.
 ///
 /// The same three choices as `terminal.shell`, plus the one that should be the default: follow
 /// whatever the terminal is set to, so a command the agent runs behaves like one the user would
@@ -1087,9 +1087,9 @@ pub enum AgentShell {
     },
 }
 
-/// The checks that run after a Cowork agent writes, changes or deletes something.
+/// The checks that run after an Anna agent writes, changes or deletes something.
 ///
-/// All of them are compiled into Wu and none of them consults a model, so leaving them on costs
+/// All of them are compiled into Anna and none of them consults a model, so leaving them on costs
 /// nothing per turn. Findings are handed back to the agent, which fixes them on its next step.
 #[with_fallible_options]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]

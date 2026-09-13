@@ -1,13 +1,13 @@
 //! Checks that run over what the agent changed, natively.
 //!
-//! Every check here is compiled into Wu. None of them asks a model anything, so running them costs
+//! Every check here is compiled into Anna. None of them asks a model anything, so running them costs
 //! nothing per turn; only the findings are sent onward, and that is the entire point — an agent
 //! that is told it leaked a key or broke a lint rule fixes it on the next step.
 //!
 //! Deliberately not here: CodeQL, which is a proprietary binary whose license does not permit
 //! embedding and which needs a compiled database per run, and Dependabot, which is a Ruby service
 //! GitHub hosts. Their jobs — static analysis and dependency advisories — are covered by the
-//! language servers Wu already runs and by the RustSec database respectively.
+//! language servers Anna already runs and by the RustSec database respectively.
 
 use crate::{audit, cowork_settings::VerificationSettings};
 use collections::HashSet;
@@ -258,7 +258,7 @@ async fn diagnostics(
     wait: DiagnosticsWait,
     cx: &mut AsyncApp,
 ) -> Vec<Finding> {
-    // Nothing will ever analyse a file whose language Wu does not know, so there is nothing to
+    // Nothing will ever analyse a file whose language Anna does not know, so there is nothing to
     // wait for. Without this every write to a `.txt` or a `.env` would stall for the full window.
     if buffer.read_with(cx, |buffer, _| buffer.language().is_none()) {
         return Vec::new();
@@ -555,12 +555,6 @@ pub struct Redacted {
     pub counts: BTreeMap<&'static str, usize>,
 }
 
-impl Redacted {
-    pub fn total(&self) -> usize {
-        self.counts.values().sum()
-    }
-}
-
 /// The label an assigned high-entropy literal is replaced with; it has no pattern family of its own.
 const ASSIGNMENT_FAMILY: &str = "assigned secret";
 
@@ -570,7 +564,7 @@ const MAX_PRIVATE_KEY_BYTES: usize = 16 * 1024;
 
 /// Replaces every credential the secret scan would report with `[REDACTED: <family>]`.
 ///
-/// For text that is about to leave Wu in a file the user passes on, such as an exported session log.
+/// For text that is about to leave Anna in a file the user passes on, such as an exported session log.
 /// It reuses the scan's own patterns, so what the scan calls a credential is exactly what is hidden,
 /// and a pattern added there is redacted here without anyone remembering to.
 pub fn redact_secrets(text: &str) -> Redacted {
@@ -743,7 +737,7 @@ mod tests {
             Some(&1),
             "an Anthropic key is one credential, not also an OpenAI one"
         );
-        assert_eq!(redacted.total(), 2);
+        assert_eq!(redacted.counts.values().sum::<usize>(), 2);
     }
 
     #[test]
@@ -758,7 +752,7 @@ mod tests {
         );
         let redacted = redact_secrets(in_a_file);
         assert_eq!(redacted.text, "before\n[REDACTED: private key]\nafter\n");
-        assert_eq!(redacted.total(), 1);
+        assert_eq!(redacted.counts.values().sum::<usize>(), 1);
 
         // Inside a tool call's JSON the whole block is one line with escaped line breaks.
         let in_json = r#""content": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n""#;
@@ -781,10 +775,10 @@ mod tests {
         let redacted = redact_secrets("API_KEY = \"f3Kq9vZ2xLpR7wN4mB8tY6sJ1cH5dG0a\"\n");
 
         assert_eq!(redacted.text, "API_KEY = \"[REDACTED: assigned secret]\"\n");
-        assert_eq!(redacted.total(), 1);
+        assert_eq!(redacted.counts.values().sum::<usize>(), 1);
 
         let placeholder = redact_secrets("api_key = \"your-api-key-here\"\n");
-        assert_eq!(placeholder.total(), 0, "a placeholder is not a secret");
+        assert_eq!(placeholder.counts.values().sum::<usize>(), 0, "a placeholder is not a secret");
     }
 
     /// A TypeScript project with one open file, and nothing attached but what a test injects.

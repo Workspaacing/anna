@@ -1,7 +1,7 @@
-# Cowork: from chat to agent
+# Anna: from chat to agent
 
-Cowork today is a chat panel. This is the plan for making it an agent, natively in Rust, with no
-external runtime and no dependency on another agent product.
+Anna's agent (the `cowork` crate) began as a chat panel. This is the plan for making it an agent,
+natively in Rust, with no external runtime and no dependency on another agent product.
 
 It is written against research into OpenCode's design, kept in
 `.claude/skills/wu/references/opencode/`. Where a decision differs from theirs, the reason is stated.
@@ -12,8 +12,8 @@ It is written against research into OpenCode's design, kept in
 interrupting a turn, undoing a turn, and sub-agents are all branches of having a tool-call event
 model. Until the wire protocol and the thread model carry tool calls, none of them can be built.
 
-`provider.rs` currently says tool calls are "deliberately absent: nothing in the UI can execute one
-yet." That comment describes the starting point of this plan, and is the first thing to delete.
+`provider.rs` once said tool calls were "deliberately absent: nothing in the UI can execute one
+yet." That comment described the starting point of this plan, and has since been deleted.
 
 ## Event vocabulary
 
@@ -30,18 +30,18 @@ throws work away.
 
 ## Where this stands
 
-Phases 1 and 2 are built, minus `glob`, `grep` and `bash`. Phase 3 is the next thing that matters,
-because `bash` cannot ship without it.
+Phases 1 and 3 are built, and phase 5 is built in a different shape from the plan below. Phase 2 has
+no `glob` or `grep`, phase 4 is partly built, and phase 6 has not started.
 
 | | |
 | --- | --- |
-| 1. The loop | **built** — three wire formats, `MAX_STEPS`, tool calls persisted on the thread |
-| 2. Tools | **partly** — `read`, `list`, `write`, `edit` through `Project` and `Buffer`. No `glob`, `grep` or `bash` |
-| Verification | **built, not in the original plan** — secrets, Biome, diagnostics and dependency advisories after every change, each with a toggle, none costing tokens |
-| 3. Permission broker | not started |
-| 4. The panel | history, search and the model picker exist; tool-call cards and diff review do not |
-| 5. Undo | not started — edits join the buffer's own undo, but there is no turn-granular revert |
-| 6. Extensibility | not started |
+| 1. The loop | **built** — three wire formats (Anthropic, OpenAI, Google), tool calls persisted on the thread. There is no step budget: a turn runs until the model stops or the user presses Stop, and is stopped when the same call repeats three times (`MAX_IDENTICAL_CALLS`). Reads the model asks for together run concurrently |
+| 2. Tools | **partly** — `read`, `list`, `write`, `edit` through `Project` and `Buffer`; `shell`, a child process in the agent's shell rather than a `crates/terminal` grid; `fetch`; `github_issue`, `github_pull_request`, `github_checks`, `github_alerts`; `secrets_scan`; `dependencies_outdated`. No `glob` or `grep`, and no `diagnostics` tool — diagnostics reach the model through verification |
+| Verification | **built, not in the original plan** — secret scan, the project's formatter chain, language-server diagnostics and OSV dependency advisories after every change, each with a toggle, none costing tokens |
+| 3. Permission broker | **built, for `shell` only** — file tools never ask. Four levels (`ask`, `standard`, `trusted`, `open`) decide what is asked by what a command would do; approval is once / always / reject, with "always" scoped to the program name. Unlike the plan, "always" is remembered for the project across sessions unless the command cannot be undone, and there are no allow/deny patterns. A command that reaches outside the project's folders is asked about at every level, and file tools refuse paths outside them. A project's settings file cannot set the level |
+| 4. The panel | **partly** — history, search, the model picker and session-log export; a turn's tool calls as one table, with each edit's diff expandable inline; a Stop button and `cowork::Cancel`, not bound to `escape`; a permission card; a Changes button that opens the editor's own diff of uncommitted changes. No per-hunk accept/reject of the agent's edits, and no `@` mentions |
+| 5. Undo | **built, differently** — rewind to any user message (conversation and code, conversation only, or code only), or fork from one. Backed by a checkpoint each `write` and `edit` records rather than by git snapshots: a file someone else changed since is left alone, and what a `shell` command changed is not restored |
+| 6. Extensibility | not started — no rules, skills, sub-agents, commands or MCP, and no system prompt is sent |
 
 The verification pipeline arrived ahead of the plan because it is what makes an agent's edits
 trustworthy without a human reading every one: the model is told what it broke and fixes it on the
@@ -61,7 +61,7 @@ next step, for no tokens. See the README for what it does and what it deliberate
 
 ### 2. Tools, routed through the editor
 
-Not reimplementations of shell utilities. Each one goes through machinery Wu already has, which is
+Not reimplementations of shell utilities. Each one goes through machinery Anna already has, which is
 the entire reason for building this natively:
 
 | Tool | Goes through |
@@ -69,14 +69,14 @@ the entire reason for building this natively:
 | `read`, `list`, `glob`, `grep` | `Project`, `Worktree`, `fs::Fs`, `fuzzy` |
 | `edit`, `write` | `Buffer` — so edits land in the editor's own undo, dirty state and diff gutter |
 | `bash` | `crates/terminal` |
-| `diagnostics` | the language servers Wu already runs warm |
+| `diagnostics` | the language servers Anna already runs warm |
 
 Editing through `Buffer` rather than the filesystem is the difference between an agent that writes
 files behind the editor's back and one whose changes are reviewable before they touch disk.
 
 **Nothing is built for LSP or formatters.** `Project::format()`, `DiagnosticSet` and the language
 registry exist. After an edit the sequence is format → save → diagnostics → report back to the model.
-OpenCode's docs advise against LSP because starting servers is expensive for a TUI; Wu's are already
+OpenCode's docs advise against LSP because starting servers is expensive for a TUI; Anna's are already
 running.
 
 ### 3. The permission broker
@@ -87,7 +87,7 @@ running.
   settings**. A user should not be able to permanently widen their own permissions by clicking a
   button during a turn.
 - **Workspace settings may tighten permissions, never loosen them.** OpenCode has this inverted: a
-  cloned repository can widen what the user set globally. Wu also has worktree trust, which gates
+  cloned repository can widen what the user set globally. Anna also has worktree trust, which gates
   whether repository-supplied agent configuration is honoured at all.
 - Two cross-cutting interceptors, adopted from OpenCode because they are the best idea in its
   permission model: `external_directory` (any path outside the worktree) and `doom_loop` (the same

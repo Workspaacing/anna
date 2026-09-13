@@ -1,6 +1,6 @@
-# Wu — Cross-Cutting Infrastructure Crates (Reference)
+# Anna — Cross-Cutting Infrastructure Crates (Reference)
 
-Repo: `C:/Users/USER/Documents/wu-main` — a Rust fork of Zed. App name is **Wu** (`paths::APP_NAME`).
+Repo: `C:/Users/USER/Documents/wu-main` — a Rust editor built on Zed. App name is **Anna** (`paths::APP_NAME`; renamed from Wu).
 Everything here is shared plumbing: **reuse it, do not reinvent it, and do not pull in a new
 external dependency for something already wrapped here.**
 
@@ -35,9 +35,9 @@ external dependency for something already wrapped here.**
 | `ztracing` | Zero-cost `tracing` spans; compiled in only with `--cfg ztracing` (Tracy) or wasm+`web` | `info_span!`, `debug_span!`, `trace_span!`, `event!`, `#[instrument]`, `init()` |
 | `ztracing_macro` | No-op `#[instrument]` when tracing is off | `instrument` |
 | `etw_tracing` | Windows-only ETW/WPR trace capture (via `wprcontrol`) | actions `StartEtwTrace`, `StartEtwTraceWithHeap`, `SaveEtwTrace`, `CancelEtwTrace`; `init(cx)`, `launch_etw_recording`, `EtwSession` |
-| `release_channel` | Channel + version globals. **Only `Dev` and `Stable` exist in Wu.** | `ReleaseChannel::{Dev,Stable}`, `RELEASE_CHANNEL`, `RELEASE_CHANNEL_NAME`, `AppVersion::{load,global}`, `AppCommitSha`, `init`/`init_test`, `app_identifier()` (Windows) |
+| `release_channel` | Channel + version globals. **Only `Dev` and `Stable` exist in Anna.** | `ReleaseChannel::{Dev,Stable}`, `RELEASE_CHANNEL`, `RELEASE_CHANNEL_NAME`, `AppVersion::{load,global}`, `AppCommitSha`, `init`/`init_test`, `app_identifier()` (Windows) |
 | `env_var` | Env-var-backed statics | `EnvVar`, `env_var!("NAME")`, `bool_env_var!("NAME")` |
-| `wu_env_vars` | Wu-wide env flags | `ZED_STATELESS` (forces in-memory DB) |
+| `wu_env_vars` | Anna-wide env flags | `ZED_STATELESS` (forces in-memory DB) |
 | `system_specs` | "Copy system specs" for bug reports | `SystemSpecs::new(...)`, `new_stateless`, `GpuInfo`, `read_gpu_info_from_sys_class_drm` |
 | `session` | Per-run session identity for restore | `Session`, `AppSession::{new,id,last_session_id,persist_id,last_session_window_stack}` |
 | `node_runtime` | Managed Node/npm for LSPs and prettier | `NodeRuntime::{new, unavailable, binary_path, npm_command, run_npm_subcommand, npm_install_packages, npm_package_latest_version, should_install_npm_package}`, `NodeBinaryOptions`, `VersionStrategy` |
@@ -48,7 +48,7 @@ external dependency for something already wrapped here.**
 | `git_ui` | Git panel, graph, diffs, pickers, commit views | `git_panel.rs`, `git_graph.rs`, `project_diff.rs`, `branch_picker.rs`, `blame_ui.rs`, `commit_modal.rs` |
 | `git_hosting_providers` | Concrete permalink/avatar providers | `init(cx)`; GitHub, GitLab, Bitbucket, Azure, Gitea, Gitee, Forgejo, SourceHut, Chromium, Tangled |
 | `askpass` | `SSH_ASKPASS`/`GIT_ASKPASS` bridge over a socket | `AskPassDelegate`, `AskPassSession`, `EncryptedPassword`, `PasswordProxy`, `askpass::main(socket)` |
-| `client` | Thin RPC client + `ProxySettings`. **No auth/sign-in/telemetry remains.** | `Client::{production, global, set_global, status, send, request, add_message_handler}`, `ProxySettings::proxy_url`, `ClientSettings`, `zed_urls`, `ZED_URL_SCHEME` |
+| `client` | Thin RPC client + `ProxySettings`. **No auth/sign-in/telemetry remains.** | `Client::{production, global, set_global, status, send, request, add_message_handler}`, `ProxySettings::proxy_url`, `ClientSettings`, `zed_urls`, `APP_URL_SCHEME` |
 | `rpc` | Peer/connection/message-stream layer | `Peer`, `Connection`, `TypedEnvelope`, `ProtoClient`, `PROTOCOL_VERSION = 68` |
 | `proto` | Protobuf messages + envelope plumbing | `messages!`, `request_messages!`, `entity_messages!`, `TypedEnvelope`, `crates/proto/proto/*.proto` |
 | `remote` | SSH & WSL remote development client | `RemoteClient`, `connect`, `RemoteConnectionOptions`, `SshConnectionOptions`, `WslConnectionOptions`, `ConnectionState`, `MockConnection` |
@@ -57,11 +57,11 @@ external dependency for something already wrapped here.**
 | `schema_generator` | CLI emitting JSON Schemas | `schema_generator <theme\|icon_theme\|project> -o out.json` |
 | `json_schema_store` | Serves schemas to the JSON LSP for settings/keymap/tasks | `init(cx)`, `SchemaStore`, `handle_schema_request`, `all_schema_file_associations` |
 | `menu` | Universal menu/list navigation actions | `menu::{Cancel,Confirm,SecondaryConfirm,SelectNext,SelectPrevious,SelectFirst,SelectLast,SelectChild,SelectParent,Restart,EndSlot}`, `menu::init()` |
-| `cli` | The `wu` CLI binary | clap `Args`: `--wait --add --new --existing --user-data-dir --diff --completions --askpass --wsl --version --foreground` |
-| `install_cli` | CLI symlink install + `wu://` URL scheme registration | `InstallCliBinary`, `install_cli_binary`, `RegisterWuScheme`, `register_wu_scheme` |
+| `cli` | The `anna` CLI binary | clap `Args`: `--wait --add --new --existing --user-data-dir --diff --completions --askpass --wsl --version --foreground` |
+| `install_cli` | CLI symlink install + `anna://` URL scheme registration | `InstallCliBinary`, `install_cli_binary`, `RegisterWuScheme`, `register_wu_scheme` |
 | `explorer_command_injector` | Windows Explorer "Open with Wu" shell extension (cdylib COM) | `DllMain`, `ExplorerCommandInjector` (`IExplorerCommand`), `AppxManifest.xml` |
 | `windows_resources` | Build-script helper: icon, VERSIONINFO, app manifest | `windows_resources::compile(manifest: bool)` |
-| `auto_update` | Self-update from GitHub Releases of `Workspaacing/wu` | `AutoUpdater`, `AutoUpdateStatus`, `check`, `view_release_notes`, `GITHUB_RELEASES_API_URL` |
+| `auto_update` | Self-update from GitHub Releases of `Workspaacing/anna` | `AutoUpdater`, `AutoUpdateStatus`, `check`, `view_release_notes`, `GITHUB_RELEASES_API_URL` |
 | `open_path_prompt` | The "open path" picker delegate | `OpenPathPrompt`, `OpenPathDelegate::{new, with_footer, show_hidden, register, register_new_path}`, `FileFinderSettings` |
 
 ---
@@ -407,26 +407,27 @@ Also `join`, `join_rel_path`, `parent`, `ancestors`, `starts_with`, `ends_with(&
 
 ### 4.2 `crates/paths` — the globals
 
-`APP_NAME = "Wu"`, `APP_NAME_LOWERCASE = "wu"` (const-evaluated with asserts for ASCII / no
+`APP_NAME = "Anna"`, `APP_NAME_LOWERCASE = "anna"` (const-evaluated with asserts for ASCII / no
 separators / no control chars). The doc comment tells forks to change `APP_NAME` so user data does
-not collide with Zed's.
+not collide with Zed's. The rename from Wu ships a first-run migration that copies the old `Wu`/`wu`
+folders to the new locations and leaves them in place as a backup.
 
 | Function | Windows | macOS | Linux/FreeBSD |
 |---|---|---|---|
-| `config_dir()` | `%APPDATA%\Wu` | `~/.config/wu` | `$XDG_CONFIG_HOME/wu` (or `FLATPAK_XDG_CONFIG_HOME`) |
-| `data_dir()` | `%LOCALAPPDATA%\Wu` | `~/Library/Application Support/Wu` | `$XDG_DATA_HOME/wu` |
-| `state_dir()` | `%LOCALAPPDATA%\Wu` | `~/.local/state/Wu` | `$XDG_STATE_HOME/wu` |
-| `temp_dir()` | `dirs::cache_dir()/Wu` | `~/Library/Caches/Wu` | `$XDG_CACHE_HOME/wu` |
-| `logs_dir()` | `data_dir()/logs` | `~/Library/Logs/Wu` | `data_dir()/logs` |
+| `config_dir()` | `%APPDATA%\Anna` | `~/.config/anna` | `$XDG_CONFIG_HOME/anna` (or `FLATPAK_XDG_CONFIG_HOME`) |
+| `data_dir()` | `%LOCALAPPDATA%\Anna` | `~/Library/Application Support/Anna` | `$XDG_DATA_HOME/anna` |
+| `state_dir()` | `%LOCALAPPDATA%\Anna` | `~/.local/state/Anna` | `$XDG_STATE_HOME/anna` |
+| `temp_dir()` | `dirs::cache_dir()/Anna` | `~/Library/Caches/Anna` | `$XDG_CACHE_HOME/anna` |
+| `logs_dir()` | `data_dir()/logs` | `~/Library/Logs/Anna` | `data_dir()/logs` |
 
 Derived:
-`log_file()` = `logs_dir()/Wu.log`; `old_log_file()` = `logs_dir()/Wu.log.old`;
+`log_file()` = `logs_dir()/Anna.log`; `old_log_file()` = `logs_dir()/Anna.log.old`;
 `database_dir()` = `data_dir()/db`; `settings_file()` = `config_dir()/settings.json`;
 `global_settings_file()` = `config_dir()/global_settings.json`; `settings_backup_file()`;
 `keymap_file()` = `config_dir()/keymap.json`; `keymap_backup_file()`;
 `tasks_file()` = `config_dir()/tasks.json`; `debug_scenarios_file()` = `config_dir()/debug.json`;
 `agents_file()` = `config_dir()/AGENTS.md` (with `GLOBAL_AGENTS_FILE_DISPLAY` =
-`%APPDATA%\Wu\AGENTS.md` on Windows); `extensions_dir()`, `remote_extensions_dir()`,
+`%APPDATA%\Anna\AGENTS.md` on Windows); `extensions_dir()`, `remote_extensions_dir()`,
 `remote_extensions_uploads_dir()`, `themes_dir()`, `snippets_dir()`, `prompts_dir()`,
 `prompt_overrides_dir(repo)`, `embeddings_dir()`, `languages_dir()`, `debug_adapters_dir()`,
 `external_agents_dir()`, `copilot_dir()`, `default_prettier_dir()`, `remote_servers_dir()`,
@@ -548,7 +549,7 @@ resolution, the user agent, the shared rustls config, redirect policy, timeouts,
 
 `db::db_path(db_dir, scope)` = `paths::database_dir()/0-{scope}/db.sqlite`, where `scope` is the
 release-channel name (`ReleaseChannel::dev_name()` -> `dev` / `stable`), or `global` for
-`GlobalDbScope`. On Windows that is `%LOCALAPPDATA%\Wu\db\0-stable\db.sqlite` plus `-wal`/`-shm`
+`GlobalDbScope`. On Windows that is `%LOCALAPPDATA%\Anna\db\0-stable\db.sqlite` plus `-wal`/`-shm`
 sidecars.
 
 Pragmas (`crates/db/src/db.rs:128-137`): per-connection `PRAGMA foreign_keys=TRUE`;
@@ -559,9 +560,9 @@ per-database `busy_timeout=500`, `journal_mode=WAL`, `case_sensitive_like=TRUE`,
 `db::ALL_FILE_DB_FAILED` is an `AtomicBool` set when even the recreate path fails, so the app can
 notify the user.
 
-### 6.2 Wu's macro is `static_connection!`, NOT Zed's `define_connection!`
+### 6.2 Anna's macro is `static_connection!`, NOT Zed's `define_connection!`
 
-`define_connection!` **does not exist in this repo.** Wu uses one shared `AppDatabase`
+`define_connection!` **does not exist in this repo.** Anna uses one shared `AppDatabase`
 (`ThreadSafeConnection`) stored as a GPUI `Global`; each domain registers its migrations at link
 time through the `inventory` crate.
 
@@ -722,7 +723,7 @@ caller's crate/module path, so zlog scope filters apply to the *call site*, not 
 `zlog::init_output_file(paths::log_file(), Some(paths::old_log_file()))`, falling back to
 `init_output_stdout()` if the file can't be opened. Also `init_output_stderr()` and `flush()`.
 Rotation happens at **1 MiB** (`SINK_FILE_SIZE_BYTES_MAX` in `crates/zlog/src/sink.rs`):
-`Wu.log` -> `Wu.log.old`. On Windows: `%LOCALAPPDATA%\Wu\logs\Wu.log`.
+`Anna.log` -> `Anna.log.old`. On Windows: `%LOCALAPPDATA%\Anna\logs\Anna.log`.
 `zlog::init_test()` only activates when `ZED_LOG`/`RUST_LOG`/`CI` is set.
 
 ### 7.4 `ztracing` / `ztracing_macro` / `etw_tracing`
@@ -745,7 +746,7 @@ investigation.
 
 ## 8. Settings-adjacent globals
 
-**`release_channel`** — `ReleaseChannel` has exactly **two** variants in Wu: `Dev` (default) and
+**`release_channel`** — `ReleaseChannel` has exactly **two** variants in Anna: `Dev` (default) and
 `Stable`. **There is no `Preview` and no `Nightly`** (Zed's extra channels were removed), so ported
 Zed code that matches on them will not compile. `RELEASE_CHANNEL_NAME` reads
 `crates/wu/RELEASE_CHANNEL` at compile time (`include_str!`), overridable via `ZED_RELEASE_CHANNEL`
@@ -753,7 +754,7 @@ in debug builds. Other API: `AppVersion::load(pkg_version, build_id, commit_sha)
 (encodes `channel[.build][.sha]` into build metadata), `AppVersion::global(cx)`,
 `AppCommitSha::{new, try_global, set_global, full, short}`, `release_channel::init(version, cx)` /
 `init_test(version, channel, cx)`, and `app_identifier()` on Windows
-(`Wu-Editor-Dev` / `Wu-Editor-Stable`). Note the DB scope directory name comes from
+(`Anna-Editor-Dev` / `Anna-Editor-Stable`). Note the DB scope directory name comes from
 `ReleaseChannel::dev_name()`.
 
 **`env_var`** — declare env-backed statics instead of scattering `std::env::var`:
@@ -764,7 +765,7 @@ static MY_VAR:  LazyLock<EnvVar> = env_var!("MY_VAR");
 ```
 
 `EnvVar { name: SharedString, value: Option<String> }` treats an empty string as `None` and has
-`.or(other)` for fallback chains. Wu-wide flags live in
+`.or(other)` for fallback chains. Anna-wide flags live in
 `crates/wu_env_vars/src/wu_env_vars.rs` (currently just `ZED_STATELESS`).
 
 **`system_specs`** — `SystemSpecs::new(window, cx)` / `SystemSpecs::new_stateless(...)` gathers app
@@ -1003,7 +1004,7 @@ never special-case remote URLs inside a feature crate.
 git/ssh invoke it via `GIT_ASKPASS` / `SSH_ASKPASS` (and a GPG wrapper) and it round-trips the
 prompt to `AskPassDelegate` (UI: `git_ui_core::askpass_modal::AskPassModal`). Passwords are carried
 as `EncryptedPassword`, and `decrypt` requires an `IKnowWhatIAmDoingAndIHaveReadTheDocs` token.
-The CLI's hidden `--askpass <socket>` makes `wu` act as netcat over the socket so netcat isn't a
+The CLI's hidden `--askpass <socket>` makes `anna` act as netcat over the socket so netcat isn't a
 runtime dependency (`askpass::main(socket)` / `main_from_args`). `set_askpass_program(path)` lets
 tests/remote override the helper.
 
@@ -1032,10 +1033,10 @@ the workspace at all. What remains:
   (`SignedOut` | `Connected { peer_id, connection_id }` | `ConnectionLost`), `teardown`,
   `subscribe_to_entity`, `add_message_handler`, `add_request_handler`, `send`, `request`,
   `request_stream`, `request_envelope`, `request_dynamic`. Plus `pub use rpc::*` and `pub use user::*`.
-- `client::zed_urls` (doc links), `client::os_info`, `client::ZED_URL_SCHEME` (consumed by
+- `client::zed_urls` (doc links), `client::os_info`, `client::APP_URL_SCHEME` (consumed by
   `install_cli::register_wu_scheme`).
 - `auto_update::init(client, cx)` takes the `Client` but actually talks to
-  `https://api.github.com/repos/Workspaacing/wu/releases` over `HttpClient`, not to any Zed server.
+  `https://api.github.com/repos/Workspaacing/anna/releases` over `HttpClient`, not to any Zed server.
 
 `rpc` (`crates/rpc/src/rpc.rs`, `PROTOCOL_VERSION = 68`) is the transport: `Peer`, `Connection`,
 `message_stream`, `TypedEnvelope`, `ProtoClient`, `auth`, `macros`.
@@ -1088,8 +1089,9 @@ All downloads go through the injected `HttpClient` — do not add your own fetch
 
 ## 16. CLI and Windows integration
 
-**`cli`** builds `cli.exe`, installed as `bin/wu.exe`; `util::get_zed_cli_path()` locates it
-(`bin/wu.exe` for installed builds, `./cli.exe` for dev builds on Windows). clap `Args`:
+**`cli`** builds `cli.exe`, installed as `bin/anna.exe`; `util::get_zed_cli_path()` locates it
+(`bin/anna.exe` for installed builds, `bin/wu.exe` for installs from before the rename, `./cli.exe` for
+dev builds on Windows; `../bin/anna`, then `../bin/wu`, then `./cli` elsewhere). clap `Args`:
 `--wait/-w`, `--add/-a`, `--new/-n`, `--existing/-e`, `--reuse` (hidden), `--classic` (hidden),
 `--user-data-dir DIR`, `--version/-v`, `--foreground`, `--zed PATH`, `--dev-server-token`,
 `--diff OLD NEW` (repeatable), `--completions SHELL` (`clap_complete` + nushell), `--system-specs`,
@@ -1101,8 +1103,8 @@ trailing `paths_with_position` supporting `path:line:column` (parsed via
 **`install_cli`** — `InstallCliBinary` action + `install_cli_binary(window, cx)` (non-Windows only:
 symlinks `/usr/local/bin/wu`, escalating via `osascript ... with administrator privileges` on macOS
 when needed; `CANT_INSTALL_DOCS_URL` for the failure toast) and `RegisterWuScheme` /
-`register_wu_scheme(cx)`, which calls `cx.register_url_scheme(client::ZED_URL_SCHEME)` so `wu://`
-links work.
+`register_wu_scheme(cx)`, which calls `cx.register_url_scheme(client::APP_URL_SCHEME)` so `anna://`
+links work (`anna://` is the only scheme Anna registers).
 
 **`explorer_command_injector`** — a Windows `cdylib` in-process COM server implementing
 `IExplorerCommand` + `IClassFactory` that adds **"Open with Wu"** to the Explorer context menu.
@@ -1117,7 +1119,7 @@ and `VERSIONINFO` (`FileDescription`/`ProductName` = "Wu" / "Wu Dev",
 `ProductVersion` = `pkg_version+channel[.build][.sha]`). Honors `ZED_RC_TOOLKIT_PATH` to find
 `rc.exe` and `ZED_COMMIT_SHA` / `GITHUB_RUN_NUMBER` / `RELEASE_CHANNEL` for the version string.
 
-**`auto_update`** — polls `https://api.github.com/repos/Workspaacing/wu/releases` through the injected
+**`auto_update`** — polls `https://api.github.com/repos/Workspaacing/anna/releases` through the injected
 `HttpClient`; `AutoUpdateStatus`, `AutoUpdater::{get, poll, start_polling, current_version, status,
 dismiss_status}`, `check(&Check, window, cx)`, `view_release_notes`, `release_notes_url(cx)`
 (tag `v{version}` on stable, the commit list on `Dev`), `ReleaseAsset`, `UpdateCheckType`.
@@ -1149,7 +1151,7 @@ and `auto_update_ui` are the platform installer and the UI.
 | String-concatenating paths | `PathStyle::join`, `RelPath::join`, `AbsPath::join_rel_path` | separator + normalization correctness. |
 | Showing `RelPath::as_unix_str()` to the user | `rel_path.display(PathStyle::local())` | internal representation is always POSIX. |
 | Editing an existing `MIGRATIONS` entry | append a new `sql!()` entry | a mismatch moves the user's DB aside and recreates it **empty**. |
-| `define_connection!` (Zed) | `db::static_connection!(MyDb, [Deps])` | Wu replaced it with an inventory-registered shared connection. |
+| `define_connection!` (Zed) | `db::static_connection!(MyDb, [Deps])` | Anna replaced it with an inventory-registered shared connection. |
 | Raw SQL string literals | `sqlez_macros::sql!( ... )` | compile-time syntax check + stable `sqlformat` normalization. |
 | New `mod.rs` files | `src/some_module.rs` | `.rules` line 14. |
 | Default `src/lib.rs` for a new crate | `[lib] path = "src/my_crate.rs"` in `Cargo.toml` | `.rules` line 15. |
@@ -1220,7 +1222,7 @@ and `auto_update_ui` are the platform installer and the UI.
     `cargo dylint --all`, so a clean `cargo check` does not mean clean.
 21. **`db::write_and_log` detaches.** It returns `()`, so you cannot await the write; do not use it
     where ordering with a subsequent read matters.
-22. **`ZED_*` environment variable names survive the fork.** `ZED_LOG`, `ZED_STATELESS`,
+22. **`ZED_*` environment variable names are kept from Zed.** `ZED_LOG`, `ZED_STATELESS`,
     `ZED_ALLOW_ROOT`, `ZED_MEASUREMENTS`, `ZED_RELEASE_CHANNEL`, `ZED_SERVER_URL`,
     `ZED_FILE_WATCHER_MODE`, `ZED_APP_VERSION`, `ZED_COMMIT_SHA`, `ZED_RC_TOOLKIT_PATH` — do not
-    "fix" them to `WU_*` without checking every consumer.
+    "fix" them to `ANNA_*` or `WU_*` without checking every consumer.

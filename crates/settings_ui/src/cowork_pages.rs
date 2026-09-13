@@ -1,4 +1,4 @@
-//! The Providers and Models sub-pages of the Cowork settings page.
+//! The Providers and Models sub-pages of the Anna settings page.
 //!
 //! These are `SubPageLink`s rather than ordinary setting items because neither list comes from
 //! settings JSON: providers are the models.dev catalog crossed with the process environment, and
@@ -166,7 +166,7 @@ pub(crate) fn render_providers(
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     let Some(store) = CoworkStore::global(cx) else {
-        return unavailable("Cowork is still starting up.").into_any_element();
+        return unavailable("Anna is still starting up.").into_any_element();
     };
 
     let settings_window = cx.entity().downgrade();
@@ -213,7 +213,7 @@ pub(crate) fn render_providers(
             format!("{connected} of {} providers connected", rows.len()),
             "Connect a provider by clicking it and entering an API key, which is kept in the \
              operating system's credential store. A provider whose key is already in the \
-             environment Wu started from is connected without one.",
+             environment Anna started from is connected without one.",
             state,
         ))
         .child(tabs)
@@ -258,7 +258,7 @@ pub(crate) fn render_models(
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     let Some(store) = CoworkStore::global(cx) else {
-        return unavailable("Cowork is still starting up.").into_any_element();
+        return unavailable("Anna is still starting up.").into_any_element();
     };
 
     let settings_window = cx.entity().downgrade();
@@ -298,7 +298,7 @@ pub(crate) fn render_models(
         .gap_2()
         .child(render_intro(
             format!("{} models available", rows.len()),
-            "Only connected providers are listed. Pick a thread's model from the Cowork panel or \
+            "Only connected providers are listed. Pick a thread's model from the Anna panel or \
              the thread header.",
             state,
         ))
@@ -341,7 +341,7 @@ fn provider_row(row: &ProviderRow, store: &GpuiEntity<CoworkStore>) -> Vec<AnyEl
         (
             IconName::Warning,
             Color::Warning,
-            "Cowork cannot talk to this provider yet: it needs a request format that is not \
+            "Anna cannot talk to this provider yet: it needs a request format that is not \
              implemented.",
         )
     } else if row.stored {
@@ -354,7 +354,7 @@ fn provider_row(row: &ProviderRow, store: &GpuiEntity<CoworkStore>) -> Vec<AnyEl
         (
             IconName::Check,
             Color::Success,
-            "Connected through the environment. Click to save a key in Cowork instead.",
+            "Connected through the environment. Click to save a key in Anna instead.",
         )
     } else {
         (
@@ -395,7 +395,7 @@ fn provider_row(row: &ProviderRow, store: &GpuiEntity<CoworkStore>) -> Vec<AnyEl
         clickable(h_flex(), "env")
             .child(
                 Label::new(if row.stored {
-                    SharedString::new_static("Saved in Cowork")
+                    SharedString::new_static("Saved in Anna")
                 } else {
                     row.env_label.clone()
                 })

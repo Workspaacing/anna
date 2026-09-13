@@ -163,7 +163,7 @@ impl NodeRuntime {
                 Ok(instance) => {
                     log::log!(
                         log_level,
-                        "using Wu managed Node.js at {} since {}",
+                        "using Anna managed Node.js at {} since {}",
                         instance.installation_path.display(),
                         why_using_managed
                     );
@@ -177,8 +177,8 @@ impl NodeRuntime {
                     // and/or have shared tracking of when internet is available.
                     Box::new(UnavailableNodeRuntime {
                         error_message: format!(
-                            "failure while downloading and/or installing Wu managed Node.js, \
-                            restart Wu to retry: {}",
+                            "failure while downloading and/or installing Anna managed Node.js, \
+                            restart Anna to retry: {}",
                             err
                         )
                         .into(),
@@ -658,7 +658,7 @@ impl ManagedNodeRuntime {
                         true
                     } else {
                         log::warn!(
-                            "Wu managed Node.js binary at {} failed check with output: {:?}",
+                            "Anna managed Node.js binary at {} failed check with output: {:?}",
                             node_binary.display(),
                             output
                         );
@@ -667,7 +667,7 @@ impl ManagedNodeRuntime {
                 }
                 Err(err) => {
                     log::warn!(
-                        "Wu managed Node.js binary at {} failed check, so re-downloading it. \
+                        "Anna managed Node.js binary at {} failed check, so re-downloading it. \
                         Error: {}",
                         node_binary.display(),
                         err

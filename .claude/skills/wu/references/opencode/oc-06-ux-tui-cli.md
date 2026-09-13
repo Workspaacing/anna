@@ -1,6 +1,6 @@
 # OpenCode UX Research: TUI / CLI / IDE / Web / Share / Keybinds / Themes
 
-Research target: the **user experience** surface of OpenCode, for the team building **Cowork**, an AI panel inside a Zed fork (Rust/GPUI).
+Research target: the **user experience** surface of OpenCode, for the team building **Cowork**, an AI panel inside Anna, an editor built on Zed (Rust/GPUI).
 
 Sources fetched 2026-09-11:
 - https://opencode.ai/docs/tui/
@@ -375,7 +375,7 @@ This is the thinnest of the seven pages, and the finding is itself significant: 
 - **What the editor does NOT contribute** (not documented, and structurally hard for a terminal-hosted agent): diagnostics/LSP errors from the editor's own language servers, applying diffs into the editor's native diff view, gutter decorations, multibuffer review, cursor position, or open-tab set beyond the active one.
 - The `acp` command is the more interesting integration path — ACP is the protocol Zed already uses for external agents, so OpenCode can be driven as an ACP agent rather than as a terminal.
 
-**Read for Cowork:** this is OpenCode's weakest surface and Cowork's structural advantage. A native GPUI panel inside a Zed fork can contribute everything the terminal cannot — real multibuffer diff review, LSP diagnostics as context, gutter decorations, click-to-navigate, the open-tab set, and edit application through the editor's own buffer/undo system.
+**Read for Cowork:** this is OpenCode's weakest surface and Cowork's structural advantage. A native GPUI panel inside an editor built on Zed can contribute everything the terminal cannot — real multibuffer diff review, LSP diagnostics as context, gutter decorations, click-to-navigate, the open-tab set, and edit application through the editor's own buffer/undo system.
 
 ---
 
@@ -717,7 +717,7 @@ Cowork today: **thread list, search box, model picker, plain chat view with stre
 
 1. **Cowork's "no tool calls at all" is not one gap, it is the trunk of the tree.** Tool calls, diff rendering, permission prompts, interrupt, undo, and child sessions are all downstream of having a tool-call event model in the transcript. Fix the data model once and six features become possible.
 
-2. **OpenCode is a terminal app fighting to reach the editor. Cowork starts inside it.** OpenCode's whole IDE integration is "launch a terminal, push the selection, insert `@File#L37-42`." A GPUI panel in a Zed fork can do native multibuffer diff review, LSP diagnostics as context, gutter decorations, click-to-navigate, and edits applied through the editor's own buffer/undo stack. Do not reimplement OpenCode's terminal-shaped compromises.
+2. **OpenCode is a terminal app fighting to reach the editor. Cowork starts inside it.** OpenCode's whole IDE integration is "launch a terminal, push the selection, insert `@File#L37-42`." A GPUI panel in an editor built on Zed can do native multibuffer diff review, LSP diagnostics as context, gutter decorations, click-to-navigate, and edits applied through the editor's own buffer/undo stack. Do not reimplement OpenCode's terminal-shaped compromises.
 
 3. **OpenCode's client/server split is why it has four front-ends.** If Cowork ever wants headless runs, CI, or a web view, the session/tool-event model should be transport-shaped from the start. Zed already speaks ACP, which is also OpenCode's editor-integration escape hatch.
 

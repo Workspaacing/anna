@@ -468,10 +468,27 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let keys = workspace.update_in(cx, |workspace, window, cx| {
-            workspace.activity_bar().read(cx).entry_keys(window, cx)
+        let entries = workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .activity_bar()
+                .read(cx)
+                .entries(window, cx)
+                .into_iter()
+                .map(|entry| match &entry {
+                    ActivityBarEntry::Panel { .. } => (entry.key(), None),
+                    ActivityBarEntry::Action { action, .. } => (entry.key(), Some(action.name())),
+                })
+                .collect::<Vec<_>>()
         });
-        assert_eq!(keys, vec!["ProjectPanel", "OutlinePanel"]);
+        assert_eq!(
+            entries,
+            vec![
+                ("ProjectPanel", None),
+                (GITHUB_ENTRY_KEY, Some(wu_actions::OpenGitHub.name())),
+                ("OutlinePanel", None),
+            ],
+            "entries follow the preferred order, and GitHub is an action entry, not a panel"
+        );
 
         let is_open =
             workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
@@ -528,5 +545,25 @@ mod tests {
         let is_open =
             workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
         assert!(!is_open, "activating the active entry closes the dock");
+
+        let github_opened = std::rc::Rc::new(std::cell::Cell::new(false));
+        cx.update(|_, cx| {
+            let github_opened = github_opened.clone();
+            cx.on_action(move |_: &wu_actions::OpenGitHub, _| github_opened.set(true));
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .activity_bar()
+                .clone()
+                .update(cx, |activity_bar, cx| {
+                    assert!(activity_bar.activate_entry(GITHUB_ENTRY_KEY, window, cx));
+                });
+        });
+        cx.run_until_parked();
+
+        assert!(github_opened.get(), "the GitHub entry dispatches its action");
+        let is_open =
+            workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
+        assert!(!is_open, "the GitHub entry does not open a dock");
     }
 }

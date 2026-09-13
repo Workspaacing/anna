@@ -232,8 +232,8 @@ pub fn prevent_root_execution() {
     if is_root && !allow_root {
         eprintln!(
             "\
-Error: Running Wu as root or via sudo is unsupported.
-       Doing so (even once) may subtly break things for all subsequent non-root usage of Wu.
+Error: Running Anna as root or via sudo is unsupported.
+       Doing so (even once) may subtly break things for all subsequent non-root usage of Anna.
        It is untested and not recommended, don't complain when things break.
        If you wish to proceed anyways, set `ZED_ALLOW_ROOT=true` in your environment."
         );
@@ -302,7 +302,7 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
     use anyhow::Context as _;
     use paths::PathExt;
     let mut zed_path =
-        std::env::current_exe().context("Failed to determine current Wu executable path.")?;
+        std::env::current_exe().context("Failed to determine current Anna executable path.")?;
     if cfg!(target_os = "linux")
         && !zed_path.is_file()
         && let Some(truncated) = zed_path
@@ -317,7 +317,7 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
 
     zed_path
         .try_shell_safe(shell_kind)
-        .context("Failed to shell-escape Wu executable path.")
+        .context("Failed to shell-escape Anna executable path.")
 }
 
 /// Returns a path for the zed cli executable, this function
@@ -325,23 +325,23 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
 pub fn get_zed_cli_path() -> Result<PathBuf> {
     use anyhow::Context as _;
     let zed_path =
-        std::env::current_exe().context("Failed to determine current Wu executable path.")?;
+        std::env::current_exe().context("Failed to determine current Anna executable path.")?;
     let parent = zed_path
         .parent()
-        .context("Failed to determine parent directory of Wu executable path.")?;
+        .context("Failed to determine parent directory of Anna executable path.")?;
 
     let possible_locations: &[&str] = if cfg!(target_os = "macos") {
         // On macOS, the zed executable and zed-cli are inside the app bundle,
         // so here ./cli is for both installed and development builds.
         &["./cli"]
     } else if cfg!(target_os = "windows") {
-        // bin/wu.exe is for installed builds, ./cli.exe is for development builds.
-        &["bin/wu.exe", "./cli.exe"]
+        // bin/anna.exe is for installed builds, ./cli.exe is for development builds.
+        &["bin/anna.exe", "./cli.exe"]
     } else if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
         // bin is the standard, ./cli is for the target directory in development builds.
-        &["../bin/wu", "./cli"]
+        &["../bin/anna", "./cli"]
     } else {
-        anyhow::bail!("unsupported platform for determining Wu CLI path");
+        anyhow::bail!("unsupported platform for determining Anna CLI path");
     };
 
     possible_locations
@@ -355,7 +355,7 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
         })
         .with_context(|| {
             format!(
-                "could not find Wu CLI from any of: {}",
+                "could not find Anna CLI from any of: {}",
                 possible_locations.join(", ")
             )
         })
@@ -376,9 +376,9 @@ pub async fn load_login_shell_environment() -> Result<()> {
         .await
         .with_context(|| format!("capturing environment with {:?}", get_system_shell()))?
     {
-        // Skip SHLVL to prevent it from polluting Wu's process environment.
+        // Skip SHLVL to prevent it from polluting Anna's process environment.
         // The login shell used for env capture increments SHLVL, and if we propagate it,
-        // terminals spawned by Wu will inherit it and increment again, causing SHLVL
+        // terminals spawned by Anna will inherit it and increment again, causing SHLVL
         // to start at 2 instead of 1 (and increase by 2 on each reload).
         if name == "SHLVL" {
             continue;

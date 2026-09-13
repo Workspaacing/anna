@@ -17,9 +17,9 @@ if [ $IN_WSL = true ]; then
     if [ -z "$WSL_USER" ]; then
         WSL_USER="$USERNAME"
     fi
-    "$ZED_PATH/wu.exe" --wsl "$WSL_USER@$WSL_DISTRO_NAME" "$@"
+    "$ZED_PATH/anna.exe" --wsl "$WSL_USER@$WSL_DISTRO_NAME" "$@"
     exit $?
 else
-    "$ZED_PATH/wu.exe" "$@"
+    "$ZED_PATH/anna.exe" "$@"
     exit $?
 fi

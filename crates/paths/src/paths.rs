@@ -1,4 +1,6 @@
-//! Paths to locations used by Wu.
+//! Paths to locations used by Anna.
+
+mod legacy_data_migration;
 
 use anyhow::Context as _;
 use std::env;
@@ -9,6 +11,11 @@ use util::paths::SanitizedPath;
 pub use util::paths::home_dir;
 use util::rel_path::RelPath;
 
+pub use legacy_data_migration::{
+    CopySummary, DirectoryMigrationOutcome, DirectoryMigrationReport, LEGACY_MIGRATION_MARKER_NAME,
+    LegacyDataMigration, migrate_legacy_user_data,
+};
+
 /// A default editorconfig file name to use when resolving project settings.
 pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 
@@ -16,7 +23,14 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 /// and state directory paths.
 ///
 /// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Wu";
+pub const APP_NAME: &str = "Anna";
+
+/// The application name earlier releases used for their data directories.
+/// Their data is copied into the [`APP_NAME`] directories on first launch.
+pub const LEGACY_APP_NAME: &str = "Wu";
+
+/// Lowercased form of [`LEGACY_APP_NAME`].
+pub const LEGACY_APP_NAME_LOWERCASE: &str = "wu";
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
 /// Linux/FreeBSD and the macOS `~/.config` fallback.
@@ -54,16 +68,16 @@ static CUSTOM_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved data directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/Library/Application Support/Wu`.
-/// On Linux/FreeBSD, this is `$XDG_DATA_HOME/wu`.
-/// On Windows, this is `%LOCALAPPDATA%\Wu`.
+/// On macOS, this is `~/Library/Application Support/Anna`.
+/// On Linux/FreeBSD, this is `$XDG_DATA_HOME/anna`.
+/// On Windows, this is `%LOCALAPPDATA%\Anna`.
 static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved config directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/.config/wu`.
-/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/wu`.
-/// On Windows, this is `%APPDATA%\Wu`.
+/// On macOS, this is `~/.config/anna`.
+/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/anna`.
+/// On Windows, this is `%APPDATA%\Anna`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Returns the relative path to the wu_server directory on the ssh host.
@@ -145,131 +159,149 @@ pub fn custom_data_dir_instance_hash() -> Option<u64> {
     Some(hash)
 }
 
-/// Returns the path to the configuration directory used by Wu.
+/// Returns the path to the configuration directory used by Anna.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.join("config")
-        } else if cfg!(target_os = "windows") {
-            dirs::config_dir()
-                .expect("failed to determine RoamingAppData directory")
-                .join(APP_NAME)
-        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            if let Ok(flatpak_xdg_config) = std::env::var("FLATPAK_XDG_CONFIG_HOME") {
-                flatpak_xdg_config.into()
-            } else {
-                dirs::config_dir().expect("failed to determine XDG_CONFIG_HOME directory")
-            }
-            .join(APP_NAME_LOWERCASE)
         } else {
-            home_dir().join(".config").join(APP_NAME_LOWERCASE)
+            platform_config_dir(APP_NAME, APP_NAME_LOWERCASE)
         }
     })
 }
 
-/// Returns the path to the data directory used by Wu.
+/// Returns the path to the data directory used by Anna.
 pub fn data_dir() -> &'static PathBuf {
     CURRENT_DATA_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.clone()
-        } else if cfg!(target_os = "macos") {
-            home_dir()
-                .join("Library/Application Support")
-                .join(APP_NAME)
-        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            if let Ok(flatpak_xdg_data) = std::env::var("FLATPAK_XDG_DATA_HOME") {
-                flatpak_xdg_data.into()
-            } else {
-                dirs::data_local_dir().expect("failed to determine XDG_DATA_HOME directory")
-            }
-            .join(APP_NAME_LOWERCASE)
-        } else if cfg!(target_os = "windows") {
-            dirs::data_local_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME)
         } else {
-            config_dir().clone() // Fallback
+            platform_data_dir(APP_NAME, APP_NAME_LOWERCASE)
         }
     })
 }
 
 pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
-    STATE_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            return home_dir().join(".local").join("state").join(APP_NAME);
-        }
-
-        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            return if let Ok(flatpak_xdg_state) = std::env::var("FLATPAK_XDG_STATE_HOME") {
-                flatpak_xdg_state.into()
-            } else {
-                dirs::state_dir().expect("failed to determine XDG_STATE_HOME directory")
-            }
-            .join(APP_NAME_LOWERCASE);
-        } else {
-            // Windows
-            return dirs::data_local_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME);
-        }
-    })
+    STATE_DIR.get_or_init(|| platform_state_dir(APP_NAME, APP_NAME_LOWERCASE))
 }
 
-/// Returns the path to the temp directory used by Wu.
+/// Returns the path to the temp directory used by Anna.
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
-    TEMP_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            return dirs::cache_dir()
-                .expect("failed to determine cachesDirectory directory")
-                .join(APP_NAME);
-        }
-
-        if cfg!(target_os = "windows") {
-            return dirs::cache_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME);
-        }
-
-        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            return if let Ok(flatpak_xdg_cache) = std::env::var("FLATPAK_XDG_CACHE_HOME") {
-                flatpak_xdg_cache.into()
-            } else {
-                dirs::cache_dir().expect("failed to determine XDG_CACHE_HOME directory")
-            }
-            .join(APP_NAME_LOWERCASE);
-        }
-
-        home_dir().join(".cache").join(APP_NAME_LOWERCASE)
-    })
+    TEMP_DIR.get_or_init(|| platform_temp_dir(APP_NAME, APP_NAME_LOWERCASE))
 }
 
 /// Returns the path to the logs directory.
 pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
-    LOGS_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            home_dir().join("Library/Logs").join(APP_NAME)
-        } else {
-            data_dir().join("logs")
-        }
-    })
+    LOGS_DIR.get_or_init(|| platform_logs_dir(APP_NAME, data_dir()))
 }
 
-/// Returns the path to the Wu server directory on this SSH host.
+// The platform directories below take the application name as a parameter so
+// the first-run migration can compute where earlier releases kept their data.
+
+fn platform_config_dir(app_name: &str, app_name_lowercase: &str) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        dirs::config_dir()
+            .expect("failed to determine RoamingAppData directory")
+            .join(app_name)
+    } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        if let Ok(flatpak_xdg_config) = std::env::var("FLATPAK_XDG_CONFIG_HOME") {
+            flatpak_xdg_config.into()
+        } else {
+            dirs::config_dir().expect("failed to determine XDG_CONFIG_HOME directory")
+        }
+        .join(app_name_lowercase)
+    } else {
+        home_dir().join(".config").join(app_name_lowercase)
+    }
+}
+
+fn platform_data_dir(app_name: &str, app_name_lowercase: &str) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home_dir()
+            .join("Library/Application Support")
+            .join(app_name)
+    } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        if let Ok(flatpak_xdg_data) = std::env::var("FLATPAK_XDG_DATA_HOME") {
+            flatpak_xdg_data.into()
+        } else {
+            dirs::data_local_dir().expect("failed to determine XDG_DATA_HOME directory")
+        }
+        .join(app_name_lowercase)
+    } else if cfg!(target_os = "windows") {
+        dirs::data_local_dir()
+            .expect("failed to determine LocalAppData directory")
+            .join(app_name)
+    } else {
+        platform_config_dir(app_name, app_name_lowercase)
+    }
+}
+
+fn platform_state_dir(app_name: &str, app_name_lowercase: &str) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home_dir().join(".local").join("state").join(app_name)
+    } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        if let Ok(flatpak_xdg_state) = std::env::var("FLATPAK_XDG_STATE_HOME") {
+            flatpak_xdg_state.into()
+        } else {
+            dirs::state_dir().expect("failed to determine XDG_STATE_HOME directory")
+        }
+        .join(app_name_lowercase)
+    } else {
+        // Windows
+        dirs::data_local_dir()
+            .expect("failed to determine LocalAppData directory")
+            .join(app_name)
+    }
+}
+
+fn platform_temp_dir(app_name: &str, app_name_lowercase: &str) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        dirs::cache_dir()
+            .expect("failed to determine cachesDirectory directory")
+            .join(app_name)
+    } else if cfg!(target_os = "windows") {
+        dirs::cache_dir()
+            .expect("failed to determine LocalAppData directory")
+            .join(app_name)
+    } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        if let Ok(flatpak_xdg_cache) = std::env::var("FLATPAK_XDG_CACHE_HOME") {
+            flatpak_xdg_cache.into()
+        } else {
+            dirs::cache_dir().expect("failed to determine XDG_CACHE_HOME directory")
+        }
+        .join(app_name_lowercase)
+    } else {
+        home_dir().join(".cache").join(app_name_lowercase)
+    }
+}
+
+fn platform_logs_dir(app_name: &str, data_dir: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home_dir().join("Library/Logs").join(app_name)
+    } else {
+        data_dir.join("logs")
+    }
+}
+
+/// Returns the path to the Anna server directory on this SSH host.
 pub fn remote_server_state_dir() -> &'static PathBuf {
     static REMOTE_SERVER_STATE: OnceLock<PathBuf> = OnceLock::new();
     REMOTE_SERVER_STATE.get_or_init(|| data_dir().join("server_state"))
 }
 
-/// Returns the path to the `Wu.log` file.
+/// Returns the path to the `Anna.log` file.
+///
+/// Logs written by earlier releases (`Wu.log`) are copied into the logs
+/// directory by the first-run migration and keep their name.
 pub fn log_file() -> &'static PathBuf {
     static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
     LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log", APP_NAME)))
 }
 
-/// Returns the path to the `Wu.log.old` file.
+/// Returns the path to the `Anna.log.old` file.
 pub fn old_log_file() -> &'static PathBuf {
     static OLD_LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
     OLD_LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log.old", APP_NAME)))
@@ -498,15 +530,35 @@ pub fn remote_servers_dir() -> &'static PathBuf {
     REMOTE_SERVERS_DIR.get_or_init(|| data_dir().join("remote_servers"))
 }
 
-/// Returns the relative path to a `.wu` folder within a project.
+/// Project settings folder names, highest precedence first. A config file in a
+/// later folder is only used when no earlier folder has the same file, and new
+/// files are created in the first one.
+const LOCAL_SETTINGS_FOLDER_NAMES: [&str; 3] = [".anna", ".wu", ".zed"];
+
+/// Returns the relative path to a `.anna` folder within a project, where new
+/// project config files are created.
 pub fn local_settings_folder_name() -> &'static str {
+    ".anna"
+}
+
+/// Returns the relative path to a `.wu` folder within a project, the folder
+/// earlier releases created.
+///
+/// This is only the first of two fallbacks. Code that resolves config files
+/// should use [`local_settings_folder_names`], which also covers `.zed`.
+pub fn legacy_local_settings_folder_name() -> &'static str {
     ".wu"
 }
 
-/// Returns the relative path to a `.zed` folder within a project, used as a
-/// fallback when there is no `.wu` folder.
-pub fn legacy_local_settings_folder_name() -> &'static str {
-    ".zed"
+/// Returns every project settings folder name, highest precedence first:
+/// `.anna`, `.wu`, `.zed`.
+pub fn local_settings_folder_names() -> &'static [&'static str] {
+    &LOCAL_SETTINGS_FOLDER_NAMES
+}
+
+/// Whether `name` is a project settings folder name (`.anna`, `.wu` or `.zed`).
+pub fn is_local_settings_folder_name(name: &str) -> bool {
+    LOCAL_SETTINGS_FOLDER_NAMES.contains(&name)
 }
 
 /// Returns the relative path to a `.vscode` folder within a project.
@@ -514,8 +566,11 @@ pub fn local_vscode_folder_name() -> &'static str {
     ".vscode"
 }
 
-/// Picks the `.wu` config file over its `.zed` counterpart. The `.zed` file is
-/// only used when it exists and the `.wu` one does not.
+/// Picks `path` over `legacy_path`. The legacy file is only used when it exists
+/// and `path` does not.
+///
+/// This knows a single fallback; prefer [`resolve_local_config_paths`] with the
+/// full candidate lists, which also cover `.zed`.
 pub fn resolve_local_config_path<P: AsRef<RelPath>>(
     path: P,
     legacy_path: P,
@@ -528,34 +583,77 @@ pub fn resolve_local_config_path<P: AsRef<RelPath>>(
     }
 }
 
-/// Returns the relative path to a `settings.json` file within a project.
+/// Picks the highest-precedence candidate that exists, or the first candidate
+/// (where a new file belongs) when none does. Returns `None` only when there
+/// are no candidates.
+pub fn resolve_local_config_paths<P: AsRef<RelPath>>(
+    candidates: impl IntoIterator<Item = P>,
+    exists: impl Fn(&RelPath) -> bool,
+) -> Option<P> {
+    let mut candidates = candidates.into_iter();
+    let first = candidates.next()?;
+    if exists(first.as_ref()) {
+        return Some(first);
+    }
+    Some(
+        candidates
+            .find(|candidate| exists(candidate.as_ref()))
+            .unwrap_or(first),
+    )
+}
+
+/// Returns the relative path to a `.anna/settings.json` file within a project.
 pub fn local_settings_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".anna/settings.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to a `.wu/settings.json` file within a project. See
+/// [`local_settings_file_relative_paths`] for every candidate.
+pub fn legacy_local_settings_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".wu/settings.json").unwrap());
     *CACHED
 }
 
-/// Returns the relative path to a `.zed/settings.json` file within a project, used as a
-/// fallback when there is no `.wu/settings.json`.
-pub fn legacy_local_settings_file_relative_path() -> &'static RelPath {
+/// Returns the relative paths a project's `settings.json` may have, highest
+/// precedence first: `.anna/settings.json`, `.wu/settings.json`, `.zed/settings.json`.
+pub fn local_settings_file_relative_paths() -> &'static [&'static RelPath] {
+    static CACHED: LazyLock<[&'static RelPath; 3]> = LazyLock::new(|| {
+        [
+            ".anna/settings.json",
+            ".wu/settings.json",
+            ".zed/settings.json",
+        ]
+        .map(|path| RelPath::from_unix_str(path).unwrap())
+    });
+    &*CACHED
+}
+
+/// Returns the relative path to a `.anna/tasks.json` file within a project.
+pub fn local_tasks_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::from_unix_str(".zed/settings.json").unwrap());
+        LazyLock::new(|| RelPath::from_unix_str(".anna/tasks.json").unwrap());
     *CACHED
 }
 
-/// Returns the relative path to a `tasks.json` file within a project.
-pub fn local_tasks_file_relative_path() -> &'static RelPath {
+/// Returns the relative path to a `.wu/tasks.json` file within a project. See
+/// [`local_tasks_file_relative_paths`] for every candidate.
+pub fn legacy_local_tasks_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".wu/tasks.json").unwrap());
     *CACHED
 }
 
-/// Returns the relative path to a `.zed/tasks.json` file within a project, used as a
-/// fallback when there is no `.wu/tasks.json`.
-pub fn legacy_local_tasks_file_relative_path() -> &'static RelPath {
-    static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::from_unix_str(".zed/tasks.json").unwrap());
-    *CACHED
+/// Returns the relative paths a project's `tasks.json` may have, highest
+/// precedence first: `.anna/tasks.json`, `.wu/tasks.json`, `.zed/tasks.json`.
+pub fn local_tasks_file_relative_paths() -> &'static [&'static RelPath] {
+    static CACHED: LazyLock<[&'static RelPath; 3]> = LazyLock::new(|| {
+        [".anna/tasks.json", ".wu/tasks.json", ".zed/tasks.json"]
+            .map(|path| RelPath::from_unix_str(path).unwrap())
+    });
+    &*CACHED
 }
 
 /// Returns the relative path to a `.vscode/tasks.json` file within a project.
@@ -573,20 +671,29 @@ pub fn task_file_name() -> &'static str {
     "tasks.json"
 }
 
-/// Returns the relative path to a `debug.json` file within a project.
-/// .wu/debug.json
+/// Returns the relative path to a `.anna/debug.json` file within a project.
 pub fn local_debug_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".anna/debug.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to a `.wu/debug.json` file within a project. See
+/// [`local_debug_file_relative_paths`] for every candidate.
+pub fn legacy_local_debug_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".wu/debug.json").unwrap());
     *CACHED
 }
 
-/// Returns the relative path to a `.zed/debug.json` file within a project, used as a
-/// fallback when there is no `.wu/debug.json`.
-pub fn legacy_local_debug_file_relative_path() -> &'static RelPath {
-    static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::from_unix_str(".zed/debug.json").unwrap());
-    *CACHED
+/// Returns the relative paths a project's `debug.json` may have, highest
+/// precedence first: `.anna/debug.json`, `.wu/debug.json`, `.zed/debug.json`.
+pub fn local_debug_file_relative_paths() -> &'static [&'static RelPath] {
+    static CACHED: LazyLock<[&'static RelPath; 3]> = LazyLock::new(|| {
+        [".anna/debug.json", ".wu/debug.json", ".zed/debug.json"]
+            .map(|path| RelPath::from_unix_str(path).unwrap())
+    });
+    &*CACHED
 }
 
 /// Returns the relative path to a `.vscode/launch.json` file within a project.

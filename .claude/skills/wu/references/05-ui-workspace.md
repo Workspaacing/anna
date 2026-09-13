@@ -1,4 +1,4 @@
-# Wu — UI Shell & Component Layer
+# Anna — UI Shell & Component Layer
 
 Audience: an agent about to write or modify UI code in this repo.
 Scope: the design system (`ui`), the component registry (`component`/`component_preview`),
@@ -586,7 +586,7 @@ returns a future of the chosen index; rendered by `crates/ui_prompt` unless the
    `[lib] name = "my_panel"` and `path = "src/my_panel.rs"` (no `lib.rs`, no `mod.rs` — `.rules`).
    Add it to the workspace `Cargo.toml` members and to `crates/wu/Cargo.toml` dependencies.
 2. **Define the toggle action**: `actions!(my_panel, [ToggleFocus, Toggle]);` in your crate
-   (or add to `crates/wu_actions/src/lib.rs` for a `wu::`-namespaced one).
+   (or add to `crates/wu_actions/src/lib.rs` for an `anna::`-namespaced one).
 3. **Struct + `Render` + `Focusable` + `EventEmitter<PanelEvent>` + `impl Panel`:**
 
 ```rust
@@ -799,8 +799,8 @@ everything not filtered out (`crates/command_palette/src/command_palette.rs:113-
 
 1. **Define the action.** Either
    `actions!(my_namespace, [/** doc comment shown to the user */ MyAction]);` in your crate, or
-   in `crates/wu_actions/src/lib.rs` for `wu::`-namespaced ones. For actions carrying data use
-   `#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)] #[action(namespace = wu)]`.
+   in `crates/wu_actions/src/lib.rs` for `anna::`-namespaced ones. For actions carrying data use
+   `#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)] #[action(namespace = anna)]`.
    Deprecated names go in `#[action(deprecated_aliases = ["old::Name"])]`.
 2. **Make it dispatchable in the current focus context** so it shows up in `available_actions`:
    `workspace.register_action(|ws, _: &MyAction, window, cx| { .. })` inside

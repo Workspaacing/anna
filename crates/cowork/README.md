@@ -1,15 +1,15 @@
-# Cowork
+# Anna agent (`cowork` crate)
 
-Native AI agents for Wu, split the way the rest of the workspace is:
+Native AI agents for Anna, split the way the rest of the workspace is:
 
 - **`CoworkPanel`** (dock panel, left by default) — session history, search, per-thread delete, and
   the model picker in the footer. It is *not* the chat.
 - **`CoworkThreadView`** (workspace item, center pane) — where a conversation actually happens:
   streamed markdown responses, tool calls and their results, the composer, and the per-thread model
   picker.
-- **Settings** live in the settings window on its own **Cowork** page
+- **Settings** live in the settings window on its own **Anna** page
   (`crates/settings_ui/src/page_data.rs`, `cowork_page`), reached from the panel's gear button via
-  `wu::OpenSettingsPage`. Providers and Models are sub-pages there; the panel shows runtime status
+  `anna::OpenSettingsPage`. Providers and Models are sub-pages there; the panel shows runtime status
   only, because the settings framework renders declarative fields backed by JSON.
 
 ## Status
@@ -34,7 +34,7 @@ OSV query returning an advisory. Those need a human at a running build.
 
 Models come only from the [models.dev](https://models.dev) catalog (`catalog_url`, default
 `https://models.dev/api.json`) — the same registry the Vercel AI SDK publishes. The catalog is
-fetched on first use, cached in Wu's key-value store, and refreshed when it is older than 24 hours
+fetched on first use, cached in Anna's key-value store, and refreshed when it is older than 24 hours
 or when the user asks for a refresh.
 
 **There is no default-model setting, and no output-token setting.** A new thread starts on the
@@ -89,8 +89,8 @@ one would be indefensible.
 
 ## Verification
 
-Everything the agent writes is checked by machinery compiled into Wu. No model is consulted, so
-none of it costs tokens. Each check has its own toggle under **Cowork > Verification**, all on by
+Everything the agent writes is checked by machinery compiled into Anna. No model is consulted, so
+none of it costs tokens. Each check has its own toggle under **Anna > Verification**, all on by
 default.
 
 | Check | Setting | When | What it does |
@@ -106,22 +106,22 @@ Two deliberate design decisions:
 whole file would flag a credential the user put there themselves and lock the agent out of that
 file entirely. The agent is answerable for what it writes.
 
-**Cowork does not format anything itself.** It calls `Project::format()`, the same path the editor
+**Anna does not format anything itself.** It calls `Project::format()`, the same path the editor
 uses when you save, so the agent's edits get exactly the treatment your own edits get. A second
 formatter could only disagree with the first, and each would undo the other every turn.
 
 ## Biome, ESLint and Prettier
 
-All three are native to Wu, and none of them is spawned per file:
+All three are native to Anna, and none of them is spawned per file:
 
 | | How | Where it wins |
 | --- | --- | --- |
-| **Biome** | `crates/languages/src/biome.rs` — `@biomejs/biome` installed by Wu's Node runtime, run as `biome lsp-proxy` | Lint, format and import sorting for JS/TS/JSX/JSON/CSS in one pass, in Rust |
-| **ESLint** | `crates/languages/src/eslint.rs` — the `vscode-eslint` server, downloaded by Wu | **Type-aware** rules (`no-floating-promises`, `require-await`) and the plugin ecosystem. Biome cannot do these |
-| **Prettier** | `crates/prettier` — installed by Wu's Node runtime, run as a long-lived server | The languages Biome does not format at all: Markdown, MDX, YAML, SCSS, Less, Handlebars, Vue and Angular templates |
+| **Biome** | `crates/languages/src/biome.rs` — `@biomejs/biome` installed by Anna's Node runtime, run as `biome lsp-proxy` | Lint, format and import sorting for JS/TS/JSX/JSON/CSS in one pass, in Rust |
+| **ESLint** | `crates/languages/src/eslint.rs` — the `vscode-eslint` server, downloaded by Anna | **Type-aware** rules (`no-floating-promises`, `require-await`) and the plugin ecosystem. Biome cannot do these |
+| **Prettier** | `crates/prettier` — installed by Anna's Node runtime, run as a long-lived server | The languages Biome does not format at all: Markdown, MDX, YAML, SCSS, Less, Handlebars, Vue and Angular templates |
 
 Each prefers the project's own copy — the version the lockfile pins and CI runs — falling back to
-one Wu installs. Their diagnostics reach the agent through the Diagnostics check above, and their
+one Anna installs. Their diagnostics reach the agent through the Diagnostics check above, and their
 fix-all code actions are available to the formatter chain.
 
 They are all long-lived processes rather than per-file CLI invocations, which is not a detail:
@@ -138,7 +138,7 @@ whichever runs last.
 already does this. Prettier where the project has Prettier; otherwise the language server, which is
 Biome where Biome is configured. Nothing had to change.
 
-**Fixing: ESLint by default, Biome by opt-in, and never both.** Wu's defaults turn on
+**Fixing: ESLint by default, Biome by opt-in, and never both.** Anna's defaults turn on
 `source.fixAll.eslint` for JavaScript, TypeScript and TSX, because ESLint with no configuration
 finds nothing and offers no fix — so having it on costs nothing in a project that does not use it.
 
@@ -146,7 +146,7 @@ Biome's equivalent is deliberately *not* a default, and the asymmetry is the who
 with no `biome.json` still lints, using its own recommended rules.** Enabling `source.fixAll.biome`
 globally would rewrite code in every JavaScript project — turning `let` into `const`, removing
 imports — including the ones that chose ESLint and Prettier and never asked Biome's opinion. In a
-project that does use Biome, add this to its `.wu/settings.json` and drop the ESLint line:
+project that does use Biome, add this to its `.anna/settings.json` and drop the ESLint line:
 
 ```jsonc
 {
@@ -167,7 +167,7 @@ Running both linters' fix-all over one language is the one combination to avoid.
 the code was written by the agent or by hand. Diagnostics need no setting at all: Biome and ESLint
 are language servers, so they report as you type.
 
-**On the CLI route, which was tried first and abandoned.** Cowork originally shelled out to
+**On the CLI route, which was tried first and abandoned.** Anna originally shelled out to
 `biome check --write --stdin-file-path`. That mode silently disables `--reporter` entirely: it
 returns the fixed source and nothing else — no diagnostics on stdout, none on stderr, and
 `--reporter-file` never even creates its file. Worse, it applies lint fixes to source that does not
@@ -182,7 +182,7 @@ else under their names:
 - **CodeQL** is a proprietary GitHub binary of roughly 500 MB with no Rust crate, and its licence
   restricts use to open-source projects and GitHub Advanced Security. It also needs to *build* your
   project into a database before each analysis. Its job — static analysis of your source — is done
-  here by the language servers and linters Wu already runs warm, reported to the agent by the
+  here by the language servers and linters Anna already runs warm, reported to the agent by the
   Diagnostics check.
 - **Dependabot** is a service GitHub hosts; `dependabot-core` is Ruby running one container per
   ecosystem. Its *data* is public, though: [OSV](https://osv.dev) aggregates RustSec, the GitHub
@@ -191,7 +191,7 @@ else under their names:
   advisory. Secret scanning is covered by the Secrets check above, using our own patterns rather
   than GHAS's proprietary ones.
 
-The Dependencies check is the only part of Cowork's verification that touches the network. It sends
+The Dependencies check is the only part of Anna's verification that touches the network. It sends
 package names and versions from the manifest that was just edited to `api.osv.dev`, and nothing
 else. Turn it off if that is not acceptable.
 
@@ -199,7 +199,7 @@ else. Turn it off if that is not acceptable.
 
 API keys are stored in the operating system's credential store — Windows Credential Manager, the
 macOS keychain, or the platform equivalent — under `cowork://<provider-id>`, never in
-`settings.json`. Connect and disconnect a provider under **Cowork > Catalog > Providers**; a
+`settings.json`. Connect and disconnect a provider under **Anna > Catalog > Providers**; a
 provider with no key is not offered in the model selector, and neither are its models.
 
 ## Storage

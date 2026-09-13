@@ -1,13 +1,13 @@
 #!/usr/bin/env sh
 set -eu
 
-# Downloads a Wu release from GitHub and unpacks it into ~/.local/.
+# Downloads an Anna release from GitHub and unpacks it into ~/.local/.
 
 main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
     channel="${ZED_CHANNEL:-stable}"
-    repo="Workspaacing/wu"
+    repo="Workspaacing/anna"
     ZED_VERSION="${ZED_VERSION:-latest}"
     if [ "$ZED_VERSION" = "latest" ]; then
         download_base="https://github.com/$repo/releases/latest/download"
@@ -16,9 +16,9 @@ main() {
     fi
     # Use TMPDIR if available (for environments with non-standard temp directories)
     if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
-        temp="$(mktemp -d "$TMPDIR/wu-XXXXXX")"
+        temp="$(mktemp -d "$TMPDIR/anna-XXXXXX")"
     else
-        temp="$(mktemp -d "/tmp/wu-XXXXXX")"
+        temp="$(mktemp -d "/tmp/anna-XXXXXX")"
     fi
 
     if [ "$platform" = "Darwin" ]; then
@@ -58,10 +58,10 @@ main() {
 
     "$platform" "$@"
 
-    if [ "$(command -v wu)" = "$HOME/.local/bin/wu" ]; then
-        echo "Wu has been installed. Run with 'wu'"
+    if [ "$(command -v anna)" = "$HOME/.local/bin/anna" ]; then
+        echo "Anna has been installed. Run with 'anna'"
     else
-        echo "To run Wu from your terminal, you must add ~/.local/bin to your PATH"
+        echo "To run Anna from your terminal, you must add ~/.local/bin to your PATH"
         echo "Run:"
 
         case "$SHELL" in
@@ -78,16 +78,16 @@ main() {
                 ;;
         esac
 
-        echo "To run Wu now, '~/.local/bin/wu'"
+        echo "To run Anna now, '~/.local/bin/anna'"
     fi
 }
 
 linux() {
     if [ -n "${ZED_BUNDLE_PATH:-}" ]; then
-        cp "$ZED_BUNDLE_PATH" "$temp/wu-linux-$arch.tar.gz"
+        cp "$ZED_BUNDLE_PATH" "$temp/anna-linux-$arch.tar.gz"
     else
-        echo "Downloading Wu version: $ZED_VERSION"
-        curl "$download_base/wu-linux-$arch.tar.gz" > "$temp/wu-linux-$arch.tar.gz"
+        echo "Downloading Anna version: $ZED_VERSION"
+        curl "$download_base/anna-linux-$arch.tar.gz" > "$temp/anna-linux-$arch.tar.gz"
     fi
 
     suffix=""
@@ -98,29 +98,29 @@ linux() {
     appid=""
     case "$channel" in
       stable)
-        appid="me.farshed.Wu"
+        appid="com.workspaacing.Anna"
         ;;
       dev)
-        appid="me.farshed.Wu-Dev"
+        appid="com.workspaacing.Anna-Dev"
         ;;
       *)
         echo "Unknown release channel: ${channel}. Using stable app ID."
-        appid="me.farshed.Wu"
+        appid="com.workspaacing.Anna"
         ;;
     esac
 
     # Unpack
-    rm -rf "$HOME/.local/wu$suffix.app"
-    mkdir -p "$HOME/.local/wu$suffix.app"
-    tar -xzf "$temp/wu-linux-$arch.tar.gz" -C "$HOME/.local/"
+    rm -rf "$HOME/.local/anna$suffix.app"
+    mkdir -p "$HOME/.local/anna$suffix.app"
+    tar -xzf "$temp/anna-linux-$arch.tar.gz" -C "$HOME/.local/"
 
-    zed_editor="$HOME/.local/wu$suffix.app/libexec/wu-editor"
+    zed_editor="$HOME/.local/anna$suffix.app/libexec/anna-editor"
     if [ -f "$zed_editor" ] && command -v ldd >/dev/null 2>&1; then
         missing="$(ldd "$zed_editor" 2>/dev/null | sed -n 's/^[[:space:]]*\(.*\) => not found$/\1/p')"
         if [ -n "$missing" ]; then
-            echo "Warning: your system is missing libraries that Wu needs:"
+            echo "Warning: your system is missing libraries that Anna needs:"
             echo "$missing" | sed 's/^/    /'
-            echo "Install them with your package manager, or Wu will fail to start."
+            echo "Install them with your package manager, or Anna will fail to start."
         fi
     fi
 
@@ -128,20 +128,20 @@ linux() {
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 
     # Link the binary
-    ln -sf "$HOME/.local/wu$suffix.app/bin/wu" "$HOME/.local/bin/wu"
+    ln -sf "$HOME/.local/anna$suffix.app/bin/anna" "$HOME/.local/bin/anna"
 
     # Copy .desktop file
     desktop_file_path="$HOME/.local/share/applications/${appid}.desktop"
-    src_dir="$HOME/.local/wu$suffix.app/share/applications"
+    src_dir="$HOME/.local/anna$suffix.app/share/applications"
     cp "$src_dir/${appid}.desktop" "${desktop_file_path}"
-    sed -i "s|Icon=wu|Icon=$HOME/.local/wu$suffix.app/share/icons/hicolor/512x512/apps/wu.png|g" "${desktop_file_path}"
-    sed -i "s|Exec=wu|Exec=$HOME/.local/wu$suffix.app/bin/wu|g" "${desktop_file_path}"
+    sed -i "s|Icon=anna|Icon=$HOME/.local/anna$suffix.app/share/icons/hicolor/512x512/apps/anna.png|g" "${desktop_file_path}"
+    sed -i "s|Exec=anna|Exec=$HOME/.local/anna$suffix.app/bin/anna|g" "${desktop_file_path}"
 }
 
 macos() {
-    echo "Downloading Wu version: $ZED_VERSION"
-    curl "$download_base/Wu-$arch.dmg" > "$temp/Wu-$arch.dmg"
-    hdiutil attach -quiet "$temp/Wu-$arch.dmg" -mountpoint "$temp/mount"
+    echo "Downloading Anna version: $ZED_VERSION"
+    curl "$download_base/Anna-$arch.dmg" > "$temp/Anna-$arch.dmg"
+    hdiutil attach -quiet "$temp/Anna-$arch.dmg" -mountpoint "$temp/mount"
     app="$(cd "$temp/mount/"; echo *.app)"
     echo "Installing $app"
     if [ -d "/Applications/$app" ]; then
@@ -153,7 +153,7 @@ macos() {
 
     mkdir -p "$HOME/.local/bin"
     # Link the binary
-    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/wu"
+    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/anna"
 }
 
 main "$@"

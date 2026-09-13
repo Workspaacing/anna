@@ -74,7 +74,7 @@ fn developer_page() -> SettingsPage {
     items.push(SettingsPageItem::SectionHeader("Instrumentation"));
     items.push(SettingsPageItem::SettingItem(SettingItem {
         title: "Performance Profiler",
-        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `wu: open performance profiler`. May lead to increased memory usage.",
+        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `anna: open performance profiler`. May lead to increased memory usage.",
         field: Box::new(SettingField {
             json_path: Some("instrumentation.performance_profiler.enabled"),
             pick: |settings_content| {
@@ -109,7 +109,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("General Settings"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Accessible Mode",
-                description: "Optimize Wu's interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.",
+                description: "Optimize Anna's interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.",
                 field: Box::new(SettingField {
                     json_path: Some("accessible_mode"),
                     pick: |settings_content| settings_content.workspace.accessible_mode.as_ref(),
@@ -214,7 +214,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "CLI Default Open Behavior",
-                description: "How `wu <path>` opens directories when no flag is specified.",
+                description: "How `anna <path>` opens directories when no flag is specified.",
                 field: Box::new(SettingField {
                     json_path: Some("cli_default_open_behavior"),
                     pick: |settings_content| {
@@ -258,7 +258,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("Security"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Trust All Projects By Default",
-                description: "When opening Wu, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
+                description: "When opening Anna, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
                 field: Box::new(SettingField {
                     json_path: Some("session.trust_all_projects"),
                     pick: |settings_content| {
@@ -306,7 +306,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Restore On Startup",
-                description: "What to restore from the previous session when opening Wu.",
+                description: "What to restore from the previous session when opening Anna.",
                 field: Box::new(SettingField {
                     json_path: Some("restore_on_startup"),
                     pick: |settings_content| settings_content.workspace.restore_on_startup.as_ref(),
@@ -555,7 +555,7 @@ fn appearance_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Icon Theme",
-                    description: "The custom set of icons Wu will associate with files and directories.",
+                    description: "The custom set of icons Anna will associate with files and directories.",
                     field: Box::new(SettingField {
                             json_path: Some("icon_theme$"),
                         pick: |settings_content| {
@@ -3119,7 +3119,7 @@ fn search_and_files_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("File Scan"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Exclusions",
-                description: "Files or globs of files that will be excluded by Wu entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
+                description: "Files or globs of files that will be excluded by Anna entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
                 field: Box::new(
                     SettingField {
                         json_path: Some("file_scan_exclusions"),
@@ -3141,7 +3141,7 @@ fn search_and_files_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Inclusions",
-                description: "Files or globs of files that will be included by Wu, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Wu's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
+                description: "Files or globs of files that will be included by Anna, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Anna's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
                 field: Box::new(
                     SettingField {
                         json_path: Some("file_scan_inclusions"),
@@ -4180,7 +4180,7 @@ fn window_and_layout_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Window Decorations",
-                description: "(Linux only) whether Wu or your compositor should draw window decorations.",
+                description: "(Linux only) whether Anna or your compositor should draw window decorations.",
                 field: Box::new(SettingField {
                     json_path: Some("window_decorations"),
                     pick: |settings_content| settings_content.workspace.window_decorations.as_ref(),
@@ -5577,7 +5577,7 @@ fn cowork_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("Threads"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Model Catalog URL",
-                description: "The models.dev catalog Cowork reads its providers and models from. Cached locally and refreshed once a day.",
+                description: "The models.dev catalog Anna reads its providers and models from. Cached locally and refreshed once a day.",
                 field: Box::new(SettingField {
                     json_path: Some("cowork.catalog_url"),
                     pick: |settings_content| settings_content.cowork.as_ref()?.catalog_url.as_ref(),
@@ -5599,8 +5599,8 @@ fn cowork_page() -> SettingsPage {
         [
             SettingsPageItem::SectionHeader("Panel"),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Cowork Panel Button",
-                description: "Show the Cowork panel button in the status bar.",
+                title: "Anna Panel Button",
+                description: "Show the Anna panel button in the status bar.",
                 field: Box::new(SettingField {
                     json_path: Some("cowork.button"),
                     pick: |settings_content| settings_content.cowork.as_ref()?.button.as_ref(),
@@ -5612,8 +5612,8 @@ fn cowork_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Cowork Panel Dock",
-                description: "Where to dock the Cowork panel.",
+                title: "Anna Panel Dock",
+                description: "Where to dock the Anna panel.",
                 field: Box::new(SettingField {
                     json_path: Some("cowork.dock"),
                     pick: |settings_content| settings_content.cowork.as_ref()?.dock.as_ref(),
@@ -5625,8 +5625,8 @@ fn cowork_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Cowork Panel Default Width",
-                description: "Default width of the Cowork panel in pixels.",
+                title: "Anna Panel Default Width",
+                description: "Default width of the Anna panel in pixels.",
                 field: Box::new(SettingField {
                     json_path: Some("cowork.default_width"),
                     pick: |settings_content| {
@@ -5793,7 +5793,7 @@ fn cowork_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("Verification"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Format The Agent's Edits",
-                description: "Before saving a file the agent changed, run the project's own formatter over it — the same chain your edits go through on save. Which tool that is comes from the `formatter` setting for the language: Biome, ESLint's fix-all action, Prettier, or the language server. Biome and ESLint run as language servers Wu installs itself, and Prettier is built in, so all three obey the project's own config.",
+                description: "Before saving a file the agent changed, run the project's own formatter over it — the same chain your edits go through on save. Which tool that is comes from the `formatter` setting for the language: Biome, ESLint's fix-all action, Prettier, or the language server. Biome and ESLint run as language servers Anna installs itself, and Prettier is built in, so all three obey the project's own config.",
                 field: Box::new(SettingField {
                     json_path: Some("cowork.verification.format"),
                     pick: |settings_content| {
@@ -5905,7 +5905,7 @@ fn cowork_page() -> SettingsPage {
                 title: "Providers".into(),
                 r#type: crate::SubPageType::Other,
                 description: Some(
-                    "Which models.dev providers Cowork can reach, and the environment variable                      that connects each one."
+                    "Which models.dev providers Anna can reach, and the environment variable                      that connects each one."
                         .into(),
                 ),
                 search_aliases: &["api key", "credentials", "models.dev", "connect"],
@@ -5934,7 +5934,7 @@ fn cowork_page() -> SettingsPage {
     }
 
     SettingsPage {
-        title: "Cowork",
+        title: "Anna",
         items: concat_sections![
             threads_section(),
             catalog_section(),
@@ -5973,7 +5973,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Save Breakpoints",
-                description: "Whether breakpoints should be reused across Wu sessions.",
+                description: "Whether breakpoints should be reused across Anna sessions.",
                 field: Box::new(SettingField {
                     json_path: Some("debugger.save_breakpoints"),
                     pick: |settings_content| {
@@ -6008,7 +6008,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Log DAP Communications",
-                description: "Whether to log messages between active debug adapters and Wu.",
+                description: "Whether to log messages between active debug adapters and Anna.",
                 field: Box::new(SettingField {
                     json_path: Some("debugger.log_dap_communications"),
                     pick: |settings_content| {
@@ -6916,7 +6916,7 @@ fn version_control_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Disable Git Integration",
-                    description: "Disable all Git integration features in Wu.",
+                    description: "Disable all Git integration features in Anna.",
                     field: Box::new(SettingField::<bool> {
                         json_path: Some("git.disable_git"),
                         pick: |settings_content| {
@@ -7422,7 +7422,7 @@ fn network_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Server URL",
-                description: "The URL of the Wu server to connect to.",
+                description: "The URL of the server Anna connects to.",
                 field: Box::new(SettingField {
                     json_path: Some("server_url"),
                     pick: |settings_content| settings_content.server_url.as_ref(),
@@ -7960,7 +7960,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             SettingsPageItem::SectionHeader("Autoclose"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Autoclose",
-                description: "Whether to automatically type closing characters for you. For example, when you type '(', Wu will automatically add a closing ')' at the correct position.",
+                description: "Whether to automatically type closing characters for you. For example, when you type '(', Anna will automatically add a closing ')' at the correct position.",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).use_autoclose"),
                     pick: |settings_content| {
@@ -7979,7 +7979,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Auto Surround",
-                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Wu will automatically surround text with ().",
+                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Anna will automatically surround text with ().",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).use_auto_surround"),
                     pick: |settings_content| {
@@ -8503,7 +8503,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Prefer LSP",
-                description: "Use LSP tasks over Wu language extension tasks.",
+                description: "Use LSP tasks over Anna language extension tasks.",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).tasks.prefer_lsp"),
                     pick: |settings_content| {

@@ -1,6 +1,6 @@
 # OpenCode: MCP, LSP, Formatters, ACP — and what Cowork would need
 
-Research notes for the Cowork AI panel (Wu editor, Rust/GPUI, Zed fork).
+Research notes for the Cowork AI panel (Anna, Rust/GPUI, built on Zed).
 
 Sources (fetched 2026-09-11; pages last updated Sep 10, 2026):
 - https://opencode.ai/docs/mcp-servers/
@@ -47,10 +47,10 @@ So Cowork is a **chat panel**, not an agent. There is no tool schema, no tool di
 prompt, no file-edit path, no diff review, no sub-agent, no MCP. Everything in this report is
 greenfield for us. That matters enormously for the ACP verdict in §5.
 
-Also note the fork **stripped** Zed's entire agent stack. Upstream Zed's `agent_servers`,
+Also note Anna **stripped** Zed's entire agent stack. Zed's `agent_servers`,
 `acp_thread`, `agent_ui`, `agent2` crates and the `agent-client-protocol` Rust dependency are not
-present in `wu-main` (`UPSTREAM_VERSION` = `01acd0ee8e906dd0ec8b526fe08da94444a5e2af`). We do **not**
-inherit a working ACP client by virtue of being a Zed fork. We inherit the *option* to re-vendor one.
+present in `wu-main`. We do **not**
+inherit a working ACP client by virtue of being built on Zed. We inherit the *option* to re-vendor one.
 
 ---
 
@@ -376,7 +376,7 @@ the context limit."
 - **An MCP client.** `rmcp` (the official Rust SDK) or equivalent, over stdio (tokio child process,
   newline-delimited JSON-RPC) and streamable HTTP. Budget the stdio path first — every MCP server
   ships a stdio mode, only some ship HTTP.
-- **Settings schema.** Wu uses `settings.rs`-registered settings structs, so this becomes a
+- **Settings schema.** Anna uses `settings.rs`-registered settings structs, so this becomes a
   `CoworkSettings` sub-struct. Mirror OpenCode's field names (`type`, `command`, `cwd`,
   `environment`, `enabled`, `timeout`, `url`, `headers`) so users can copy-paste configs between
   tools. Do **not** invent new names.
@@ -587,7 +587,7 @@ that transfers to us — see below.
 **This is the section where we have a structural advantage and should not copy OpenCode.**
 
 OpenCode has to spawn and babysit its own language servers because it is a terminal program with no
-editor. Wu **already runs them**. `crates/project/`, `crates/language/`, `crates/lsp/` maintain live
+editor. Anna **already runs them**. `crates/project/`, `crates/language/`, `crates/lsp/` maintain live
 `LanguageServer` handles, an open-buffer set, and a `DiagnosticSet` per buffer, kept warm by the
 user's own editing. Every cost OpenCode warns about — memory, startup latency, version skew,
 out-of-sync state — we are already paying, and the servers are already in sync with the buffers the
@@ -596,7 +596,7 @@ user is looking at.
 Concretely:
 
 - **Do not build `lsp` config at all.** No `command` / `extensions` / `env` / `initialization`
-  schema, no auto-download, no `OPENCODE_DISABLE_LSP_DOWNLOAD` equivalent. Wu's existing language
+  schema, no auto-download, no `OPENCODE_DISABLE_LSP_DOWNLOAD` equivalent. Anna's existing language
   registry and extension system own that. Adding a parallel LSP config would be a strict regression.
 - **Post-edit diagnostics feedback is the must-have.** After the agent's edit tool applies a change,
   await the next `publish_diagnostics` for that buffer (Zed's `Project::diagnostics` /
@@ -609,7 +609,7 @@ Concretely:
 - **Ship the code-intelligence tool non-experimentally.** OpenCode hides `goToDefinition`,
   `findReferences`, `hover`, `documentSymbol`, `workspaceSymbol`, `goToImplementation`,
   `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls` behind an env flag because their LSP
-  substrate is unreliable. Ours isn't. `crates/call_hierarchy/` already exists in this fork. Exposing
+  substrate is unreliable. Ours isn't. `crates/call_hierarchy/` already exists in Anna. Exposing
   these as real tools is a genuine differentiator against every terminal agent: the model can
   navigate a 983k-LOC Rust codebase by symbol graph instead of by grep.
   - Design note: return results as `path:line:col` plus a few lines of context, not raw LSP
@@ -762,7 +762,7 @@ What we need is narrow:
   calling the editor's own path.
 
 The one idea worth importing from OpenCode is `$FILE`-style external formatter commands for languages
-Wu has no extension for — but Zed's `Formatter::External { command, arguments }` already covers it.
+Anna has no extension for — but Zed's `Formatter::External { command, arguments }` already covers it.
 
 ---
 
@@ -1246,16 +1246,16 @@ format for user-readable text is Markdown."
 **We are the Client.** Here is the concrete build list.
 
 1. **Vendor the protocol types.** `agent-client-protocol` is a published Rust crate (it's what
-   upstream Zed uses). Adding it gives us every struct above, serde-derived, version-tracked. This is
+   Zed uses). Adding it gives us every struct above, serde-derived, version-tracked. This is
    the single biggest lever — it turns "implement a protocol" into "implement five method handlers".
-   - Check licence compatibility (Wu is GPL-3.0-or-later in `crates/cowork`; upstream Zed's agent
+   - Check licence compatibility (Anna is GPL-3.0-or-later in `crates/cowork`; Zed's agent
      crates were GPL too, so this is likely fine).
 2. **A subprocess supervisor.** Spawn `opencode acp`, wire stdin/stdout to a JSON-RPC codec, keep a
-   `Task` alive on the GPUI executor, surface stderr into a log view, handle crash/restart. Upstream
-   Zed's `agent_servers` crate is exactly this; we deleted it, so we either re-vendor it from
-   `01acd0ee` or write ~400 lines.
+   `Task` alive on the GPUI executor, surface stderr into a log view, handle crash/restart. Zed's
+   `agent_servers` crate is exactly this; we deleted it, so we either re-vendor it from
+   Zed commit `01acd0ee` or write ~400 lines.
 3. **A bidirectional JSON-RPC peer.** Not a client. We both send requests and serve them on the same
-   pipe, with request-id correlation in both directions. Wu's existing `crates/lsp/` already has a
+   pipe, with request-id correlation in both directions. Anna's existing `crates/lsp/` already has a
    well-tested bidirectional JSON-RPC-over-stdio implementation — that's the closest prior art in the
    tree.
 4. **`session/update` → panel rendering.** This is the bulk of the UI work and most of it is work we
@@ -1281,7 +1281,7 @@ format for user-readable text is Markdown."
    through the buffer so undo works and the user sees the change live. This is where being an editor
    beats being a terminal, and it is maybe 150 lines.
 7. **`terminal/*` against `crates/terminal`.** `create` / `output` / `release` / `wait_for_exit` /
-   `kill` map almost 1:1 onto Wu's terminal model. Optional for v1 — advertise `terminal: false` and
+   `kill` map almost 1:1 onto Anna's terminal model. Optional for v1 — advertise `terminal: false` and
    the agent falls back to running commands in its own process, which works but the user can't see
    them. Worth doing in v2 for the observability alone.
 8. **Session persistence.** `thread.rs` already stores threads in kvp. Map `ThreadId` ↔ ACP
@@ -1312,7 +1312,7 @@ format for user-readable text is Markdown."
   become inert for ACP threads — the agent picks the model (some agents expose `session/set_mode`,
   and CodeCompanion's config shows a `model` field, but it is agent-specific).
 - MCP servers, formatters, LSP and permissions for an ACP thread come from `opencode.json`, not from
-  Wu settings. Users configure the agent, not the editor. That is a real product seam and we should
+  Anna settings. Users configure the agent, not the editor. That is a real product seam and we should
   be honest in the UI about which settings apply to which thread type.
 - `/undo` and `/redo` don't work over ACP with OpenCode today.
 - The agent must be installed. `opencode` is a separate binary the user has to have on PATH.
@@ -1339,14 +1339,14 @@ rendering we need regardless — plus a permanent dependency on an external bina
 control over prompt/model/tool strategy.
 
 **Why it is *more* attractive for us than for a generic editor:**
-- We are a Zed fork, so the ACP *shape* (external agent threads, `agent_servers` settings,
+- We are built on Zed, so the ACP *shape* (external agent threads, `agent_servers` settings,
   `NewExternalAgentThread`) matches idioms the codebase and its users already expect — even though
-  the fork deleted the implementation.
-- The upstream Rust implementation exists at a known commit (`01acd0ee`) and is re-vendorable:
+  Anna deleted the implementation.
+- Zed's Rust implementation exists at a known Zed commit (`01acd0ee`) and is re-vendorable:
   `agent_servers`, `acp_thread`, plus the `agent-client-protocol` crate. This is closer to a port
   than a greenfield build.
 - The Client-side capabilities ACP asks for — live buffer reads, buffer writes with undo, terminals,
-  diff rendering, jump-to-location — are exactly the things Wu already does better than a terminal.
+  diff rendering, jump-to-location — are exactly the things Anna already does better than a terminal.
   We would be *strong* at the half of the protocol we own.
 
 **The strategic caveat, stated plainly.** ACP makes us a great *host* for other people's agents. It

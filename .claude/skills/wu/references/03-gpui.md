@@ -1,4 +1,4 @@
-# GPUI in `wu` — deep notes for coding agents
+# GPUI in Anna — deep notes for coding agents
 
 Scope: `crates/gpui/` + `gpui_apple`, `gpui_linux`, `gpui_macos`, `gpui_windows`, `gpui_platform`,
 `gpui_web`, `gpui_wgpu`, `gpui_macros`, `gpui_tokio`, `gpui_util`, `gpui_shared_string`.
@@ -7,20 +7,20 @@ This file deliberately **does not** repeat repo-root `.rules` (Context types, `E
 `cx.spawn`/`background_spawn`, `Task`, `Render`/`RenderOnce`, elements, actions, `notify`,
 `subscribe`). Everything here is what `.rules` leaves out.
 
-> **Read this first — fork deltas.** This is a Zed fork and GPUI has been restructured. If you
-> write GPUI code from memory of upstream Zed you will produce code that does not compile.
+> **Read this first — changes relative to Zed.** Anna is built on Zed and GPUI has been restructured. If you
+> write GPUI code from memory of Zed you will produce code that does not compile.
 
 ---
 
-## 0. Fork deltas vs. upstream Zed GPUI
+## 0. Changes relative to Zed GPUI
 
-| Upstream habit | What this repo actually has |
+| Zed habit | What this repo actually has |
 |---|---|
 | `gpui::Application::new()` | `gpui_platform::application()` / `::headless()`. `Application::with_platform(Rc<dyn Platform>)` is the only ctor in `gpui` itself. |
 | Platform impls inside `crates/gpui/src/platform/{mac,windows,linux}` | Separate crates: `gpui_windows`, `gpui_macos` (+`gpui_apple`), `gpui_linux`, `gpui_web`. `crates/gpui/src/platform/` now holds only *traits* + the test platform. |
 | `Task` defined in `gpui::executor` | `Task`, `Priority`, `FallibleTask`, `DedicatedExecutor` are **re-exported from the `scheduler` crate** (`crates/gpui/src/executor.rs:9-11`). |
 | `impl_actions!` / `impl_internal_actions!` | **Deleted.** Zero occurrences in the tree. Use `actions!` or `#[derive(Action)]` + `#[action(namespace = ...)]`. |
-| `zed::NoAction` | `wu::NoAction`, plus a new `wu::Unbind("some::Action")` (`crates/gpui/src/action.rs:425-458`). |
+| `zed::NoAction` | `anna::NoAction`, plus a new `anna::Unbind("some::Action")` (`crates/gpui/src/action.rs:425-458`); the old `wu::` names still resolve. |
 | `cx.spawn(\|this, mut cx\| async move { ... })` | `cx.spawn(async move \|this, cx\| { ... })` — the arg is an `AsyncFnOnce` (`crates/gpui/src/app/context.rs:237-245`). |
 | Blade renderer on Linux | Blade is gone. `gpui_wgpu` (wgpu 29) on Linux + web; DirectX 11 on Windows; Metal on macOS. |
 | `#[derive(IntoElement)]` → `RenderOnce` wrapper | Now generates `gpui::ViewElement<Self>` via the new **`View`** trait (`crates/gpui/src/view.rs:170-225`). `Entity<T: Render>` implements `IntoElement` directly, so `.child(my_entity)` works without `.into_any_element()`. |
@@ -183,7 +183,7 @@ auto-context), `svg_renderer.rs:16` (emoji families = `Segoe UI Emoji`/`Segoe UI
 ### Windows build specifics
 
 * `crates/gpui/build.rs` embeds `resources/windows/gpui.manifest.xml` via `embed-resource` when
-  `windows-manifest` is on. `crates/wu/Cargo.toml:193` force-enables it for the `wu` binary.
+  `windows-manifest` is on. `crates/wu/Cargo.toml:193` force-enables it for the `anna` binary (package `wu`).
 * `crates/gpui_windows/build.rs` precompiles HLSL with **fxc**, but **only in release**
   (`#[cfg(not(debug_assertions))]`). Debug builds compile shaders at runtime, so a broken shader
   can pass `cargo check` and fail `--release`. `GPUI_FXC_PATH` overrides fxc discovery.
@@ -431,7 +431,7 @@ across content changes. `UniformListScrollHandle` adds `scroll_to_item_strict` (
 prepaint), `.with_dynamic_prepaint_order(order_fn)` (needed when one child prepaint feeds another,
 e.g. split editors and autoscroll), `.image_cache(provider)`.
 
-### 6.6 View and ViewElement (fork-specific, read this)
+### 6.6 View and ViewElement (Anna-specific, read this)
 
 `crates/gpui/src/view.rs:182-192` defines `trait View { fn entity_id(&self) -> Option<EntityId>;
 fn render(self, window, cx) -> impl IntoElement; }` with two blanket impls: every `RenderOnce`
@@ -475,7 +475,7 @@ pub struct SelectNext { pub replace_newest: bool }
 The derive requires `Clone` and `PartialEq`; unit structs skip JSON entirely.
 `actions!(ns, [A, B])` expands to `#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]`
 plus `#[action(namespace = ns)]` on each unit struct. The namespace argument may be omitted, but
-Zed/Wu actions require one.
+Zed/Anna actions require one.
 
 ### 7.2 Registration mechanism
 
@@ -506,9 +506,9 @@ Matching (`Keymap::bindings_for_input`, `keymap.rs:165-240`):
 2. `binding_enabled` calls `predicate.depth_of(context_stack)`. A binding with **no** context
    predicate is treated as matching at the *deepest* context.
 3. Sort by depth descending, then by index descending.
-4. `wu::NoAction` suppresses lower-ranked matches **from sources with equal or weaker precedence**,
+4. `anna::NoAction` suppresses lower-ranked matches **from sources with equal or weaker precedence**,
    tracked via `binding.meta`; a user binding still beats a base-keymap `null`.
-5. `wu::Unbind("editor::NewLine")` - written in JSON as `["wu::Unbind", "editor::NewLine"]` -
+5. `anna::Unbind("editor::NewLine")` - written in JSON as `["anna::Unbind", "editor::NewLine"]` -
    removes bindings that dispatch that specific action for the same keystrokes, regardless of
    context.
 6. Returns `(bindings, has_pending)`. `has_pending` drives multi-key sequences such as
@@ -676,7 +676,7 @@ When a `Global` is the **wrong** tool:
   was not registered with set_focusable", "active_descendant set to X, which is not in the tree"
   (`window/a11y.rs:232, 259, 515, 529, 564`).
 * Deep element trees can overflow the stack; the `stacker` feature (`stacksafe`) guards
-  `Div::{request_layout, prepaint, paint}` and `taffy.rs`. The `wu` binary enables it.
+  `Div::{request_layout, prepaint, paint}` and `taffy.rs`. The `anna` binary (package `wu`) enables it.
 * `.debug_selector(..)` is a **no-op outside test builds** (`div.rs:849-857`); never rely on it in
   production paths.
 * `Text` panics on malformed runs: "invalid text run. Text: ..., run: ..."

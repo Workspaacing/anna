@@ -89,10 +89,10 @@ function GenerateLicenses {
     . $PSScriptRoot/generate-licenses.ps1
 }
 
-function BuildWuAndItsFriends {
-    Write-Output "Building Wu and its friends, for channel: $channel"
+function BuildAnnaAndItsFriends {
+    Write-Output "Building Anna and its friends, for channel: $channel"
     cargo build --release --package wu --package cli --package auto_update_helper --target $target
-    Copy-Item -Path ".\$CargoOutDir\wu.exe" -Destination "$innoDir\Wu.exe" -Force
+    Copy-Item -Path ".\$CargoOutDir\anna.exe" -Destination "$innoDir\Anna.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
     switch ($channel) {
@@ -111,7 +111,7 @@ function BuildRemoteServer {
     cargo build --release --package remote_server --target $target
 
     $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
-    $remoteServerDst = "$workspace\target\wu-remote-server-windows-$Architecture.gz"
+    $remoteServerDst = "$workspace\target\anna-remote-server-windows-$Architecture.gz"
     Write-Output "Compressing remote_server to $remoteServerDst"
 
     $input = [System.IO.File]::OpenRead($remoteServerSrc)
@@ -154,8 +154,8 @@ function DownloadConpty {
 function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\wu.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\wu" -Force
+    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\anna.exe" -Force
+    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\anna" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
     if($Architecture -eq "aarch64") {
         New-Item -Type Directory -Path "$innoDir\arm64" -Force
@@ -174,34 +174,38 @@ function CollectFiles {
 
 function BuildInstaller {
     $issFilePath = "$innoDir\zed.iss"
+    # The registry value name also names the context menu key ("<name>ContextMenu") that
+    # crates/explorer_command_injector reads its title from.
+    # The AppX full name ends with the publisher id derived from Publisher in
+    # crates/explorer_command_injector/AppxManifest.xml.
     switch ($channel) {
         "stable" {
-            $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
+            $appId = "{{0E419EC5-BEDD-4B70-8B56-8F21C4C19597}"
             $appIconName = "app-icon"
-            $appName = "Wu"
-            $appDisplayName = "Wu"
-            $appSetupName = "Wu-$Architecture"
+            $appName = "Anna"
+            $appDisplayName = "Anna"
+            $appSetupName = "Anna-$Architecture"
             # Must match `app_identifier()` in crates/release_channel/src/lib.rs plus the "-Instance-Mutex" suffix
             # used by crates/wu/src/wu/windows_only_instance.rs.
-            $appMutex = "Wu-Editor-Stable-Instance-Mutex"
-            $appExeName = "Wu"
-            $regValueName = "Wu"
-            $appUserId = "Farshed.Wu"
-            $appShellNameShort = "W&u"
-            $appAppxFullName = "Farshed.Wu_1.0.0.0_neutral__japxn1gcva8rg"
+            $appMutex = "Anna-Editor-Stable-Instance-Mutex"
+            $appExeName = "Anna"
+            $regValueName = "Anna"
+            $appUserId = "Workspaacing.Anna"
+            $appShellNameShort = "&Anna"
+            $appAppxFullName = "Workspaacing.Anna_1.0.0.0_neutral__zbpzcjj9dax96"
         }
         "dev" {
-            $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
+            $appId = "{{F1075FED-A144-43C3-81F6-BBD28EF88A01}"
             $appIconName = "app-icon-dev"
-            $appName = "Wu Dev"
-            $appDisplayName = "Wu Dev"
-            $appSetupName = "Wu-$Architecture"
-            $appMutex = "Wu-Editor-Dev-Instance-Mutex"
-            $appExeName = "Wu"
-            $regValueName = "WuDev"
-            $appUserId = "Farshed.Wu.Dev"
-            $appShellNameShort = "W&u Dev"
-            $appAppxFullName = "Farshed.Wu_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "Anna Dev"
+            $appDisplayName = "Anna Dev"
+            $appSetupName = "Anna-$Architecture"
+            $appMutex = "Anna-Editor-Dev-Instance-Mutex"
+            $appExeName = "Anna"
+            $regValueName = "AnnaDev"
+            $appUserId = "Workspaacing.Anna.Dev"
+            $appShellNameShort = "&Anna Dev"
+            $appAppxFullName = "Workspaacing.Anna_1.0.0.0_neutral__zbpzcjj9dax96"
         }
         default {
             Write-Error "can't bundle installer for $channel."
@@ -256,7 +260,7 @@ function BuildInstaller {
 Push-Location $workspace
 PrepareForBundle
 GenerateLicenses
-BuildWuAndItsFriends
+BuildAnnaAndItsFriends
 BuildRemoteServer
 MakeAppx
 DownloadAMDGpuServices
@@ -268,8 +272,8 @@ Pop-Location
 if ($buildSuccess) {
     Write-Output "Build successful"
     if ($Install) {
-        Write-Output "Installing Wu..."
-        Start-Process -FilePath "$workspace/target/Wu-$Architecture.exe"
+        Write-Output "Installing Anna..."
+        Start-Process -FilePath "$workspace/target/Anna-$Architecture.exe"
     }
     exit 0
 }

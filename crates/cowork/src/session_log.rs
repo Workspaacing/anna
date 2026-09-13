@@ -37,7 +37,7 @@ use time::{
 use util::ResultExt as _;
 use workspace::{Toast, Workspace, notifications::NotificationId};
 
-/// The most lines of Wu's own log an export carries. The newest are the ones kept: the failure a
+/// The most lines of Anna's own log an export carries. The newest are the ones kept: the failure a
 /// log is exported to explain is usually just before the export.
 const MAX_LOG_LINES: usize = 500;
 
@@ -82,7 +82,7 @@ pub struct Environment {
     pub permission_level: String,
 }
 
-/// Wu's own log file, as it was read for the excerpt.
+/// Anna's own log file, as it was read for the excerpt.
 #[derive(Clone, Debug)]
 pub struct WuLog {
     pub path: String,
@@ -127,10 +127,10 @@ pub fn session_log(input: &SessionLogInput) -> String {
     add_counts(&mut redactions, &excerpt.redactions);
 
     let mut document = String::new();
-    push_heading(&mut document, 1, "Cowork session log");
+    push_heading(&mut document, 1, "Anna session log");
     document.push_str(&format!(
-        "Everything recorded in one Cowork thread, for diagnosing what worked and what did not. \
-         Exported {} from Wu {} on {}. Attachment contents and the file text kept for rewinds are \
+        "Everything recorded in one Anna thread, for diagnosing what worked and what did not. \
+         Exported {} from Anna {} on {}. Attachment contents and the file text kept for rewinds are \
          never included. Credentials were replaced with `[REDACTED: <kind>]`: {} in this file.\n\n",
         format_time(environment.exported_at, environment.offset),
         environment.app_version,
@@ -209,7 +209,7 @@ pub fn all_threads_log(input: &AllThreadsLogInput) -> String {
     add_counts(&mut redactions, &excerpt.redactions);
 
     let mut document = String::new();
-    push_heading(&mut document, 1, "Cowork log: all threads");
+    push_heading(&mut document, 1, "Anna log: all threads");
     document.push_str(
         "Everything recorded in each thread below, for diagnosing what worked and what did not. \
          Attachment contents and the file text kept for rewinds are never included, and \
@@ -779,7 +779,7 @@ fn write_activity(out: &mut String, activity: &[ActivityEntry], offset: UtcOffse
     push_heading(out, level, "Activity");
     if activity.is_empty() {
         out.push_str(
-            "Nothing recorded. A thread last saved before Wu kept an activity timeline has none.\n\n",
+            "Nothing recorded. A thread last saved before Anna kept an activity timeline has none.\n\n",
         );
         return;
     }
@@ -811,13 +811,13 @@ fn render_log_excerpt(
     environment: &Environment,
 ) -> RenderedExcerpt {
     let mut text = String::new();
-    push_heading(&mut text, 2, "Wu log excerpt");
+    push_heading(&mut text, 2, "Anna log excerpt");
     push_item(&mut text, "File", &code(&wu_log.path));
 
     match &wu_log.contents {
         Err(error) => {
             text.push('\n');
-            text.push_str("Wu's log file could not be read, so there is no excerpt:\n\n");
+            text.push_str("Anna's log file could not be read, so there is no excerpt:\n\n");
             push_fenced(&mut text, "text", error, "");
             text.push('\n');
         }
@@ -833,8 +833,8 @@ fn render_log_excerpt(
                 &mut text,
                 "Kept",
                 &format!(
-                    "lines mentioning Cowork, and every warning and error, logged {window}; a \
-                     line without a timestamp continues the entry above it"
+                    "lines mentioning `cowork` (the agent's own), and every warning and error, \
+                     logged {window}; a line without a timestamp continues the entry above it"
                 ),
             );
 
@@ -863,10 +863,10 @@ fn render_log_excerpt(
     }
 }
 
-/// The lines of Wu's log worth reading beside a thread, and how many matched before only the newest
+/// The lines of Anna's log worth reading beside a thread, and how many matched before only the newest
 /// [`MAX_LOG_LINES`] were kept.
 ///
-/// A line is kept when it mentions Cowork or is a warning or an error, and was logged at or after
+/// A line is kept when it mentions `cowork` or is a warning or an error, and was logged at or after
 /// `since`. A line with no timestamp of its own continues the entry above it — a multi-line error —
 /// and goes wherever that entry went. Timestamps are parsed rather than compared as text, because
 /// the log writes the local offset, which moves with daylight saving and with the time zone.
@@ -1171,7 +1171,7 @@ async fn default_directory(fs: &Arc<dyn Fs>, cx: &mut AsyncApp) -> PathBuf {
     util::paths::home_dir().clone()
 }
 
-/// Wu's log, preceded by the file it rotated out when there is one: the log is cut when it grows
+/// Anna's log, preceded by the file it rotated out when there is one: the log is cut when it grows
 /// past its limit, and a long session can begin before the cut.
 ///
 /// Read as bytes and decoded leniently, because one malformed line should cost that line, not the
@@ -1341,7 +1341,7 @@ mod tests {
 
     fn wu_log(contents: &str) -> WuLog {
         WuLog {
-            path: "/logs/Wu.log".to_owned(),
+            path: "/logs/Anna.log".to_owned(),
             contents: Ok(contents.to_owned()),
         }
     }
@@ -1499,7 +1499,7 @@ mod tests {
         assert_lines_in_order(
             &document,
             &[
-                "# Cowork session log",
+                "# Anna session log",
                 "## Session",
                 "## Summary",
                 "## Transcript",
@@ -1508,7 +1508,7 @@ mod tests {
                 "### Message 3 · tool results",
                 "## Activity",
                 "## Current error",
-                "## Wu log excerpt",
+                "## Anna log excerpt",
             ],
         );
 
@@ -1613,7 +1613,7 @@ mod tests {
             "tool output broke out of its fence: {headings:#?}"
         );
         assert!(
-            headings.contains(&"## Activity") && headings.contains(&"## Wu log excerpt"),
+            headings.contains(&"## Activity") && headings.contains(&"## Anna log excerpt"),
             "the document after the output must still be read as the document: {headings:#?}"
         );
     }
@@ -1629,7 +1629,7 @@ mod tests {
 
         assert_eq!(
             headings,
-            vec!["# Cowork session log", "## Session", "## Wu log excerpt"]
+            vec!["# Anna session log", "## Session", "## Anna log excerpt"]
         );
     }
 
@@ -1687,12 +1687,12 @@ mod tests {
             thread: eventful_session(),
             environment: environment(),
             wu_log: WuLog {
-                path: "/logs/Wu.log".to_owned(),
+                path: "/logs/Anna.log".to_owned(),
                 contents: Err("The system cannot find the file specified.".to_owned()),
             },
         });
 
-        assert!(document.contains("Wu's log file could not be read"));
+        assert!(document.contains("Anna's log file could not be read"));
         assert!(document.contains("The system cannot find the file specified."));
     }
 
@@ -1739,7 +1739,7 @@ mod tests {
         assert_lines_in_order(
             &document,
             &[
-                "# Cowork log: all threads",
+                "# Anna log: all threads",
                 "## Export",
                 "### Totals across threads",
                 "## Contents",
@@ -1747,7 +1747,7 @@ mod tests {
                 "### Session",
                 "### Transcript",
                 "## Thread 2: List the files",
-                "## Wu log excerpt",
+                "## Anna log excerpt",
             ],
         );
         assert!(line_position(&document, "- Threads: 2 (2 loaded, 0 could not be loaded)").is_some());
@@ -1798,8 +1798,8 @@ mod tests {
     #[test]
     fn a_suggested_file_name_is_readable_and_safe() {
         assert_eq!(
-            suggested_file_name("cowork-session", "Fix: the parser / ação?", CREATED_AT, UtcOffset::UTC),
-            "cowork-session-fix-the-parser-ação-2025-09-04-1533.md"
+            suggested_file_name("anna-session", "Fix: the parser / ação?", CREATED_AT, UtcOffset::UTC),
+            "anna-session-fix-the-parser-ação-2025-09-04-1533.md"
         );
         assert_eq!(file_name_component("???"), "untitled");
     }

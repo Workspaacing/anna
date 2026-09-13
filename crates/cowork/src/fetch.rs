@@ -152,7 +152,7 @@ pub async fn fetch(http: Arc<dyn HttpClient>, url: &str) -> Result<String> {
             .header("accept", "text/html,text/plain,application/json;q=0.9,*/*;q=0.8")
             // Sites serve different markup to something they think is a browser. Saying what this
             // is gets the documentation rather than an app shell, and is the honest thing to send.
-            .header("user-agent", "Wu (https://github.com/Workspaacing/wu)")
+            .header("user-agent", "Anna (https://github.com/Workspaacing/anna)")
             .follow_redirects(http_client::RedirectPolicy::NoFollow)
             .timeout(REQUEST_TIMEOUT)
             .body(AsyncBody::empty())

@@ -24,7 +24,7 @@ use settings::Settings as _;
 pub enum Decision {
     /// Just this once.
     Once,
-    /// This and anything else in the same scope, until Wu is restarted.
+    /// This and anything else in the same scope, until Anna is restarted.
     Always,
     Reject,
 }

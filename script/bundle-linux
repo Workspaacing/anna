@@ -96,7 +96,7 @@ cargo build --release --target "${remote_server_triple}" --package remote_server
 # Strip debug symbols and save them for upload to DigitalOcean.
 # We use llvm-objcopy because GNU objcopy on older distros (e.g. Ubuntu 20.04)
 # doesn't understand CREL sections produced by newer LLVM.
-llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/wu"
+llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/anna"
 llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/cli"
 llvm-objcopy --strip-debug "${target_dir}/${remote_server_triple}/release/remote_server"
 
@@ -117,12 +117,12 @@ fi
 # Move everything that should end up in the final package
 # into a temp directory.
 temp_dir=$(mktemp -d)
-wu_dir="${temp_dir}/wu$suffix.app"
+app_dir="${temp_dir}/anna$suffix.app"
 
 # Binary
-mkdir -p "${wu_dir}/bin" "${wu_dir}/libexec"
-cp "${target_dir}/${target_triple}/release/wu" "${wu_dir}/libexec/wu-editor"
-cp "${target_dir}/${target_triple}/release/cli" "${wu_dir}/bin/wu"
+mkdir -p "${app_dir}/bin" "${app_dir}/libexec"
+cp "${target_dir}/${target_triple}/release/anna" "${app_dir}/libexec/anna-editor"
+cp "${target_dir}/${target_triple}/release/cli" "${app_dir}/bin/anna"
 
 # Libs
 # Bundle libstdc++ so older supported systems can run binaries built with our
@@ -132,49 +132,49 @@ cp "${target_dir}/${target_triple}/release/cli" "${wu_dir}/bin/wu"
 # get dlopen'd are built against the system GLib, and resolving them against an
 # older bundled copy fails with missing symbols.
 find_libs() {
-    ldd ${target_dir}/${target_triple}/release/wu |\
+    ldd ${target_dir}/${target_triple}/release/anna |\
         cut -d' ' -f3 |\
         grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' |\
         grep -v '\<\(libglib-2.0.so\|libgobject-2.0.so\|libgio-2.0.so\|libgmodule-2.0.so\|libpcre.so\|libpcre2-8.so\|libmount.so\|libblkid.so\|libselinux.so\|libffi.so\|libresolv.so\|libz.so\)'
 }
 
-mkdir -p "${wu_dir}/lib"
-rm -rf "${wu_dir}/lib/*"
-cp $(find_libs) "${wu_dir}/lib"
+mkdir -p "${app_dir}/lib"
+rm -rf "${app_dir}/lib/*"
+cp $(find_libs) "${app_dir}/lib"
 
 # Icons
-mkdir -p "${wu_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/wu/resources/app-icon$suffix.png" "${wu_dir}/share/icons/hicolor/512x512/apps/wu.png"
-mkdir -p "${wu_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/wu/resources/app-icon$suffix@2x.png" "${wu_dir}/share/icons/hicolor/1024x1024/apps/wu.png"
+mkdir -p "${app_dir}/share/icons/hicolor/512x512/apps"
+cp "crates/wu/resources/app-icon$suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/anna.png"
+mkdir -p "${app_dir}/share/icons/hicolor/1024x1024/apps"
+cp "crates/wu/resources/app-icon$suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/anna.png"
 
 # .desktop
 export DO_STARTUP_NOTIFY="true"
-export APP_CLI="wu"
-export APP_ICON="wu"
+export APP_CLI="anna"
+export APP_ICON="anna"
 export APP_ARGS="%U"
 if [[ "$channel" == "dev" ]]; then
-  export APP_NAME="Wu Dev"
-  APP_ID="me.farshed.Wu-Dev"
+  export APP_NAME="Anna Dev"
+  APP_ID="com.workspaacing.Anna-Dev"
 else
-  export APP_NAME="Wu"
-  APP_ID="me.farshed.Wu"
+  export APP_NAME="Anna"
+  APP_ID="com.workspaacing.Anna"
 fi
 
-mkdir -p "${wu_dir}/share/applications"
-envsubst < "crates/wu/resources/zed.desktop.in" > "${wu_dir}/share/applications/$APP_ID.desktop"
-chmod +x "${wu_dir}/share/applications/$APP_ID.desktop"
+mkdir -p "${app_dir}/share/applications"
+envsubst < "crates/wu/resources/zed.desktop.in" > "${app_dir}/share/applications/$APP_ID.desktop"
+chmod +x "${app_dir}/share/applications/$APP_ID.desktop"
 
 # Copy generated licenses so they'll end up in archive too
-cp "assets/licenses.md" "${wu_dir}/licenses.md"
+cp "assets/licenses.md" "${app_dir}/licenses.md"
 
 # Create archive out of everything that's in the temp directory
 arch=$(uname -m)
-archive="wu-linux-${arch}.tar.gz"
+archive="anna-linux-${arch}.tar.gz"
 
 rm -rf "${archive}"
-remove_match="wu(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
+remove_match="anna(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
 ls "${target_dir}/release" | grep -E ${remove_match} | xargs -d "\n" -I {} rm -f "${target_dir}/release/{}" || true
-tar -czvf "${target_dir}/release/$archive" -C ${temp_dir} "wu$suffix.app"
+tar -czvf "${target_dir}/release/$archive" -C ${temp_dir} "anna$suffix.app"
 
-gzip -f --stdout --best "${target_dir}/${remote_server_triple}/release/remote_server" > "${target_dir}/wu-remote-server-linux-${arch}.gz"
+gzip -f --stdout --best "${target_dir}/${remote_server_triple}/release/remote_server" > "${target_dir}/anna-remote-server-linux-${arch}.gz"

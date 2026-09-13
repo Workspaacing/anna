@@ -32,13 +32,13 @@ const COWORK_PANEL_KEY: &str = "CoworkPanel";
 actions!(
     cowork,
     [
-        /// Deletes the thread selected in the Cowork panel.
+        /// Deletes the thread selected in the Anna panel.
         DeleteSelectedThread,
-        /// Moves the selection to the next thread in the Cowork panel.
+        /// Moves the selection to the next thread in the Anna panel.
         SelectNextThread,
-        /// Moves the selection to the previous thread in the Cowork panel.
+        /// Moves the selection to the previous thread in the Anna panel.
         SelectPreviousThread,
-        /// Opens the thread selected in the Cowork panel.
+        /// Opens the thread selected in the Anna panel.
         OpenSelectedThread,
     ]
 );
@@ -552,7 +552,7 @@ impl CoworkPanel {
             .update(cx, |store, cx| store.refresh_connections(cx));
         window.dispatch_action(
             Box::new(wu_actions::OpenSettingsPage {
-                page: "Cowork".to_owned(),
+                page: "Anna".to_owned(),
                 target: None,
             }),
             cx,
@@ -561,7 +561,7 @@ impl CoworkPanel {
 
     fn report_no_model(&mut self, cx: &mut Context<Self>) {
         self.report_error(
-            "No model is available yet. Connect a provider in Settings > Cowork > Providers, or \
+            "No model is available yet. Connect a provider in Settings > Anna > Providers, or \
              refresh the models.dev catalog."
                 .to_owned(),
             cx,
@@ -609,7 +609,7 @@ impl CoworkPanel {
             .cloned()
             .collect::<Vec<_>>();
         if threads.is_empty() {
-            self.report_error("There are no Cowork threads to export yet.".to_owned(), cx);
+            self.report_error("There are no Anna threads to export yet.".to_owned(), cx);
             return;
         }
         // Oldest first, so the file reads in the order the work happened.
@@ -689,7 +689,7 @@ impl CoworkPanel {
         });
 
         session_log::export(
-            "cowork-all-threads",
+            "anna-all-threads",
             &subject,
             content,
             self.fs.clone(),
@@ -745,7 +745,7 @@ impl CoworkPanel {
             .gap_1()
             .justify_between()
             .child(
-                Label::new("Cowork")
+                Label::new("Anna")
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
@@ -764,7 +764,7 @@ impl CoworkPanel {
                     .child(
                         IconButton::new("cowork-settings", IconName::Settings)
                             .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Cowork settings"))
+                            .tooltip(Tooltip::text("Anna settings"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_settings(&OpenSettings, window, cx)
                             })),
@@ -873,7 +873,7 @@ impl CoworkPanel {
             Some(model) => (model.model_id, model.provider_id),
             None if connected == 0 => (
                 "No provider connected".to_owned(),
-                "Add an API key in Settings > Cowork > Providers".to_owned(),
+                "Add an API key in Settings > Anna > Providers".to_owned(),
             ),
             None => (
                 "No model available".to_owned(),
@@ -1060,7 +1060,7 @@ impl Panel for CoworkPanel {
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Cowork")
+        Some("Anna")
     }
 
     fn toggle_action(&self) -> Box<dyn Action> {

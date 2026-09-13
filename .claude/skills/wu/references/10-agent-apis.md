@@ -1,10 +1,10 @@
 # Agent-facing APIs: editing, diagnostics, processes
 
-Verified against this fork on 2026-09-11 by reading the source, not from Zed memory. Every entry
+Verified against this repo on 2026-09-11 by reading the source, not from Zed memory. Every entry
 carries a `path:line`. These are the APIs `crates/cowork` is built on; they are where a tool that
 touches the user's project has to go.
 
-**Read `02-fork-delta.md` first.** Several of these diverge from upstream Zed in ways that produce
+**Read `02-fork-delta.md` first.** Several of these diverge from Zed in ways that produce
 code which looks right and does not compile.
 
 ## Async context shapes
@@ -105,7 +105,7 @@ emitted at `:3262`) with a timeout — and skip the wait entirely when
 `project::Event::DiagnosticsUpdated` (`crates/project/src/project.rs:319`) and
 `project::Event::DiskBasedDiagnosticsFinished` (`:316`).
 
-Nothing in this fork formats diagnostics as plain text for a non-UI consumer. The only
+Nothing in Anna formats diagnostics as plain text for a non-UI consumer. The only
 string-producing code is `crates/diagnostics/src/diagnostic_renderer.rs:87`, which is private and
 emits Markdown with `file://#diagnostic-…` anchors.
 

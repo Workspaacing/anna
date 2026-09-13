@@ -762,7 +762,7 @@ impl CoworkThreadView {
     ) {
         let log = self.thread_log(cx);
         session_log::export(
-            "cowork-session",
+            "anna-session",
             &self.thread.metadata.title,
             Task::ready(LogContent::Session(log)),
             self.fs.clone(),
@@ -873,7 +873,7 @@ impl CoworkThreadView {
                                     format!("Always allow {}", request.scope),
                                 )
                                 .tooltip(Tooltip::text(
-                                    "Stop asking about this program until Wu restarts",
+                                    "Stop asking about this program until Anna restarts",
                                 ))
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.answer_permission(Decision::Always, cx)
@@ -1728,7 +1728,7 @@ impl CoworkThreadView {
         let store = self.store.read(cx);
         let (catalog_provider, catalog_model) = store.catalog().model(&model).with_context(|| {
             format!(
-                "{} is not in the models.dev catalog. Refresh the catalog from the Cowork panel, \
+                "{} is not in the models.dev catalog. Refresh the catalog from the Anna panel, \
                  or pick another model.",
                 model.qualified()
             )
@@ -1736,7 +1736,7 @@ impl CoworkThreadView {
 
         let api_key = store.api_key(&model.provider_id).ok_or_else(|| {
             anyhow!(
-                "{} has no API key. Add one from Settings → Cowork → Providers, or set {} in the \
+                "{} has no API key. Add one from Settings → Anna → Providers, or set {} in the \
                  environment.",
                 model.provider_id,
                 catalog_provider.primary_env_var().unwrap_or("its API key variable"),
@@ -1926,7 +1926,7 @@ impl CoworkThreadView {
 
     /// Opens the editor's own diff view, showing every uncommitted change in the project.
     ///
-    /// Deliberately not a diff viewer of its own. Wu already has one — a multibuffer with staging,
+    /// Deliberately not a diff viewer of its own. Anna already has one — a multibuffer with staging,
     /// per-hunk revert and the whole editor behind it — and the agent's edits land in the same
     /// buffers as the user's, so they show up there without anything being tracked twice.
     ///

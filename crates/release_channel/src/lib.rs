@@ -44,8 +44,8 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Wu-Editor-Dev",
-        ReleaseChannel::Stable => "Wu-Editor-Stable",
+        ReleaseChannel::Dev => "Anna-Editor-Dev",
+        ReleaseChannel::Stable => "Anna-Editor-Stable",
     }
 }
 
@@ -192,8 +192,8 @@ impl ReleaseChannel {
     /// Returns the display name for this [`ReleaseChannel`].
     pub fn display_name(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "Wu Dev",
-            ReleaseChannel::Stable => "Wu",
+            ReleaseChannel::Dev => "Anna Dev",
+            ReleaseChannel::Stable => "Anna",
         }
     }
 
@@ -207,11 +207,11 @@ impl ReleaseChannel {
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the bundle identifier for Zed on macOS.
+    /// This also has to match the bundle identifier for Anna on macOS.
     pub fn app_id(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "me.farshed.Wu-Dev",
-            ReleaseChannel::Stable => "me.farshed.Wu",
+            ReleaseChannel::Dev => "com.workspaacing.Anna-Dev",
+            ReleaseChannel::Stable => "com.workspaacing.Anna",
         }
     }
 

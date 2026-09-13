@@ -7732,6 +7732,7 @@ dependencies = [
  "const_format",
  "dirs",
  "ignore",
+ "tempfile",
  "util",
 ]
 
@@ -14865,7 +14866,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "wu"
-version = "1.0.7"
+version = "1.0.0"
 dependencies = [
  "activity_indicator",
  "anyhow",

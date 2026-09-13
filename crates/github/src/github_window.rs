@@ -60,7 +60,7 @@ pub fn open(origin: Option<WindowHandle<MultiWorkspace>>, cx: &mut App) {
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Wu — GitHub".into()),
+                    title: Some("Anna — GitHub".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(12.0), px(12.0))),
                 }),
@@ -313,7 +313,7 @@ impl GitHubWindow {
     fn send_to_cowork(&mut self, item: &Item, cx: &mut Context<Self>) {
         let Some(origin) = self.origin else {
             self.note = Some(
-                "Open this from a project window to send work to Cowork — it needs a project to \
+                "Open this from a project window to send work to Anna — it needs a project to \
                  work in."
                     .into(),
             );
@@ -335,7 +335,7 @@ impl GitHubWindow {
             .is_some();
 
         self.note = Some(if sent {
-            format!("Sent {slug} to Cowork.").into()
+            format!("Sent {slug} to Anna.").into()
         } else {
             "That project window is gone. Open GitHub again from the one you want to work in."
                 .into()
@@ -375,7 +375,7 @@ impl GitHubWindow {
             gpui::PromptLevel::Warning,
             &format!("Disconnect from GitHub as @{login}?"),
             Some(
-                "Wu will forget this token. Nothing changes on GitHub, and no repository is \
+                "Anna will forget this token. Nothing changes on GitHub, and no repository is \
                  touched — but the agent loses access to issues, pull requests, checks and \
                  security alerts until you connect again.",
             ),
@@ -856,7 +856,7 @@ impl GitHubWindow {
                     ),
             )
             .child(
-                Button::new(("github-send", index), "Send to Cowork")
+                Button::new(("github-send", index), "Send to Anna")
                     .style(ButtonStyle::Subtle)
                     .label_size(LabelSize::Small)
                     .tooltip(Tooltip::text(

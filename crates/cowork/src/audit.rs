@@ -6,7 +6,7 @@
 //! same sources: RustSec for crates.io, the GitHub Advisory Database for npm, Maven, NuGet,
 //! Packagist, RubyGems and Go, and PyPA for PyPI.
 //!
-//! So when an agent adds or bumps a dependency, Wu asks OSV about it and hands any advisory straight
+//! So when an agent adds or bumps a dependency, Anna asks OSV about it and hands any advisory straight
 //! back to the agent, which can pin above the fixed version on its next step. No model is consulted,
 //! so the check costs nothing per turn.
 //!

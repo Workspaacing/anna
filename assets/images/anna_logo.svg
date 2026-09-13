@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Anna — geometric A</title>
+  <desc>A flat-topped capital A with a triangular counter and a straight crossbar, cut from one shape.</desc>
+
+  <!-- Anna tile -->
+  <path
+    fill="#171717"
+    d="M292 64C160 64 64 160 64 292v440c0 132 96 228 228 228h440c132 0 228-96 228-228V292C960 160 864 64 732 64H292Z"
+  />
+
+  <!-- The mark's bounds (252–772 × 232–792) are centered at (512, 512). Both legs are 130 units
+       wide at the baseline and share one slope, so the counter and the opening under the
+       crossbar stay open at 16–32 px. -->
+  <path
+    fill="#F2EEE4"
+    fill-rule="evenodd"
+    d="M452 232h120l200 560H642l-40-112H422l-40 112H252l200-560ZM512 428l-60 168h120l-60-168Z"
+  />
+</svg>

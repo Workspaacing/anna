@@ -121,7 +121,7 @@ async fn latest(http: &Arc<dyn HttpClient>, package: &Package) -> Option<String>
     let request = Request::get(&url)
         .header("accept", "application/json")
         // crates.io refuses a request without one, and it is only polite everywhere else.
-        .header("user-agent", "Wu (https://github.com/Workspaacing/wu)")
+        .header("user-agent", "Anna (https://github.com/Workspaacing/anna)")
         .timeout(REQUEST_TIMEOUT)
         .body(AsyncBody::empty())
         .ok()?;
