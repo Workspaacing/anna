@@ -58,7 +58,6 @@ jobs:
         with:
           shared-key: release-macos-aarch64
           add-job-id-key: 'false'
-          cache-on-failure: 'true'
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Use the stable release channel
         run: echo stable > crates/wu/RELEASE_CHANNEL
@@ -124,7 +123,6 @@ jobs:
         with:
           shared-key: release-linux-${{ matrix.arch }}
           add-job-id-key: 'false'
-          cache-on-failure: 'true'
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Use the stable release channel
         run: echo stable > crates/wu/RELEASE_CHANNEL
@@ -153,7 +151,6 @@ jobs:
         with:
           shared-key: release-windows-x86_64
           add-job-id-key: 'false'
-          cache-on-failure: 'true'
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Use the stable release channel
         run: Set-Content -Path crates/wu/RELEASE_CHANNEL -Value stable -NoNewline
