@@ -216,13 +216,14 @@ async fn get_cached_server_binary(
     container_dir: PathBuf,
     node: &NodeRuntime,
 ) -> Option<LanguageServerBinary> {
+    let server_path = container_dir.join(SERVER_PATH);
+    // Nothing is cached until the first install finishes, and this is asked while it runs, so a
+    // missing server is the ordinary state rather than an error worth logging.
+    if !server_path.exists() {
+        return None;
+    }
     maybe!(async {
-        let server_path = container_dir.join(SERVER_PATH);
-        anyhow::ensure!(
-            server_path.exists(),
-            "missing executable in directory {server_path:?}"
-        );
-        Ok(LanguageServerBinary {
+        anyhow::Ok(LanguageServerBinary {
             path: node.binary_path().await?,
             env: None,
             arguments: server_binary_arguments(&server_path),
