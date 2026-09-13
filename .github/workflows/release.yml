@@ -123,7 +123,10 @@ jobs:
         with:
           shared-key: release-linux-${{ matrix.arch }}
           add-job-id-key: 'false'
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # The free 10 GB of Actions cache holds three platforms' caches, not four: saving a
+          # fourth made GitHub evict the least recently used one. Linux aarch64 builds the
+          # fastest, so it restores a cache when one exists but does not save one.
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.arch == 'x86_64' }}
       - name: Use the stable release channel
         run: echo stable > crates/wu/RELEASE_CHANNEL
       - name: Bundle
