@@ -18,8 +18,8 @@ use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
 use futures::StreamExt as _;
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, SharedString, Task,
-    WeakEntity, relative,
+    AnyElement, App, ClipboardEntry, ClipboardItem, Entity, EventEmitter, FocusHandle, Focusable,
+    ScrollHandle, SharedString, Task, WeakEntity, relative,
 };
 use language::LanguageRegistry;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
@@ -28,7 +28,11 @@ use project::{
     git_store::{GitStoreEvent, RepositoryEvent},
 };
 use settings::Settings as _;
-use std::{path::Path, rc::Rc, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+};
 use crate::waiting::{OpenPrompt, WaitingOnYou};
 use crate::image_preview::ImagePreview;
 use gpui::StyledText;
@@ -2230,13 +2234,9 @@ impl CoworkThreadView {
     }
 
     /// Asks for files and attaches the ones `prepare` accepts.
-    ///
-    /// Whatever the user picked is read and checked here rather than at send time, so a file that
-    /// cannot be sent is refused while they are still looking at the picker — not after the
-    /// message has gone.
     fn choose_attachments(
         &mut self,
-        prepare: impl Fn(&std::path::Path, Vec<u8>) -> Result<Attachment> + 'static,
+        prepare: impl Fn(&Path, Vec<u8>) -> Result<Attachment> + Send + Sync + 'static,
         cx: &mut Context<Self>,
     ) {
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -2245,25 +2245,53 @@ impl CoworkThreadView {
             multiple: true,
             prompt: Some("Attach".into()),
         });
-        let fs = self.fs.clone();
 
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = chosen.await else {
                 return;
             };
+            this.update(cx, |this, cx| this.attach_paths(paths, prepare, cx))
+                .log_err();
+        })
+        .detach();
+    }
 
+    /// Reads `paths` and attaches the ones `prepare` accepts.
+    ///
+    /// Whatever the user picked or pasted is read and checked here rather than at send time, so a
+    /// file that cannot be sent is refused while they are still looking at it — not after the
+    /// message has gone. Preparing runs off the main thread: a bitmap is converted to PNG, which on
+    /// a large screenshot takes long enough to be felt as a stall.
+    fn attach_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        prepare: impl Fn(&Path, Vec<u8>) -> Result<Attachment> + Send + Sync + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let fs = self.fs.clone();
+        let prepare = Arc::new(prepare);
+
+        cx.spawn(async move |this, cx| {
             let mut attached = Vec::new();
             let mut refused: Option<String> = None;
             for path in paths {
                 match fs.load_bytes(&path).await {
-                    Ok(bytes) => match prepare(&path, bytes) {
-                        Ok(attachment) => attached.push(attachment),
-                        Err(error) => {
-                            // Only the first refusal is reported: picking ten files and being told
-                            // ten times about the same mistake is not ten times as useful.
-                            refused.get_or_insert_with(|| format!("{error}"));
+                    Ok(bytes) => {
+                        let prepared = cx
+                            .background_spawn({
+                                let prepare = prepare.clone();
+                                async move { prepare(&path, bytes) }
+                            })
+                            .await;
+                        match prepared {
+                            Ok(attachment) => attached.push(attachment),
+                            Err(error) => {
+                                // Only the first refusal is reported: picking ten files and being
+                                // told ten times about the same mistake is not ten times as useful.
+                                refused.get_or_insert_with(|| format!("{error}"));
+                            }
                         }
-                    },
+                    }
                     Err(error) => {
                         refused
                             .get_or_insert_with(|| format!("{path:?} could not be read: {error}"));
@@ -2275,6 +2303,71 @@ impl CoworkThreadView {
                 this.pending_attachments.extend(attached);
                 if let Some(refused) = refused {
                     this.error = Some(refused.into());
+                }
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    /// Pasting into the message field attaches what text cannot carry.
+    ///
+    /// Copied files become attachments, checked the way the buttons check them, and so does a
+    /// picture copied on its own: a screenshot, or a browser's "Copy image". Anything else is left
+    /// to the editor, which pastes text as it always has.
+    fn paste(&mut self, _: &editor::actions::Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        match pasted(&item) {
+            Pasted::Text => {}
+            Pasted::Files(paths) => {
+                cx.stop_propagation();
+                let accepts_images = self.model_accepts_images(cx);
+                let accepts_pdf = self.model_accepts_pdf(cx);
+                self.attach_paths(
+                    paths,
+                    move |path, bytes| attach_file(path, bytes, accepts_images, accepts_pdf),
+                    cx,
+                );
+            }
+            Pasted::Image(bytes) => {
+                cx.stop_propagation();
+                self.attach_pasted_image(bytes, cx);
+            }
+        }
+    }
+
+    /// Attaches a picture that was pasted without a file, such as a screenshot.
+    fn attach_pasted_image(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if !self.model_accepts_images(cx) {
+            self.error = Some(
+                format!(
+                    "{} cannot read images, so the pasted picture was not attached. Pick a model \
+                     that reads images and paste it again.",
+                    self.thread.metadata.model.model_id
+                )
+                .into(),
+            );
+            cx.notify();
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            let prepared = cx
+                .background_spawn(async move {
+                    crate::image::attach_named(PASTED_IMAGE_NAME.to_owned(), bytes)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match prepared {
+                    Ok(attachment) => this.pending_attachments.extend([attachment]),
+                    Err(error) => this.error = Some(format!("{error}").into()),
                 }
                 cx.notify();
             })
@@ -3053,6 +3146,74 @@ fn containing_repository<'a, T>(
         .map(|(_, repository)| repository)
 }
 
+/// The name a picture pasted without a file is attached under.
+const PASTED_IMAGE_NAME: &str = "Pasted image";
+
+/// What a paste into the message field does with what the clipboard holds.
+#[derive(Debug, PartialEq, Eq)]
+enum Pasted {
+    /// Left to the editor.
+    Text,
+    Files(Vec<PathBuf>),
+    Image(Vec<u8>),
+}
+
+/// Files come first: macOS puts the names of files copied in Finder on the clipboard as text too,
+/// and pasting them should attach the files rather than type their names. Text comes before a
+/// picture: Excel puts a picture of copied cells beside their text, and pasting cells should give
+/// their values rather than a screenshot of them.
+fn pasted(item: &ClipboardItem) -> Pasted {
+    let mut picture = None;
+    let mut has_text = false;
+    for entry in item.entries() {
+        match entry {
+            ClipboardEntry::ExternalPaths(paths) if !paths.paths().is_empty() => {
+                return Pasted::Files(paths.paths().to_vec());
+            }
+            ClipboardEntry::String(text) if !text.text().is_empty() => has_text = true,
+            ClipboardEntry::Image(image) if !image.bytes.is_empty() => {
+                picture.get_or_insert(image);
+            }
+            _ => {}
+        }
+    }
+    match picture {
+        Some(image) if !has_text => Pasted::Image(image.bytes.clone()),
+        _ => Pasted::Text,
+    }
+}
+
+/// Prepares a pasted file, whatever kind it is.
+///
+/// Each button asks for one kind, but one paste can bring several, so the kind is read from each
+/// file's bytes. The name settles only a bitmap, whose two-byte signature is too short to trust
+/// alone.
+fn attach_file(
+    path: &Path,
+    bytes: Vec<u8>,
+    accepts_images: bool,
+    accepts_pdf: bool,
+) -> Result<Attachment> {
+    let is_picture = crate::image::sniff(&bytes).is_some()
+        || path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("bmp"));
+    if !is_picture {
+        return crate::document::attach(path, bytes, accepts_pdf);
+    }
+    if !accepts_images {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".to_owned());
+        anyhow::bail!(
+            "{name} is an image, and this model does not read images. Pick a model that does, or \
+             paste the other files on their own."
+        );
+    }
+    crate::image::attach(path, bytes)
+}
+
 /// The names of the attachments a model cannot read, by what they are.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct UnreadableAttachments {
@@ -3534,6 +3695,8 @@ impl Render for CoworkThreadView {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::select_model))
             .on_action(cx.listener(Self::export_session_log))
+            // Before the editor's own paste, which would take only the text.
+            .capture_action(cx.listener(Self::paste))
             .size_full()
             .bg(colors.editor_background)
             .child(self.render_header(is_streaming, cx))
@@ -3601,6 +3764,67 @@ mod tests {
         assert!(preview(&attachment("text/plain", "aGVsbG8=")).is_none());
         assert!(preview(&attachment("application/pdf", "JVBERi0=")).is_none());
         assert!(preview(&attachment("image/png", "not base64 at all!")).is_none());
+    }
+
+    #[test]
+    fn pasted_files_are_attached_even_when_their_names_came_as_text() {
+        let item = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::String(gpui::ClipboardString::new("notes.txt".to_owned())),
+                ClipboardEntry::ExternalPaths(gpui::ExternalPaths(
+                    vec![PathBuf::from("/work/notes.txt")].into(),
+                )),
+            ],
+        };
+        assert_eq!(
+            pasted(&item),
+            Pasted::Files(vec![PathBuf::from("/work/notes.txt")])
+        );
+    }
+
+    #[test]
+    fn copied_text_stays_text_and_only_a_picture_on_its_own_is_attached() {
+        let signature = b"\x89PNG\r\n\x1a\n".to_vec();
+        let picture = gpui::Image::from_bytes(gpui::ImageFormat::Png, signature.clone());
+
+        let cells = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::String(gpui::ClipboardString::new("A1\tB1".to_owned())),
+                ClipboardEntry::Image(picture.clone()),
+            ],
+        };
+        assert_eq!(pasted(&cells), Pasted::Text);
+
+        let screenshot = ClipboardItem {
+            entries: vec![ClipboardEntry::Image(picture)],
+        };
+        assert_eq!(pasted(&screenshot), Pasted::Image(signature));
+    }
+
+    #[test]
+    fn a_pasted_image_file_needs_a_model_that_reads_images() {
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let error = attach_file(Path::new("shot.png"), png.clone(), false, true)
+            .expect_err("a model without images refuses it");
+        assert!(error.to_string().contains("shot.png"), "{error}");
+
+        let attachment = attach_file(Path::new("shot.png"), png, true, false).unwrap();
+        assert_eq!(attachment.media_type, "image/png");
+    }
+
+    #[test]
+    fn pasted_text_and_pdf_files_are_attached_as_the_file_button_would() {
+        let text = attach_file(
+            Path::new("main.rs"),
+            b"fn main() {}\n".to_vec(),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(text.media_type, crate::document::TEXT_MEDIA_TYPE);
+
+        let pdf = attach_file(Path::new("paper.pdf"), b"%PDF-1.7\n".to_vec(), false, true).unwrap();
+        assert_eq!(pdf.media_type, crate::document::PDF_MEDIA_TYPE);
     }
 
     #[test]
