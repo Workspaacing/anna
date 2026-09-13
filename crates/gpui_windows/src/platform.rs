@@ -892,16 +892,29 @@ impl Platform for WindowsPlatform {
             if credentials.is_null() {
                 Ok(None)
             } else {
-                let username: String = unsafe { (*credentials).UserName.to_string()? };
-                let credential_blob = unsafe {
-                    std::slice::from_raw_parts(
-                        (*credentials).CredentialBlob,
-                        (*credentials).CredentialBlobSize as usize,
-                    )
+                // Everything is copied out before the buffer is freed, so it is freed even when the
+                // user name cannot be converted. An empty secret can come back as a null blob, which
+                // `slice::from_raw_parts` must never be given, even with a length of zero.
+                let (username, password) = {
+                    let credential = unsafe { &*credentials };
+                    let username = unsafe { credential.UserName.to_string() };
+                    let password = if credential.CredentialBlob.is_null()
+                        || credential.CredentialBlobSize == 0
+                    {
+                        Vec::new()
+                    } else {
+                        unsafe {
+                            std::slice::from_raw_parts(
+                                credential.CredentialBlob,
+                                credential.CredentialBlobSize as usize,
+                            )
+                        }
+                        .to_vec()
+                    };
+                    (username, password)
                 };
-                let password = credential_blob.to_vec();
                 unsafe { CredFree(credentials as *const _ as _) };
-                Ok(Some((username, password)))
+                Ok(Some((username?, password)))
             }
         })
     }

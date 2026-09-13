@@ -2116,13 +2116,9 @@ impl Terminal {
             ..
         } = &self.terminal_type
         {
-            if log::log_enabled!(log::Level::Debug) {
-                if let Ok(str) = str::from_utf8(&input) {
-                    log::debug!("Writing to PTY: {:?}", str);
-                } else {
-                    log::debug!("Writing to PTY: {:?}", input);
-                }
-            }
+            // Only the size: what is typed into a terminal includes passwords at sudo and ssh
+            // prompts, and the log is a plain file on disk.
+            log::debug!("Writing {} bytes to PTY", input.len());
             pty_tx.notify(input);
         }
     }
