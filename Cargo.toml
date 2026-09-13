@@ -730,7 +730,7 @@ windows-core = "0.61"
 windows-registry = "0.6.0"
 yaml-rust2 = "0.8"
 zeroize = "1.8"
-zstd = "0.11"
+zstd = "0.14"
 
 [workspace.dependencies.windows]
 version = "0.61"
