@@ -16,7 +16,17 @@ pub const ACTIVITY_BAR_WIDTH: Pixels = px(48.);
 
 /// Entries are shown in this order by `Panel::panel_key()`. Panels not listed here
 /// come after, in dock order (left dock first, then right dock).
-const PREFERRED_ORDER: [&str; 4] = ["ProjectPanel", "GitPanel", "OutlinePanel", "DebugPanel"];
+const PREFERRED_ORDER: [&str; 6] = [
+    "ProjectPanel",
+    "GitPanel",
+    "GitHub",
+    "CoworkPanel",
+    "OutlinePanel",
+    "DebugPanel",
+];
+
+/// The key of the GitHub entry, which is not a panel.
+pub const GITHUB_ENTRY_KEY: &str = "GitHub";
 
 /// A vertical bar on the left edge of the window with one button per left or right
 /// dock panel, like the activity bar in VS Code.
@@ -35,22 +45,38 @@ pub enum ActivityBarEntry {
         icon: IconName,
         icon_tooltip: &'static str,
     },
+    /// A button that dispatches an action rather than toggling a dock.
+    ///
+    /// Not everything worth reaching from the side of the window lives in a dock. GitHub opens a
+    /// window of its own, the way settings does, and a button that toggled a panel nobody wrote
+    /// would be the wrong shape for it.
+    Action {
+        key: &'static str,
+        icon: IconName,
+        icon_tooltip: &'static str,
+        action: Box<dyn Action>,
+    },
 }
 
 impl ActivityBarEntry {
     pub fn key(&self) -> &'static str {
         match self {
             ActivityBarEntry::Panel { panel, .. } => panel.panel_key(),
+            ActivityBarEntry::Action { key, .. } => key,
         }
     }
 
     /// The action the entry's button dispatches, its tooltip, whether the button is
     /// shown as active, and the focus handle to focus before dispatching.
+    ///
+    /// The handle is optional because only a dock has one worth moving focus to. An action entry
+    /// opens something elsewhere, so taking focus away from whatever the user was doing first
+    /// would be a side effect nobody asked for.
     fn button_state(
         &self,
         window: &Window,
         cx: &App,
-    ) -> (Box<dyn Action>, SharedString, bool, FocusHandle) {
+    ) -> (Box<dyn Action>, SharedString, bool, Option<FocusHandle>) {
         match self {
             ActivityBarEntry::Panel {
                 dock,
@@ -61,9 +87,32 @@ impl ActivityBarEntry {
                 let dock = dock.read(cx);
                 let (action, tooltip, is_active) =
                     dock.panel_button_action(*panel_index, icon_tooltip, window, cx);
-                (action, tooltip, is_active, dock.focus_handle(cx))
+                (action, tooltip, is_active, Some(dock.focus_handle(cx)))
             }
+            ActivityBarEntry::Action {
+                icon_tooltip,
+                action,
+                ..
+            } => (
+                action.boxed_clone(),
+                SharedString::new_static(icon_tooltip),
+                false,
+                None,
+            ),
         }
+    }
+}
+
+/// Does what clicking an entry's button does.
+fn dispatch_entry(
+    focus_handle: Option<&FocusHandle>,
+    action: &dyn Action,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match focus_handle {
+        Some(focus_handle) => activate_panel_button(focus_handle, action, window, cx),
+        None => window.dispatch_action(action.boxed_clone(), cx),
     }
 }
 
@@ -112,6 +161,12 @@ impl ActivityBar {
                 });
             }
         }
+        entries.push(ActivityBarEntry::Action {
+            key: GITHUB_ENTRY_KEY,
+            icon: IconName::Github,
+            icon_tooltip: "GitHub",
+            action: Box::new(wu_actions::OpenGitHub),
+        });
         entries.sort_by_key(|entry| {
             PREFERRED_ORDER
                 .iter()
@@ -136,7 +191,7 @@ impl ActivityBar {
             return false;
         };
         let (action, _, _, focus_handle) = entry.button_state(window, cx);
-        activate_panel_button(&focus_handle, &*action, window, cx);
+        dispatch_entry(focus_handle.as_ref(), &*action, window, cx);
         true
     }
 
@@ -151,12 +206,16 @@ impl ActivityBar {
         let (icon, icon_tooltip) = match &entry {
             ActivityBarEntry::Panel {
                 icon, icon_tooltip, ..
+            }
+            | ActivityBarEntry::Action {
+                icon, icon_tooltip, ..
             } => (*icon, *icon_tooltip),
         };
         let badge_count = match &entry {
             ActivityBarEntry::Panel { panel, .. } => panel
                 .icon_label(window, cx)
                 .and_then(|label| label.parse::<usize>().ok()),
+            ActivityBarEntry::Action { .. } => None,
         };
 
         let button = move |is_menu_open: bool| {
@@ -173,7 +232,9 @@ impl ActivityBar {
                 .aria_label(icon_tooltip)
                 .on_click({
                     let action = action.boxed_clone();
-                    move |_, window, cx| activate_panel_button(&focus_handle, &*action, window, cx)
+                    move |_, window, cx| {
+                        dispatch_entry(focus_handle.as_ref(), &*action, window, cx)
+                    }
                 })
                 .when(!is_menu_open, |this| {
                     this.tooltip(move |_window, cx| {
@@ -201,6 +262,9 @@ impl ActivityBar {
                     })
                     .into_any_element()
             }
+            // No right-click menu: the menu on a panel button is about the dock it lives in —
+            // moving it, closing it — and none of that means anything here.
+            ActivityBarEntry::Action { .. } => button(false).into_any_element(),
         }
     }
 }
@@ -404,10 +468,27 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let keys = workspace.update_in(cx, |workspace, window, cx| {
-            workspace.activity_bar().read(cx).entry_keys(window, cx)
+        let entries = workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .activity_bar()
+                .read(cx)
+                .entries(window, cx)
+                .into_iter()
+                .map(|entry| match &entry {
+                    ActivityBarEntry::Panel { .. } => (entry.key(), None),
+                    ActivityBarEntry::Action { action, .. } => (entry.key(), Some(action.name())),
+                })
+                .collect::<Vec<_>>()
         });
-        assert_eq!(keys, vec!["ProjectPanel", "OutlinePanel"]);
+        assert_eq!(
+            entries,
+            vec![
+                ("ProjectPanel", None),
+                (GITHUB_ENTRY_KEY, Some(wu_actions::OpenGitHub.name())),
+                ("OutlinePanel", None),
+            ],
+            "entries follow the preferred order, and GitHub is an action entry, not a panel"
+        );
 
         let is_open =
             workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
@@ -464,5 +545,25 @@ mod tests {
         let is_open =
             workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
         assert!(!is_open, "activating the active entry closes the dock");
+
+        let github_opened = std::rc::Rc::new(std::cell::Cell::new(false));
+        cx.update(|_, cx| {
+            let github_opened = github_opened.clone();
+            cx.on_action(move |_: &wu_actions::OpenGitHub, _| github_opened.set(true));
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .activity_bar()
+                .clone()
+                .update(cx, |activity_bar, cx| {
+                    assert!(activity_bar.activate_entry(GITHUB_ENTRY_KEY, window, cx));
+                });
+        });
+        cx.run_until_parked();
+
+        assert!(github_opened.get(), "the GitHub entry dispatches its action");
+        let is_open =
+            workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
+        assert!(!is_open, "the GitHub entry does not open a dock");
     }
 }

@@ -1,24 +1,25 @@
-name: wu
-title: Wu
+name: anna
+title: Anna
 base: core24
 version: "$RELEASE_VERSION"
-summary: The editor that doesn't get in your way
+summary: The AI engineering workspace.
 description: |
-  Wu is a fast, native code editor built in Rust with a GPU-accelerated
-  renderer. It pairs the speed of a native app with the familiarity of
-  VS Code and stays out of your way.
+  Anna plans, codes, tests and ships — natively, on your machine. It is a
+  native code editor built in Rust with a GPU-accelerated renderer, with an
+  AI agent teammate inside it that edits files, runs commands at the
+  permission level you choose, and works with GitHub.
 grade: stable
 confinement: classic
 compression: lzo
 website: https://wu.farshed.me/
-source-code: https://github.com/farshed/wu
-issues: https://github.com/farshed/wu/issues
-contact: https://github.com/farshed/wu/issues
+source-code: https://github.com/Workspaacing/anna
+issues: https://github.com/Workspaacing/anna/issues
+contact: https://github.com/Workspaacing/anna/issues
 
 parts:
-  wu:
+  anna:
     plugin: dump
-    source: "https://github.com/farshed/wu/releases/download/v$RELEASE_VERSION/wu-linux-x86_64.tar.gz"
+    source: "https://github.com/Workspaacing/anna/releases/download/v$RELEASE_VERSION/anna-linux-x86_64.tar.gz"
 
     organize:
       # These renames seem to not be necessary, but it's tidier.
@@ -27,10 +28,10 @@ parts:
 
     stage-packages:
       - libasound2t64
-      # snapcraft has a lint that this is unused, but without it Wu exits with
+      # snapcraft has a lint that this is unused, but without it Anna exits with
       # "Missing Vulkan entry points: LibraryLoadFailure" in wgpu.
       - libvulkan1
-      # snapcraft has a lint that this is unused, but without it Wu exits with
+      # snapcraft has a lint that this is unused, but without it Anna exits with
       # "NoWaylandLib" when run with Wayland.
       - libwayland-client0
       - libxcb1
@@ -53,8 +54,8 @@ parts:
       - -usr/share/man
 
 apps:
-  wu:
-    command: usr/bin/wu
-    common-id: me.farshed.Wu
+  anna:
+    command: usr/bin/anna
+    common-id: com.workspaacing.Anna
     environment:
       ZED_BUNDLE_TYPE: snap

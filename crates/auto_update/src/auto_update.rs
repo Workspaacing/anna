@@ -57,9 +57,9 @@ struct UpdateLock {
 impl UpdateLock {
     fn path() -> PathBuf {
         #[cfg(test)]
-        let file_name = format!("wu-auto-update-{}.lock", std::process::id());
+        let file_name = format!("anna-auto-update-{}.lock", std::process::id());
         #[cfg(not(test))]
-        let file_name = "wu-auto-update.lock".to_string();
+        let file_name = "anna-auto-update.lock".to_string();
         paths::temp_dir().join(file_name)
     }
 
@@ -74,7 +74,7 @@ impl UpdateLock {
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => {
-                anyhow::bail!("another Wu instance is already checking for updates")
+                anyhow::bail!("another Anna instance is already checking for updates")
             }
             Err(std::fs::TryLockError::Error(error)) => {
                 Err(error).with_context(|| format!("locking update lock at {path:?}"))
@@ -230,7 +230,7 @@ pub struct ReleaseAsset {
     pub digest: Option<String>,
 }
 
-const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repos/farshed/wu/releases";
+const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repos/Workspaacing/anna/releases";
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -248,10 +248,10 @@ struct GitHubReleaseAsset {
 
 fn github_asset_name(asset: &str, os: &str, arch: &str) -> Result<String> {
     match (asset, os) {
-        ("zed", "macos") => Ok(format!("Wu-{arch}.dmg")),
-        ("zed", "linux") => Ok(format!("wu-linux-{arch}.tar.gz")),
-        ("zed", "windows") => Ok(format!("Wu-{arch}.exe")),
-        ("wu-remote-server", _) => Ok(format!("wu-remote-server-{os}-{arch}.gz")),
+        ("anna", "macos") => Ok(format!("Anna-{arch}.dmg")),
+        ("anna", "linux") => Ok(format!("anna-linux-{arch}.tar.gz")),
+        ("anna", "windows") => Ok(format!("Anna-{arch}.exe")),
+        ("anna-remote-server", _) => Ok(format!("anna-remote-server-{os}-{arch}.gz")),
         _ => anyhow::bail!("no release asset for {asset} on {os}"),
     }
 }
@@ -375,7 +375,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Wu was installed via a package manager.",
+            "Anna was installed via a package manager.",
             Some(&message),
             &["OK"],
             cx,
@@ -412,9 +412,9 @@ pub fn release_notes_url(cx: &mut App) -> Option<String> {
             let mut current_version = auto_updater.current_version.clone();
             current_version.pre = semver::Prerelease::EMPTY;
             current_version.build = semver::BuildMetadata::EMPTY;
-            format!("https://github.com/farshed/wu/releases/tag/v{current_version}")
+            format!("https://github.com/Workspaacing/anna/releases/tag/v{current_version}")
         }
-        ReleaseChannel::Dev => "https://github.com/farshed/wu/commits/main/".to_string(),
+        ReleaseChannel::Dev => "https://github.com/Workspaacing/anna/commits/main/".to_string(),
     };
     Some(url)
 }
@@ -426,7 +426,7 @@ pub fn view_release_notes(_: &ViewReleaseNotes, cx: &mut App) -> Option<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-const INSTALLER_DIR_PREFIX: &str = "wu-auto-update";
+const INSTALLER_DIR_PREFIX: &str = "anna-auto-update";
 
 #[cfg(not(target_os = "windows"))]
 struct InstallerDir(tempfile::TempDir);
@@ -454,7 +454,7 @@ impl InstallerDir {
     async fn new() -> Result<Self> {
         let installer_dir = std::env::current_exe()?
             .parent()
-            .context("No parent dir for Wu.exe")?
+            .context("No parent dir for Anna.exe")?
             .join("updates");
         if smol::fs::metadata(&installer_dir).await.is_ok() {
             smol::fs::remove_dir_all(&installer_dir).await?;
@@ -666,7 +666,7 @@ impl AutoUpdater {
             &this,
             release_channel,
             version,
-            "wu-remote-server",
+            "anna-remote-server",
             os,
             arch,
             cx,
@@ -683,7 +683,7 @@ impl AutoUpdater {
 
         if smol::fs::metadata(&version_path).await.is_err() {
             log::info!(
-                "downloading wu-remote-server {os} {arch} version {}",
+                "downloading anna-remote-server {os} {arch} version {}",
                 release.version
             );
             set_status("Downloading remote server", cx);
@@ -718,7 +718,7 @@ impl AutoUpdater {
         })?;
 
         let release =
-            Self::get_release_asset(&this, channel, version, "wu-remote-server", os, arch, cx)
+            Self::get_release_asset(&this, channel, version, "anna-remote-server", os, arch, cx)
                 .await?;
 
         Ok(Some(release.url))
@@ -815,7 +815,7 @@ impl AutoUpdater {
         });
 
         let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
+            Self::get_release_asset(&this, release_channel, None, "anna", OS, ARCH, cx).await?;
         let fetched_version = fetched_release_data.clone().version;
         let newer_version = Self::check_if_fetched_version_is_newer(
             installed_version,
@@ -954,9 +954,9 @@ impl AutoUpdater {
 
     async fn target_path(installer_dir: &InstallerDir) -> Result<PathBuf> {
         let filename = match OS {
-            "macos" => anyhow::Ok("Wu.dmg"),
-            "linux" => Ok("wu.tar.gz"),
-            "windows" => Ok("Wu.exe"),
+            "macos" => anyhow::Ok("Anna.dmg"),
+            "linux" => Ok("anna.tar.gz"),
+            "windows" => Ok("Anna.exe"),
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }?;
 
@@ -1209,7 +1209,7 @@ async fn install_release_linux(
 ) -> Result<Option<PathBuf>> {
     let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
 
-    let extracted = temp_dir.path().join("wu");
+    let extracted = temp_dir.path().join("anna");
     fs::create_dir_all(&extracted)
         .await
         .context("failed to create directory into which to extract update")?;
@@ -1237,12 +1237,12 @@ async fn install_release_linux(
     } else {
         String::default()
     };
-    let app_folder_name = format!("wu{}.app", suffix);
+    let app_folder_name = format!("anna{}.app", suffix);
 
     let from = extracted.join(&app_folder_name);
     let mut to = home_dir.join(".local");
 
-    let expected_suffix = format!("{}/libexec/wu-editor", app_folder_name);
+    let expected_suffix = format!("{}/libexec/anna-editor", app_folder_name);
 
     if let Some(prefix) = running_app_path
         .to_str()
@@ -1260,7 +1260,7 @@ async fn install_release_linux(
 
     anyhow::ensure!(
         output.status.success(),
-        "failed to copy Wu update from {:?} to {:?}: {:?}",
+        "failed to copy Anna update from {:?} to {:?}: {:?}",
         from,
         to,
         String::from_utf8_lossy(&output.stderr)
@@ -1279,7 +1279,7 @@ async fn install_release_macos(
         .file_name()
         .with_context(|| format!("invalid running app path {running_app_path:?}"))?;
 
-    let mount_path = temp_dir.path().join("Wu");
+    let mount_path = temp_dir.path().join("Anna");
     let mut mounted_app_path: OsString = mount_path.join(running_app_filename).into();
 
     mounted_app_path.push("/");
@@ -1374,7 +1374,7 @@ async fn cleanup_stale_installer_dirs() {
 async fn cleanup_windows() -> Result<()> {
     let parent = std::env::current_exe()?
         .parent()
-        .context("No parent dir for Wu.exe")?
+        .context("No parent dir for Anna.exe")?
         .to_owned();
 
     // keep in sync with crates/auto_update_helper/src/updater.rs. `updates` and
@@ -1417,7 +1417,7 @@ async fn install_release_windows(downloaded_installer: &Path) -> Result<Option<P
     // deleting the old one, and launching the new binary.
     let helper_path = std::env::current_exe()?
         .parent()
-        .context("No parent dir for Wu.exe")?
+        .context("No parent dir for Anna.exe")?
         .join("tools")
         .join("auto_update_helper.exe");
     Ok(Some(helper_path))
@@ -1498,26 +1498,30 @@ mod tests {
 
         cx.update(|cx| {
             settings::init(cx);
+            cx.set_global(db::AppDatabase::test_new());
 
             let current_version = semver::Version::new(0, 100, 0);
             release_channel::init_test(current_version, ReleaseChannel::Stable, cx);
 
             let release_available = Arc::clone(&release_available);
             let dmg_rx = Arc::new(parking_lot::Mutex::new(Some(dmg_rx)));
+            let asset_name =
+                github_asset_name("anna", std::env::consts::OS, std::env::consts::ARCH)
+                    .expect("this platform should have a release asset");
             let fake_client_http = FakeHttpClient::create(move |req| {
                 let release_available = release_available.load(atomic::Ordering::Relaxed);
                 let dmg_rx = dmg_rx.clone();
+                let asset_name = asset_name.clone();
                 async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
-                    if release_available {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
-                        ).unwrap());
+                if req.uri().path() == "/repos/Workspaacing/anna/releases/latest" {
+                    let (tag_name, download) = if release_available {
+                        ("v0.100.1", "new-download")
                     } else {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
-                        ).unwrap());
-                    }
+                        ("v0.100.0", "old-download")
+                    };
+                    return Ok(Response::builder().status(200).body(
+                        format!(r#"{{"tag_name":"{tag_name}","assets":[{{"name":"{asset_name}","browser_download_url":"https://test.example/{download}"}}]}}"#).into()
+                    ).unwrap());
                 } else if req.uri().path() == "/new-download" {
                     return Ok(Response::builder().status(200).body({
                         let dmg_rx = dmg_rx.lock().take().unwrap();

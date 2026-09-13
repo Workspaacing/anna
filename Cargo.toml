@@ -17,6 +17,7 @@ members = [
     "crates/cloud_api_types",
     "crates/collections",
     "crates/command_palette",
+    "crates/cowork",
     "crates/command_palette_hooks",
     "crates/component",
     "crates/component_preview",
@@ -47,6 +48,7 @@ members = [
     "crates/git",
     "crates/git_hosting_providers",
     "crates/git_ui",
+    "crates/github",
     "crates/git_ui_core",
     "crates/go_to_line",
     "crates/gpui",
@@ -208,6 +210,7 @@ clock = { path = "crates/clock" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 collections = { path = "crates/collections", version = "0.1.0" }
 command_palette = { path = "crates/command_palette" }
+cowork = { path = "crates/cowork" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
 component = { path = "crates/component" }
 component_preview = { path = "crates/component_preview" }
@@ -234,6 +237,7 @@ fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
 git = { path = "crates/git" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
 git_ui = { path = "crates/git_ui" }
+github = { path = "crates/github" }
 git_ui_core = { path = "crates/git_ui_core" }
 go_to_line = { path = "crates/go_to_line" }
 gpui = { path = "crates/gpui", default-features = false }

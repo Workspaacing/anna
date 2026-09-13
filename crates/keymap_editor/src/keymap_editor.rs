@@ -23,7 +23,7 @@ use gpui::{
     ScrollWheelEvent, Stateful, StyledText, Subscription, TextStyleRefinement, WeakEntity, actions,
     anchored, deferred, div,
 };
-use language::{Language, LanguageConfig, ToOffset as _};
+use language::{KEYBIND_CONTEXT_LANGUAGE_NAME, Language, LanguageConfig, ToOffset as _};
 
 use notifications::status_toast::StatusToast;
 use project::{CompletionDisplayOptions, Project};
@@ -3515,7 +3515,7 @@ async fn load_keybind_context_language(
                 .project()
                 .read(cx)
                 .languages()
-                .language_for_name("Wu Keybind Context")
+                .language_for_name(KEYBIND_CONTEXT_LANGUAGE_NAME)
         })
         .context("Failed to load Zed Keybind Context language")
         .log_err();
@@ -3529,7 +3529,7 @@ async fn load_keybind_context_language(
     language.unwrap_or_else(|| {
         Arc::new(Language::new(
             LanguageConfig {
-                name: "Wu Keybind Context".into(),
+                name: KEYBIND_CONTEXT_LANGUAGE_NAME.into(),
                 ..Default::default()
             },
             Some(tree_sitter_rust::LANGUAGE.into()),
@@ -4017,12 +4017,12 @@ mod tests {
         let keymap_content = r#"[
     {
         "bindings": {
-            "alt-cmd-shift-c": "wu::OpenKeymap"
+            "alt-cmd-shift-c": "anna::OpenKeymap"
         }
     },
     {
         "bindings": {
-            "alt-cmd-shift-c": "wu::OpenKeymap"
+            "alt-cmd-shift-c": "anna::OpenKeymap"
         }
     }
 ]"#;
@@ -4030,7 +4030,7 @@ mod tests {
         let cx = &mut cx;
 
         let rows = keymap_editor.read_with(cx, |editor, _| {
-            visible_rows_for_action(editor, "wu::OpenKeymap")
+            visible_rows_for_action(editor, "anna::OpenKeymap")
         });
         assert_eq!(
             rows.len(),
@@ -4056,7 +4056,7 @@ mod tests {
         cx.run_until_parked();
 
         let rows = keymap_editor.read_with(cx, |editor, _| {
-            visible_rows_for_action(editor, "wu::OpenKeymap")
+            visible_rows_for_action(editor, "anna::OpenKeymap")
         });
         assert_eq!(rows.len(), 1, "expected one row remaining after deletion");
     }

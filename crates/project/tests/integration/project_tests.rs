@@ -1490,6 +1490,106 @@ async fn test_wu_tasks_take_precedence_over_zed_tasks(cx: &mut gpui::TestAppCont
 }
 
 #[gpui::test]
+async fn test_anna_tasks_take_precedence_over_wu_and_zed_tasks(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    TaskStore::init(None);
+
+    let anna_tasks = r#"[{ "label": "anna task", "command": "echo" }]"#;
+    let wu_tasks = r#"[{ "label": "wu task", "command": "echo" }]"#;
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/dir"),
+        json!({
+            ".anna": { "tasks.json": anna_tasks },
+            ".wu": { "tasks.json": wu_tasks },
+            ".zed": { "tasks.json": r#"[{ "label": "zed task", "command": "echo" }]"# },
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+    cx.executor().run_until_parked();
+    let worktree_id = project.update(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+    let mut task_contexts = TaskContexts::default();
+    task_contexts.active_worktree_context = Some((worktree_id, TaskContext::default()));
+    let task_contexts = Arc::new(task_contexts);
+
+    async fn local_tasks(
+        project: &Entity<Project>,
+        task_contexts: &Arc<TaskContexts>,
+        cx: &mut gpui::TestAppContext,
+    ) -> Vec<(String, String)> {
+        cx.update(|cx| get_all_tasks(project, task_contexts.clone(), cx))
+            .await
+            .into_iter()
+            .filter_map(|(source_kind, task)| match source_kind {
+                TaskSourceKind::Worktree {
+                    directory_in_worktree,
+                    ..
+                } => Some((
+                    directory_in_worktree.as_unix_str().to_string(),
+                    task.resolved_label,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+    let anna_only = vec![(".anna".to_string(), "anna task".to_string())];
+
+    assert_eq!(
+        local_tasks(&project, &task_contexts, cx).await,
+        anna_only,
+        "With all three files present, only .anna tasks should be listed"
+    );
+
+    fs.remove_file(
+        path!("/dir/.anna/tasks.json").as_ref(),
+        RemoveOptions::default(),
+    )
+    .await
+    .unwrap();
+    cx.executor().run_until_parked();
+    assert_eq!(
+        local_tasks(&project, &task_contexts, cx).await,
+        vec![(".wu".to_string(), "wu task".to_string())],
+        "Removing .anna/tasks.json should fall back to .wu/tasks.json"
+    );
+
+    fs.remove_file(
+        path!("/dir/.wu/tasks.json").as_ref(),
+        RemoveOptions::default(),
+    )
+    .await
+    .unwrap();
+    cx.executor().run_until_parked();
+    assert_eq!(
+        local_tasks(&project, &task_contexts, cx).await,
+        vec![(".zed".to_string(), "zed task".to_string())],
+        "Removing .wu/tasks.json as well should fall back to .zed/tasks.json"
+    );
+
+    fs.insert_file(path!("/dir/.anna/tasks.json"), anna_tasks.as_bytes().to_vec())
+        .await;
+    cx.executor().run_until_parked();
+    assert_eq!(
+        local_tasks(&project, &task_contexts, cx).await,
+        anna_only,
+        "Adding .anna/tasks.json back should replace the .zed tasks"
+    );
+
+    fs.insert_file(path!("/dir/.wu/tasks.json"), wu_tasks.as_bytes().to_vec())
+        .await;
+    cx.executor().run_until_parked();
+    assert_eq!(
+        local_tasks(&project, &task_contexts, cx).await,
+        anna_only,
+        "Adding a shadowed .wu/tasks.json should change nothing"
+    );
+}
+
+#[gpui::test]
 async fn test_running_multiple_instances_of_a_single_server_in_one_worktree(
     cx: &mut gpui::TestAppContext,
 ) {

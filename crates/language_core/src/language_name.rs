@@ -8,6 +8,10 @@ use std::{
 
 static NEXT_LANGUAGE_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// Must equal `name` in `crates/grammars/src/zed-keybind-context/config.toml`; the keymap
+/// editor resolves the language by this name and the settings UI hides it by this name.
+pub const KEYBIND_CONTEXT_LANGUAGE_NAME: &str = "Zed Keybind Context";
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct LanguageId(usize);
 

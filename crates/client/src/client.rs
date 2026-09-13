@@ -689,8 +689,48 @@ impl ProtoClient for Client {
     }
 }
 
-/// prefix for the wu:// url scheme
-pub const ZED_URL_SCHEME: &str = "wu";
+/// The URL scheme the app registers and writes into links, as in `anna://settings`.
+pub const APP_URL_SCHEME: &str = "anna";
+
+/// The URL scheme the CLI uses to hand a connection to a running app, as in
+/// `anna-cli://<server-name>`.
+pub const CLI_URL_SCHEME: &str = "anna-cli";
+
+/// The URL scheme earlier releases registered in place of [`APP_URL_SCHEME`].
+pub const LEGACY_APP_URL_SCHEME: &str = "wu";
+
+/// The URL scheme earlier releases used in place of [`CLI_URL_SCHEME`].
+pub const LEGACY_CLI_URL_SCHEME: &str = "wu-cli";
+
+/// Rewrites a link in a scheme earlier releases used (`wu://…`, `wu-cli://…`) to
+/// the scheme that replaced it, and returns any other URL unchanged.
+///
+/// Bookmarks, `$schema` values in users' settings and older CLIs still produce
+/// the old schemes, so they must keep behaving exactly like the new ones.
+pub fn normalize_legacy_url_scheme(url: &str) -> std::borrow::Cow<'_, str> {
+    for (legacy_scheme, scheme) in [
+        (LEGACY_APP_URL_SCHEME, APP_URL_SCHEME),
+        (LEGACY_CLI_URL_SCHEME, CLI_URL_SCHEME),
+    ] {
+        if let Some(rest) = url
+            .strip_prefix(legacy_scheme)
+            .and_then(|rest| rest.strip_prefix("://"))
+        {
+            return std::borrow::Cow::Owned(format!("{scheme}://{rest}"));
+        }
+    }
+    std::borrow::Cow::Borrowed(url)
+}
+
+/// Whether the URL is handled by the app itself (`anna://`, `anna-cli://`, or
+/// their legacy `wu` forms) rather than by the system.
+pub fn is_app_url(url: &str) -> bool {
+    let url = normalize_legacy_url_scheme(url);
+    [APP_URL_SCHEME, CLI_URL_SCHEME].iter().any(|scheme| {
+        url.strip_prefix(scheme)
+            .is_some_and(|rest| rest.starts_with("://"))
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -701,6 +741,41 @@ mod tests {
     use http_client::FakeHttpClient;
     use proto::TypedEnvelope;
     use settings::SettingsStore;
+
+    #[test]
+    fn test_legacy_url_schemes_map_to_current_schemes() {
+        assert_eq!(
+            normalize_legacy_url_scheme("wu://schemas/settings"),
+            "anna://schemas/settings"
+        );
+        assert_eq!(
+            normalize_legacy_url_scheme("wu-cli://server-name"),
+            "anna-cli://server-name"
+        );
+        assert_eq!(
+            normalize_legacy_url_scheme("anna://settings/theme"),
+            "anna://settings/theme"
+        );
+        assert_eq!(
+            normalize_legacy_url_scheme("https://example.com"),
+            "https://example.com"
+        );
+        assert_eq!(normalize_legacy_url_scheme("wuffs://x"), "wuffs://x");
+
+        for url in [
+            "anna://",
+            "anna://open",
+            "anna-cli://server",
+            "wu://",
+            "wu://settings",
+            "wu-cli://server",
+        ] {
+            assert!(is_app_url(url), "{url} should be handled by the app");
+        }
+        for url in ["https://anna.dev", "file:///tmp/anna", "wuffs://x", "annax://y"] {
+            assert!(!is_app_url(url), "{url} should not be handled by the app");
+        }
+    }
 
     #[test]
     fn test_proxy_settings_trims_and_ignores_empty_proxy() {

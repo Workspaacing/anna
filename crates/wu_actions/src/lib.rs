@@ -14,15 +14,19 @@ pub fn init() {}
 
 /// Opens a URL in the system's default web browser.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::OpenBrowser"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenBrowser {
     pub url: Arc<str>,
 }
 
-/// Opens a wu:// URL within the application.
+/// Opens an anna:// URL within the application.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(
+    namespace = anna,
+    name = "OpenAnnaUrl",
+    deprecated_aliases = ["wu::OpenWuUrl", "anna::OpenWuUrl", "wu::OpenAnnaUrl"]
+)]
 #[serde(deny_unknown_fields)]
 pub struct OpenWuUrl {
     pub url: Arc<str>,
@@ -30,50 +34,64 @@ pub struct OpenWuUrl {
 
 /// Opens the keymap to either add a keybinding or change an existing one
 #[derive(PartialEq, Clone, Default, Action, JsonSchema, Serialize, Deserialize)]
-#[action(namespace = wu, no_json, no_register)]
+#[action(namespace = anna, no_json, no_register)]
 pub struct ChangeKeybinding {
     pub action: String,
 }
 
 actions!(
-    wu,
+    anna,
     [
         /// Opens the settings editor.
-        #[action(deprecated_aliases = ["wu_actions::OpenSettingsEditor"])]
+        #[action(deprecated_aliases = ["wu::OpenSettings", "wu_actions::OpenSettingsEditor"])]
         OpenSettings,
+        /// Opens the GitHub window.
+        #[action(deprecated_aliases = ["wu::OpenGitHub"])]
+        OpenGitHub,
         /// Opens the settings JSON file.
-        #[action(deprecated_aliases = ["wu_actions::OpenSettings"])]
+        #[action(deprecated_aliases = ["wu::OpenSettingsFile", "wu_actions::OpenSettings"])]
         OpenSettingsFile,
         /// Opens project-specific settings.
-        #[action(deprecated_aliases = ["wu_actions::OpenProjectSettings"])]
+        #[action(deprecated_aliases = ["wu::OpenProjectSettings", "wu_actions::OpenProjectSettings"])]
         OpenProjectSettings,
         /// Opens the project tasks configuration.
+        #[action(deprecated_aliases = ["wu::OpenProjectTasks"])]
         OpenProjectTasks,
         /// Opens the project tasks configuration with worktree setup guidance.
+        #[action(deprecated_aliases = ["wu::OpenWorktreeSetupTasks"])]
         OpenWorktreeSetupTasks,
         /// Opens the default keymap file.
+        #[action(deprecated_aliases = ["wu::OpenDefaultKeymap"])]
         OpenDefaultKeymap,
         /// Opens the user keymap file.
-        #[action(deprecated_aliases = ["wu_actions::OpenKeymap"])]
+        #[action(deprecated_aliases = ["wu::OpenKeymapFile", "wu_actions::OpenKeymap"])]
         OpenKeymapFile,
         /// Opens the keymap editor.
-        #[action(deprecated_aliases = ["wu_actions::OpenKeymapEditor"])]
+        #[action(deprecated_aliases = ["wu::OpenKeymap", "wu_actions::OpenKeymapEditor"])]
         OpenKeymap,
         /// Opens server settings.
+        #[action(deprecated_aliases = ["wu::OpenServerSettings"])]
         OpenServerSettings,
         /// Quits the application.
+        #[action(deprecated_aliases = ["wu::Quit"])]
         Quit,
-        /// Shows information about Wu.
+        /// Shows information about Anna.
+        #[action(deprecated_aliases = ["wu::About"])]
         About,
         /// Opens the documentation website.
+        #[action(deprecated_aliases = ["wu::OpenDocs"])]
         OpenDocs,
         /// Views open source licenses.
+        #[action(deprecated_aliases = ["wu::OpenLicenses"])]
         OpenLicenses,
         /// Opens the performance profiler.
+        #[action(deprecated_aliases = ["wu::OpenPerformanceProfiler"])]
         OpenPerformanceProfiler,
         /// Opens the onboarding view.
+        #[action(deprecated_aliases = ["wu::OpenOnboarding"])]
         OpenOnboarding,
         /// Shows the auto-update notification for testing.
+        #[action(deprecated_aliases = ["wu::ShowUpdateNotification"])]
         ShowUpdateNotification,
     ]
 );
@@ -92,7 +110,7 @@ pub enum ExtensionCategoryFilter {
 
 /// Opens the extensions management interface.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::Extensions"])]
 #[serde(deny_unknown_fields)]
 pub struct Extensions {
     /// Filters the extensions page down to extensions that are in the specified category.
@@ -105,7 +123,7 @@ pub struct Extensions {
 
 /// Decreases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::DecreaseBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct DecreaseBufferFontSize {
     #[serde(default)]
@@ -114,16 +132,28 @@ pub struct DecreaseBufferFontSize {
 
 /// Increases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::IncreaseBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct IncreaseBufferFontSize {
     #[serde(default)]
     pub persist: bool,
 }
 
+/// Starts a Cowork thread with something already to work on.
+///
+/// This exists so a window outside the workspace — GitHub's — can hand work to Cowork without
+/// either crate depending on the other. Both can see an action; neither can see the other's types.
+#[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = cowork)]
+#[serde(deny_unknown_fields)]
+pub struct StartThreadWith {
+    /// What the thread opens with, as though the user had typed it and pressed enter.
+    pub prompt: String,
+}
+
 /// Opens the settings editor at a specific path.
 #[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::OpenSettingsAt"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenSettingsAt {
     /// A path to a specific setting (e.g. `theme.mode`)
@@ -135,7 +165,7 @@ pub struct OpenSettingsAt {
 }
 
 #[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::OpenSettingsPage"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenSettingsPage {
     /// A settings page title (e.g. `AI`).
@@ -155,7 +185,7 @@ pub enum OpenSettingsAtTarget {
 
 /// Resets the buffer font size to the default value.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::ResetBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetBufferFontSize {
     #[serde(default)]
@@ -164,7 +194,7 @@ pub struct ResetBufferFontSize {
 
 /// Decreases the font size of the user interface.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::DecreaseUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct DecreaseUiFontSize {
     #[serde(default)]
@@ -173,7 +203,7 @@ pub struct DecreaseUiFontSize {
 
 /// Increases the font size of the user interface.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::IncreaseUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct IncreaseUiFontSize {
     #[serde(default)]
@@ -182,7 +212,7 @@ pub struct IncreaseUiFontSize {
 
 /// Resets the UI font size to the default value.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::ResetUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetUiFontSize {
     #[serde(default)]
@@ -191,7 +221,7 @@ pub struct ResetUiFontSize {
 
 /// Resets all zoom levels (UI and buffer font sizes, including in the agent panel) to their default values.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::ResetAllZoom"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetAllZoom {
     #[serde(default)]

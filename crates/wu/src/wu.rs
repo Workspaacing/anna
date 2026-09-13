@@ -45,11 +45,11 @@ use language_tools::lsp_log_view::LspLogToolbarItemView;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use onboarding::multibuffer_hint::MultibufferHint;
 pub use open_listener::*;
+use cowork::CoworkPanel;
 use outline_panel::OutlinePanel;
 use paths::{
-    legacy_local_debug_file_relative_path, legacy_local_settings_file_relative_path,
-    legacy_local_tasks_file_relative_path, local_debug_file_relative_path,
-    local_settings_file_relative_path, local_tasks_file_relative_path, resolve_local_config_path,
+    local_debug_file_relative_paths, local_settings_file_relative_paths,
+    local_tasks_file_relative_paths, resolve_local_config_paths,
 };
 use project::{
     DirectoryLister, ProjectItem,
@@ -101,33 +101,46 @@ use wu_actions::{
 const DOCS_URL: &str = "https://wu.farshed.me/docs";
 
 actions!(
-    wu,
+    anna,
     [
         /// Opens the element inspector for debugging UI.
+        #[action(deprecated_aliases = ["wu::DebugElements"])]
         DebugElements,
         /// Hides the application window.
+        #[action(deprecated_aliases = ["wu::Hide"])]
         Hide,
         /// Hides all other application windows.
+        #[action(deprecated_aliases = ["wu::HideOthers"])]
         HideOthers,
         /// Minimizes the current window.
+        #[action(deprecated_aliases = ["wu::Minimize"])]
         Minimize,
         /// Opens the default settings file.
+        #[action(deprecated_aliases = ["wu::OpenDefaultSettings"])]
         OpenDefaultSettings,
         /// Opens project-specific settings file.
+        #[action(deprecated_aliases = ["wu::OpenProjectSettingsFile"])]
         OpenProjectSettingsFile,
         /// Opens the tasks panel.
+        #[action(deprecated_aliases = ["wu::OpenTasks"])]
         OpenTasks,
         /// Opens debug tasks configuration.
+        #[action(deprecated_aliases = ["wu::OpenDebugTasks"])]
         OpenDebugTasks,
         /// Shows the default semantic token rules (read-only).
+        #[action(deprecated_aliases = ["wu::ShowDefaultSemanticTokenRules"])]
         ShowDefaultSemanticTokenRules,
         /// Resets the application database.
+        #[action(deprecated_aliases = ["wu::ResetDatabase"])]
         ResetDatabase,
         /// Shows all hidden windows.
+        #[action(deprecated_aliases = ["wu::ShowAll"])]
         ShowAll,
         /// Toggles fullscreen mode.
+        #[action(deprecated_aliases = ["wu::ToggleFullScreen"])]
         ToggleFullScreen,
         /// Zooms the window.
+        #[action(deprecated_aliases = ["wu::Zoom"])]
         Zoom,
     ]
 );
@@ -179,7 +192,7 @@ pub fn init(cx: &mut App) {
 
     cx.on_action(|_: &RestoreBanner, cx| title_bar::restore_banner(cx));
 
-    // When Wu logs to stdout rather than the log file, avoid registering
+    // When Anna logs to stdout rather than the log file, avoid registering
     // handlers for both `OpenLog` and `RevealLogInFileManager`, as the log file
     // does not exist in that scenario and these actions would error.
     if !crate::stdout_is_a_pty() {
@@ -354,7 +367,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
         show: false,
         kind: WindowKind::Normal,
         is_movable: true,
-        // Wu draws its own titlebar and moves the window via [`Window::start_window_move`],
+        // Anna draws its own titlebar and moves the window via [`Window::start_window_move`],
         // so on macOS AppKit should not own titlebar dragging. This avoids the titlebar
         // click delay from AppKit's drag disambiguation (first observed on macOS 27) while
         // keeping the window movable and the Window-menu tiling items enabled. No-op on
@@ -371,7 +384,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
             height: px(240.0),
         }),
         tabbing_identifier: if use_system_window_tabs {
-            Some(String::from("wu"))
+            Some(String::from("anna"))
         } else {
             None
         },
@@ -609,7 +622,7 @@ fn show_software_emulation_warning_if_needed(
         };
         let message = format!(
             db::indoc! {r#"
-            Wu uses {} for rendering and requires a compatible GPU.
+            Anna uses {} for rendering and requires a compatible GPU.
 
             Currently you are using a software emulated GPU ({}) which
             will result in awful performance.
@@ -644,6 +657,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
+        let cowork_panel = CoworkPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -666,6 +680,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(cowork_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
         );
 
@@ -983,7 +998,7 @@ fn register_actions(
                         Toast::new(
                             NotificationId::unique::<RegisterWuScheme>(),
                             format!(
-                                "wu:// links will now open in {}.",
+                                "anna:// links will now open in {}.",
                                 ReleaseChannel::global(cx).display_name()
                             ),
                         ),
@@ -993,7 +1008,7 @@ fn register_actions(
                 Ok(())
             })
             .detach_and_prompt_err(
-                "Error registering wu:// scheme",
+                "Error registering anna:// scheme",
                 window,
                 cx,
                 |_, _, _| None,
@@ -1406,7 +1421,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Wu".into()),
+                title: Some("About Anna".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
@@ -1993,8 +2008,7 @@ fn open_project_settings_file(
 ) {
     if let Some(task) = open_local_file(
         workspace,
-        local_settings_file_relative_path(),
-        legacy_local_settings_file_relative_path(),
+        local_settings_file_relative_paths(),
         initial_project_settings_content(),
         window,
         cx,
@@ -2011,8 +2025,7 @@ fn open_project_tasks_file(
 ) {
     if let Some(task) = open_local_file(
         workspace,
-        local_tasks_file_relative_path(),
-        legacy_local_tasks_file_relative_path(),
+        local_tasks_file_relative_paths(),
         initial_tasks_content(),
         window,
         cx,
@@ -2030,7 +2043,7 @@ fn open_worktree_setup_tasks_file(
     // Kept harmless on purpose: tasks with the `create_worktree` hook run automatically
     // when a worktree is created, so the example must be safe to save unedited.
     const WORKTREE_SETUP_TASK_EXAMPLE: &str = r#"  {
-    // Runs automatically after Wu creates a new git worktree.
+    // Runs automatically after Anna creates a new git worktree.
     // $ZED_WORKTREE_ROOT is the new worktree's root directory, and
     // $ZED_MAIN_GIT_WORKTREE is the original repository's working directory.
     "label": "Set up new worktree",
@@ -2041,8 +2054,7 @@ fn open_worktree_setup_tasks_file(
 
     let Some(open_task) = open_local_file(
         workspace,
-        local_tasks_file_relative_path(),
-        legacy_local_tasks_file_relative_path(),
+        local_tasks_file_relative_paths(),
         settings::initial_worktree_setup_tasks_content(),
         window,
         cx,
@@ -2079,8 +2091,7 @@ fn open_project_debug_tasks_file(
 ) {
     if let Some(task) = open_local_file(
         workspace,
-        local_debug_file_relative_path(),
-        legacy_local_debug_file_relative_path(),
+        local_debug_file_relative_paths(),
         initial_local_debug_tasks_content(),
         window,
         cx,
@@ -2089,10 +2100,11 @@ fn open_project_debug_tasks_file(
     }
 }
 
+/// Opens the first of `settings_relative_paths` (highest precedence first) that
+/// exists, or creates the first one when none does.
 fn open_local_file(
     workspace: &mut Workspace,
-    settings_relative_path: &'static RelPath,
-    legacy_settings_relative_path: &'static RelPath,
+    settings_relative_paths: &'static [&'static RelPath],
     initial_contents: Cow<'static, str>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -2121,20 +2133,18 @@ fn open_local_file(
                 }
             };
 
-            let primary_exists = file_exists_on_disk(settings_relative_path).await;
-            let legacy_exists = file_exists_on_disk(legacy_settings_relative_path).await;
-            let settings_relative_path = resolve_local_config_path(
-                settings_relative_path,
-                legacy_settings_relative_path,
-                |candidate| {
-                    if candidate == legacy_settings_relative_path {
-                        legacy_exists
-                    } else {
-                        primary_exists
-                    }
-                },
-            );
-            let file_exists = primary_exists || legacy_exists;
+            let mut existing_paths: Vec<&'static RelPath> = Vec::new();
+            for candidate in settings_relative_paths.iter().copied() {
+                if file_exists_on_disk(candidate).await {
+                    existing_paths.push(candidate);
+                }
+            }
+            let settings_relative_path = resolve_local_config_paths(
+                settings_relative_paths.iter().copied(),
+                |candidate| existing_paths.iter().any(|existing| *existing == candidate),
+            )
+            .context("no project config file candidates")?;
+            let file_exists = !existing_paths.is_empty();
 
             if !file_exists {
                 if let Some(dir_path) = settings_relative_path.parent()
@@ -5364,6 +5374,7 @@ mod tests {
             let expected_namespaces = vec![
                 "action",
                 "activity_indicator",
+                "anna",
                 "app_menu",
                 "auto_update",
                 "branch_picker",
@@ -5373,6 +5384,7 @@ mod tests {
                 "cli",
                 "command_palette",
                 "console",
+                "cowork",
                 "debug_panel",
                 "debugger",
                 "dev",
@@ -5432,6 +5444,8 @@ mod tests {
                 "window",
                 "workspace",
                 "worktree_picker",
+                // Only deprecated aliases live in these two, so keymaps written before the
+                // actions moved to `anna` keep loading.
                 "wu",
                 "wu_actions",
             ];
@@ -5443,6 +5457,52 @@ mod tests {
                     .sorted()
                     .collect::<Vec<_>>()
             );
+        });
+    }
+
+    /// Keymaps written before the rename bind actions by their `wu::` names, so every `anna::`
+    /// action has to stay reachable under the name it used to have.
+    #[gpui::test]
+    async fn test_wu_action_names_still_resolve(cx: &mut gpui::TestAppContext) {
+        init_keymap_test(cx);
+        cx.update(|cx| {
+            let preferred_names = cx.deprecated_actions_to_preferred_actions();
+            let anna_actions = cx
+                .all_action_names()
+                .iter()
+                .filter(|name| name.starts_with("anna::") && !preferred_names.contains_key(**name))
+                .collect::<Vec<_>>();
+            assert!(!anna_actions.is_empty(), "no `anna::` actions are registered");
+            for name in anna_actions {
+                let old_name = name.replacen("anna::", "wu::", 1);
+                assert_eq!(
+                    preferred_names.get(old_name.as_str()),
+                    Some(name),
+                    "`{old_name}` no longer resolves to `{name}`"
+                );
+            }
+
+            let user_keymap = r#"[
+                {
+                    "bindings": {
+                        "ctrl-alt-shift-l": "wu::OpenLog",
+                        "ctrl-alt-shift-u": ["wu::IncreaseUiFontSize", { "persist": false }]
+                    }
+                }
+            ]"#;
+            match KeymapFile::load(user_keymap, cx) {
+                KeymapFileLoadResult::Success { key_bindings } => {
+                    let action_names = key_bindings
+                        .iter()
+                        .map(|binding| binding.action().name())
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        action_names,
+                        vec!["anna::OpenLog", "anna::IncreaseUiFontSize"]
+                    );
+                }
+                other => panic!("a keymap using `wu::` action names failed to load: {other:?}"),
+            }
         });
     }
 

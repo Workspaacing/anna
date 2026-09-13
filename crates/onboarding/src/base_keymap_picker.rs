@@ -12,9 +12,10 @@ use util::ResultExt;
 use workspace::{ModalView, Workspace, ui::HighlightedLabel};
 
 actions!(
-    wu,
+    anna,
     [
         /// Toggles the base keymap selector modal.
+        #[action(deprecated_aliases = ["wu::ToggleBaseKeymapSelector"])]
         ToggleBaseKeymapSelector
     ]
 );

@@ -44,6 +44,7 @@ pub(crate) struct TestWindowState {
     input_handler: Option<PlatformInputHandler>,
     text_input_configurations: Vec<TextInputConfiguration>,
     is_fullscreen: bool,
+    is_maximized: bool,
     appearance: WindowAppearance,
     external_drag_files: Vec<(PathBuf, bool)>,
     start_external_drag_result: bool,
@@ -107,6 +108,7 @@ impl TestWindow {
             input_handler: None,
             text_input_configurations: Vec::new(),
             is_fullscreen: false,
+            is_maximized: false,
             appearance: WindowAppearance::Light,
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
@@ -221,7 +223,7 @@ impl PlatformWindow for TestWindow {
     }
 
     fn is_maximized(&self) -> bool {
-        false
+        self.0.lock().is_maximized
     }
 
     fn content_size(&self) -> Size<Pixels> {
@@ -336,7 +338,11 @@ impl PlatformWindow for TestWindow {
     }
 
     fn zoom(&self) {
-        unimplemented!()
+        // Windows opened with maximized bounds are zoomed while they are created, so a test that
+        // restores or opens a workspace reaches this. Toggling mirrors what zoom does on macOS and
+        // lets a test observe the result through `is_maximized`.
+        let mut lock = self.0.lock();
+        lock.is_maximized = !lock.is_maximized;
     }
 
     fn toggle_fullscreen(&self) {

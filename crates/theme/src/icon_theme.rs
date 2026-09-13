@@ -421,7 +421,11 @@ fn icon_keys_by_association(
 }
 
 /// The name of the default icon theme.
-pub const DEFAULT_ICON_THEME_NAME: &str = "Wu (Default)";
+pub const DEFAULT_ICON_THEME_NAME: &str = "Anna (Default)";
+
+/// Names the default icon theme had in earlier releases. Users' settings may
+/// still name it this way, so they resolve to [`DEFAULT_ICON_THEME_NAME`].
+pub const LEGACY_DEFAULT_ICON_THEME_NAMES: &[&str] = &["Wu (Default)"];
 
 static DEFAULT_ICON_THEME: LazyLock<Arc<IconTheme>> = LazyLock::new(|| {
     Arc::new(IconTheme {

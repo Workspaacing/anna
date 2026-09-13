@@ -179,6 +179,7 @@ impl VsCodeSettings {
             editor: self.editor_settings_content(),
             extension: ExtensionSettingsContent::default(),
             call_hierarchy: None,
+            cowork: None,
             file_finder: None,
             git: self.git_settings_content(),
             git_panel: self.git_panel_settings_content(),

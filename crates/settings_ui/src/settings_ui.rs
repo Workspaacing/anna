@@ -1,4 +1,5 @@
 mod components;
+mod cowork_pages;
 mod page_data;
 
 use anyhow::{Context as _, Result};
@@ -12,7 +13,7 @@ use gpui::{
     WindowHandle, WindowOptions, actions, div, list, point, prelude::*, px, uniform_list,
 };
 
-use language::Buffer;
+use language::{Buffer, KEYBIND_CONTEXT_LANGUAGE_NAME};
 use platform_title_bar::PlatformTitleBar;
 use project::{Project, ProjectPath, Worktree, WorktreeId};
 use release_channel::ReleaseChannel;
@@ -570,6 +571,8 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::IncludeIgnoredContent>(render_dropdown)
         .add_basic_renderer::<settings::ShowIndentGuides>(render_dropdown)
         .add_basic_renderer::<settings::ShellDiscriminants>(render_dropdown)
+        .add_basic_renderer::<settings::AgentShellDiscriminants>(render_dropdown)
+        .add_basic_renderer::<settings::AgentPermission>(render_permission_dropdown)
         .add_basic_renderer::<settings::RelativeLineNumbers>(render_dropdown)
         .add_basic_renderer::<settings::WindowDecorations>(render_dropdown)
         .add_basic_renderer::<settings::FullscreenMode>(render_dropdown)
@@ -783,7 +786,7 @@ fn open_settings_editor_with(
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Wu — Settings".into()),
+                    title: Some("Anna — Settings".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(12.0), px(12.0))),
                 }),
@@ -802,7 +805,13 @@ fn open_settings_editor_with(
                     width: SIDEBAR_WIDTH + CONTENT_MIN_WIDTH,
                     height: px(240.0),
                 }),
-                window_bounds: Some(WindowBounds::centered(scaled_bounds, cx)),
+                // The settings window always opens maximized, and has no title bar of its
+                // own, so there are no minimize/restore/close buttons. `escape` and `ctrl-w` are
+                // bound to `workspace::CloseWindow` in the `SettingsWindow` context, which closes
+                // the active window, so there is still a way out.
+                window_bounds: Some(WindowBounds::Maximized(
+                    WindowBounds::centered(scaled_bounds, cx).get_bounds(),
+                )),
                 ..Default::default()
             },
             |window, cx| {
@@ -1407,7 +1416,7 @@ fn render_settings_item_link(
                 .tooltip(Tooltip::text("Copy Link"))
                 .when_some(json_path, |this, path| {
                     this.on_click(cx.listener(move |this, _, _, cx| {
-                        let link = format!("wu://settings/{}", path);
+                        let link = format!("anna://settings/{}", path);
                         cx.write_to_clipboard(ClipboardItem::new_string(link));
                         this.last_copied_link_path = Some(path);
                         cx.notify();
@@ -1546,7 +1555,7 @@ fn all_language_names(cx: &App) -> Vec<SharedString> {
         .languages
         .language_names()
         .into_iter()
-        .filter(|name| name.as_ref() != "Wu Keybind Context")
+        .filter(|name| name.as_ref() != KEYBIND_CONTEXT_LANGUAGE_NAME)
         .map(Into::into)
         .collect()
 }
@@ -1758,11 +1767,9 @@ impl SettingsWindow {
         })
         .detach();
 
-        let title_bar = if !cfg!(target_os = "macos") {
-            Some(cx.new(|cx| PlatformTitleBar::new("settings-title-bar", cx)))
-        } else {
-            None
-        };
+        // Deliberately no title bar on any platform: the window opens maximized and is closed
+        // with `escape`, so the window controls only took up space.
+        let title_bar: Option<Entity<PlatformTitleBar>> = None;
 
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(0.0)).measure_all();
         list_state.set_scroll_handler(|_, _, _| {});
@@ -4101,8 +4108,21 @@ impl Render for SettingsWindow {
         client_side_decorations(
             v_flex()
                 .text_color(cx.theme().colors().text)
+                // Without this the window surface shows through wherever a child does not paint,
+                // which left a bright strip above the content.
+                .bg(cx.theme().colors().background)
                 .size_full()
                 .children(self.title_bar.clone())
+                // The window has no title bar and opens maximized, so this is the only way to
+                // close it with the mouse. `escape` also works.
+                .child(
+                    h_flex().w_full().justify_end().px_2().pt_2().child(
+                        IconButton::new("settings-close", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Close settings"))
+                            .on_click(|_, window, _| window.remove_window()),
+                    ),
+                )
                 .child(
                     div()
                         .id("settings-window")
@@ -4396,14 +4416,12 @@ impl ProjectSettingsUpdateQueue {
     }
 }
 
-/// Uses `.wu/settings.json`, falling back to an existing `.zed/settings.json`.
+/// Uses `.anna/settings.json`, falling back to an existing legacy settings file (`.wu/` or `.zed/`).
 fn project_settings_file_path(
     worktree_id: WorktreeId,
     project_dir: &RelPath,
     cx: &App,
 ) -> Arc<RelPath> {
-    let settings_path = project_dir.join(paths::local_settings_file_relative_path());
-    let legacy_settings_path = project_dir.join(paths::legacy_local_settings_file_relative_path());
     let worktree = workspace::AppState::global(cx)
         .workspace_store
         .read(cx)
@@ -4416,11 +4434,15 @@ fn project_settings_file_path(
                 .read(cx)
                 .worktree_for_id(worktree_id, cx)
         });
-    paths::resolve_local_config_path(settings_path, legacy_settings_path, |candidate| {
+    let candidates = paths::local_settings_file_relative_paths()
+        .iter()
+        .map(|candidate| project_dir.join(candidate));
+    paths::resolve_local_config_paths(candidates, |candidate| {
         worktree
             .as_ref()
             .is_some_and(|worktree| worktree.read(cx).entry_for_path(candidate).is_some())
     })
+    .unwrap_or_else(|| project_dir.join(paths::local_settings_file_relative_path()))
     .into()
 }
 
@@ -4638,6 +4660,79 @@ where
     })
     .tab_index(0)
     .title_case(should_do_titlecase)
+    .into_any_element()
+}
+
+/// The permission dropdown, which confirms the one choice that cannot be taken back.
+///
+/// Every other level is undone by picking another; `Open` is the one where the cost of being wrong
+/// is paid by something outside this window — a deleted directory, a force-push — before anyone
+/// notices the setting changed. That asymmetry is the whole reason for the interruption, and it is
+/// the same question the button in the chat asks, because the setting is the same setting.
+fn render_permission_dropdown(
+    field: SettingField<settings::AgentPermission>,
+    file: SettingsUiFile,
+    _metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    description: &'static str,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    use settings::AgentPermission;
+
+    let variants = <AgentPermission as strum::VariantArray>::VARIANTS;
+    let labels = <AgentPermission as strum::VariantNames>::VARIANTS;
+    let current_value = get_current_value(&SettingsStore::global(cx), &file, &field)
+        .copied()
+        .unwrap_or_default();
+
+    EnumVariantDropdown::new("dropdown", current_value, variants, labels, {
+        move |value, window, cx| {
+            if value == current_value {
+                return;
+            }
+
+            let file = file.clone();
+            let apply = move |window: &mut Window, cx: &mut App| {
+                update_settings_file(file.clone(), window, cx, move |settings, app| {
+                    (field.write)(settings, Some(value), app);
+                })
+                .log_err();
+            };
+
+            if value != AgentPermission::Open {
+                apply(window, cx);
+                return;
+            }
+
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                "Let the agent run commands without asking?",
+                Some(
+                    "It will be able to run any command in an open project — including ones that \
+                     delete files, push to a remote, or publish — with no further confirmation. \
+                     Nothing in the editor can undo those. Commands that reach outside the \
+                     project will still ask.",
+                ),
+                &["Allow everything", "Cancel"],
+                cx,
+            );
+
+            window
+                .spawn(cx, async move |cx| {
+                    if answer.await.ok() != Some(0) {
+                        return;
+                    }
+                    cx.update(|window, cx| apply(window, cx)).ok();
+                })
+                .detach();
+        }
+    })
+    .aria_label(title)
+    .when(!description.is_empty(), |this| {
+        this.aria_description(description)
+    })
+    .tab_index(0)
     .into_any_element()
 }
 
@@ -6000,5 +6095,77 @@ mod project_settings_update_tests {
             "Buffer should not contain the external modification value: {}",
             text
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every field on every settings page must have a renderer registered for its type.
+    ///
+    /// A missing one is invisible until someone opens that page and finds "NO RENDERER" where a
+    /// control should be — which is how it was found twice. The registry is keyed by `TypeId` and
+    /// populated by hand in `init_renderers`, so adding a settings type and forgetting to register
+    /// it compiles, passes every other test, and ships.
+    #[gpui::test]
+    fn every_settings_field_has_a_renderer(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            // The renderer registry is the only thing under test, but `settings_data` reads real
+            // settings and the app state to decide what to show, so both have to exist first.
+            // `AppState::test` installs the settings store and the base theme on the way.
+            let app_state = workspace::AppState::test(cx);
+            workspace::AppState::set_global(app_state, cx);
+            init_renderers(cx);
+
+            let renderer = cx.default_global::<SettingFieldRenderer>().clone();
+            let registered = renderer.renderers.borrow();
+
+            let mut missing = Vec::new();
+            let mut checked = 0usize;
+
+            let mut check = |field: &dyn AnySettingField, page: &str, title: &str| {
+                checked += 1;
+                if !registered.contains_key(&field.type_id()) {
+                    missing.push(format!("{page} / {title}: {}", field.type_name()));
+                }
+            };
+
+            for page in crate::page_data::settings_data(cx) {
+                for item in page.items.iter() {
+                    match item {
+                        SettingsPageItem::SettingItem(item) => {
+                            check(item.field.as_ref(), page.title, item.title)
+                        }
+                        SettingsPageItem::DynamicItem(item) => {
+                            // The discriminant picks the variant; each variant's own fields are
+                            // rendered underneath it, and both need a renderer.
+                            check(
+                                item.discriminant.field.as_ref(),
+                                page.title,
+                                item.discriminant.title,
+                            );
+                            for variant in item.fields.iter() {
+                                for field in variant.iter() {
+                                    check(field.field.as_ref(), page.title, field.title);
+                                }
+                            }
+                        }
+                        SettingsPageItem::SectionHeader(_)
+                        | SettingsPageItem::SubPageLink(_)
+                        | SettingsPageItem::ActionLink(_) => {}
+                    }
+                }
+            }
+
+            assert!(checked > 0, "no settings fields were found to check");
+            assert!(
+                missing.is_empty(),
+                "{} of {checked} settings fields have no renderer registered in \
+                 `init_renderers`:\n  {}",
+                missing.len(),
+                missing.join("\n  ")
+            );
+        });
     }
 }

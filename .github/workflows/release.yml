@@ -57,13 +57,13 @@ jobs:
         with:
           name: macos-aarch64
           path: |
-            target/aarch64-apple-darwin/release/Wu-aarch64.dmg
-            target/wu-remote-server-macos-aarch64.gz
+            target/aarch64-apple-darwin/release/Anna-aarch64.dmg
+            target/anna-remote-server-macos-aarch64.gz
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: macos-aarch64-dsym
-          path: target/aarch64-apple-darwin/release/Wu.dSYM.zip
+          path: target/aarch64-apple-darwin/release/Anna.dSYM.zip
           if-no-files-found: error
 
   bundle_linux:
@@ -95,8 +95,8 @@ jobs:
         with:
           name: linux-${{ matrix.arch }}
           path: |
-            target/release/wu-linux-${{ matrix.arch }}.tar.gz
-            target/wu-remote-server-linux-${{ matrix.arch }}.gz
+            target/release/anna-linux-${{ matrix.arch }}.tar.gz
+            target/anna-remote-server-linux-${{ matrix.arch }}.gz
           if-no-files-found: error
 
   bundle_windows:
@@ -117,8 +117,8 @@ jobs:
         with:
           name: windows-x86_64
           path: |
-            target/Wu-x86_64.exe
-            target/wu-remote-server-windows-x86_64.gz
+            target/Anna-x86_64.exe
+            target/anna-remote-server-windows-x86_64.gz
           if-no-files-found: error
 
   release:

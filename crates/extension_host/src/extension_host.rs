@@ -303,9 +303,10 @@ pub struct ExtensionIndexLanguageEntry {
 }
 
 actions!(
-    wu,
+    anna,
     [
         /// Reloads all installed extensions.
+        #[action(deprecated_aliases = ["wu::ReloadExtensions"])]
         ReloadExtensions
     ]
 );

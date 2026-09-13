@@ -90,7 +90,10 @@ impl<T: InventoryContents> InventoryFor<T> {
         let has_zed_dir = worktree_dirs
             .map(|dirs| {
                 dirs.keys()
-                    .any(|dir| dir.file_name().is_some_and(|name| name == ".wu" || name == ".zed"))
+                    .any(|dir| {
+                        dir.file_name()
+                            .is_some_and(paths::is_local_settings_folder_name)
+                    })
             })
             .unwrap_or(false);
 
@@ -147,7 +150,7 @@ impl<T> Default for InventoryFor<T> {
 pub enum TaskSourceKind {
     /// bash-like commands spawned by users, not associated with any path
     UserInput,
-    /// Tasks from the worktree's .wu/task.json (or .zed/task.json)
+    /// Tasks from the worktree's .anna/tasks.json (or a legacy .wu/tasks.json or .zed/tasks.json)
     Worktree {
         id: WorktreeId,
         directory_in_worktree: Arc<RelPath>,
@@ -500,7 +503,10 @@ impl Inventory {
             .iter()
             .filter(|(_, dirs)| {
                 dirs.keys()
-                    .any(|dir| dir.file_name().is_some_and(|name| name == ".wu" || name == ".zed"))
+                    .any(|dir| {
+                        dir.file_name()
+                            .is_some_and(paths::is_local_settings_folder_name)
+                    })
             })
             .map(|(id, _)| *id)
             .collect();

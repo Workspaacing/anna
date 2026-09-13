@@ -73,7 +73,7 @@ fn build_application() -> Application {
 }
 
 fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
-    let message = "Wu failed to launch";
+    let message = "Anna failed to launch";
     let error_details = errors
         .into_iter()
         .flat_map(|(kind, paths)| {
@@ -135,7 +135,7 @@ fn fail_to_open_window_async(e: anyhow::Error, cx: &mut AsyncApp) {
 
 fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
     eprintln!(
-        "Wu failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
+        "Anna failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
     );
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
@@ -155,7 +155,7 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
             proxy
                 .add_notification(
                     notification_id,
-                    Notification::new("Wu failed to launch")
+                    Notification::new("Anna failed to launch")
                         .body(Some(
                             format!(
                                 "{e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
@@ -298,6 +298,11 @@ fn main() {
         }
     }
 
+    // Copies what earlier releases stored under the Wu name. Runs before
+    // `init_paths` creates (and caches) the new directories and before the log
+    // file is opened, and after `--user-data-dir` was applied.
+    let legacy_data_migration = paths::migrate_legacy_user_data();
+
     let file_errors = init_paths();
     if !file_errors.is_empty() {
         files_not_created_on_launch(file_errors);
@@ -316,6 +321,7 @@ fn main() {
         };
     }
     ztracing::init();
+    log_legacy_data_migration(legacy_data_migration);
 
     let version = option_env!("ZED_BUILD_ID");
     let app_commit_sha =
@@ -330,7 +336,7 @@ fn main() {
             client::os_info::os_name(),
             client::os_info::os_version(),
         );
-        println!("Wu System Specs (from CLI):\n{}", system_specs);
+        println!("Anna System Specs (from CLI):\n{}", system_specs);
         return;
     }
 
@@ -383,11 +389,11 @@ fn main() {
         }
     };
     if failed_single_instance_check {
-        println!("wu is already running");
+        println!("Anna is already running");
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if !args.paths_or_urls.is_empty() || !args.diff.is_empty() {
             println!(
-                "Could not open {:?} {:?}, use the `wu` CLI to open paths in the running instance",
+                "Could not open {:?} {:?}, use the command-line tool to open paths in the running instance",
                 args.paths_or_urls, args.diff
             );
         }
@@ -483,7 +489,7 @@ fn main() {
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
 
         let user_agent = format!(
-            "Wu/{} ({}; {})",
+            "Anna/{} ({}; {})",
             AppVersion::global(cx),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -659,8 +665,10 @@ fn main() {
         markdown_preview::init(cx);
         tabular_data_preview::init(cx);
         svg_preview::init(cx);
+        cowork::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
+    github::init(cx);
         keymap_editor::init(cx);
         extensions_ui::init(cx);
         inspector_ui::init(app_state.clone(), cx);
@@ -903,7 +911,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                                     .project()
                                     .update(cx, |project, _| project.lsp_store())
                             })?;
-                            let uri = format!("wu://schemas/{}", schema_path);
+                            let uri = format!("anna://schemas/{}", schema_path);
                             let json_schema_content =
                                 json_schema_store::handle_schema_request(lsp_store, uri, cx)
                                     .await?;
@@ -952,8 +960,8 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                 });
             }
             OpenRequestKind::Setting { setting_path } => {
-                // wu://settings/languages/$(language)/tab_size  - DONT SUPPORT
-                // wu://settings/languages/Rust/tab_size  - SUPPORT
+                // anna://settings/languages/$(language)/tab_size  - DONT SUPPORT
+                // anna://settings/languages/Rust/tab_size  - SUPPORT
                 // languages.$(language).tab_size
                 // [ languages $(language) tab_size]
                 cx.spawn(async move |cx| {
@@ -1374,6 +1382,25 @@ pub(crate) async fn restorable_workspace_locations(
     }
 }
 
+fn log_legacy_data_migration(migration: paths::LegacyDataMigration) {
+    let paths::LegacyDataMigration::Ran(reports) = migration else {
+        return;
+    };
+    for report in reports {
+        match &report.outcome {
+            paths::DirectoryMigrationOutcome::Migrated(summary) if summary.errors.is_empty() => {
+                log::info!("{report}");
+            }
+            paths::DirectoryMigrationOutcome::Migrated(_) => log::warn!("{report}"),
+            paths::DirectoryMigrationOutcome::Failed(_) => log::error!("{report}"),
+            // These repeat on every launch.
+            paths::DirectoryMigrationOutcome::NoLegacyDirectory
+            | paths::DirectoryMigrationOutcome::AlreadyMigrated
+            | paths::DirectoryMigrationOutcome::CurrentDirectoryInUse => log::debug!("{report}"),
+        }
+    }
+}
+
 fn init_paths() -> HashMap<io::ErrorKind, Vec<&'static Path>> {
     [
         paths::config_dir(),
@@ -1404,14 +1431,14 @@ fn stdout_is_a_pty() -> bool {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "wu", disable_version_flag = true, max_term_width = 100)]
+#[command(name = "anna", disable_version_flag = true, max_term_width = 100)]
 struct Args {
     /// A sequence of space-separated paths or urls that you want to open.
     ///
     /// Use `path:line:row` syntax to open a file at a specific location.
     /// Non-existing paths and directories will ignore `:line:row` suffix.
     ///
-    /// URLs can either be `file://` or `wu://` scheme, or relative to <https://zed.dev>.
+    /// URLs can either be `file://` or `anna://` scheme, or relative to <https://zed.dev>.
     paths_or_urls: Vec<String>,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
@@ -1537,8 +1564,8 @@ fn parse_url_arg(arg: &str) -> String {
         Ok(path) => format!("file://{}", path.display()),
         Err(_) => {
             if arg.starts_with("file://")
-                || arg.starts_with("wu://")
-                || arg.starts_with("wu-cli://")
+                || arg.starts_with("anna://")
+                || arg.starts_with("anna-cli://")
                 || arg.starts_with("ssh://")
             {
                 arg.into()

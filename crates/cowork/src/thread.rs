@@ -1,0 +1,1510 @@
+use crate::{
+    catalog::{
+        CATALOG_STALE_AFTER, Catalog, CatalogEntry, ModelRef, POPULAR_FILTER_LENGTH,
+        POPULAR_PROVIDERS, Support,
+    },
+    cowork_settings::CoworkSettings,
+    provider::{self, Message, Role},
+};
+use anyhow::{Context as _, Result};
+use db::kvp::KeyValueStore;
+use collections::{HashMap, HashSet};
+use editor::Editor;
+use gpui::Focusable as _;
+use gpui::{
+    App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Task, TaskExt as _,
+    Window,
+};
+use http_client::HttpClient;
+use serde::{Deserialize, Serialize};
+use settings::{Settings as _, SettingsStore};
+use std::{
+    cmp::Reverse,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use util::ResultExt as _;
+
+pub const KVP_NAMESPACE: &str = "cowork";
+const INDEX_KEY: &str = "index";
+const CATALOG_KEY: &str = "catalog";
+const STORED_KEYS_KEY: &str = "providers_with_keys";
+const LAST_MODEL_KEY: &str = "last_model";
+const PREVIEW_LENGTH: usize = 120;
+const TITLE_LENGTH: usize = 48;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ThreadId(Arc<str>);
+
+impl ThreadId {
+    /// Thread ids only have to be unique within one user's local history, and they double as the
+    /// suffix of the key the thread is stored under, so a sortable timestamp plus a counter is
+    /// enough and keeps the keys human-readable when inspecting the database.
+    fn new(sequence: u64) -> Self {
+        Self(format!("{:013}-{sequence}", now_millis()).into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThreadMetadata {
+    pub id: ThreadId,
+    pub title: String,
+    pub model: ModelRef,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub message_count: usize,
+    pub preview: String,
+    /// What the most recent exchange cost, as the provider counted it: input plus output.
+    ///
+    /// The next request carries roughly this much again before the new message is added, so it is
+    /// the honest answer to "how full is the context". Absent until a provider reports one —
+    /// counting locally would mean guessing at a tokenizer we do not have.
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
+    /// The project this conversation was about, identified by its first folder's absolute path.
+    ///
+    /// The index is one list in a database shared by every window, so without this a thread about
+    /// one project shows up in the panel of every other one. Threads written before this field
+    /// existed have `None` and are shown everywhere, which is what they did before: losing sight
+    /// of an old conversation would be worse than showing it in the wrong place.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Whether this thread was started as a fork of another.
+    ///
+    /// Kept as a fact rather than baked into the title once, because the title is re-derived from
+    /// the first prompt on every save — and a fork's first prompt is its source's, so the two would
+    /// otherwise be indistinguishable in the list the moment the fork was saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forked: bool,
+}
+
+impl ThreadMetadata {
+    /// Whether this thread belongs in the panel of a project made of `folders`.
+    ///
+    /// Matched against every folder of the project, not only the one the thread was tagged with.
+    /// A project's folders are a set that grows: adding a second folder must not hide the
+    /// conversations that were had about the first, and which folder counts as "first" is not
+    /// stable across restarts — so comparing against a single path made threads come and go for
+    /// no reason the user could see.
+    pub fn belongs_to(&self, folders: &[String]) -> bool {
+        match &self.project {
+            // Written before threads were scoped; shown everywhere rather than lost.
+            None => true,
+            // A window with no folder open has no project to filter by.
+            Some(_) if folders.is_empty() => true,
+            Some(project) => folders.iter().any(|folder| folder == project),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Thread {
+    pub metadata: ThreadMetadata,
+    pub messages: Vec<Message>,
+    /// What happened in this thread that the messages do not show: failures, questions asked and
+    /// how they were answered, cancellations, rewinds and forks, each with the time it happened.
+    ///
+    /// Kept apart from `messages` rather than as a timestamp on each message. A rewind truncates the
+    /// messages, and the record that the conversation used to be longer — and what went wrong in the
+    /// part that was cut — is exactly what a diagnosis needs; it would be cut along with them. It
+    /// also keeps the wire types untouched: messages are what every provider request is built from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activity: Vec<ActivityEntry>,
+}
+
+/// The most activity entries a thread keeps.
+///
+/// The whole thread is rewritten on every save, so a list that only ever grew would make every save
+/// of a long-lived conversation slower. Diagnosing a session needs the recent past, and at this size
+/// that covers hundreds of turns — an agent on the most permissive level records an automatic
+/// approval for every command it runs.
+pub const MAX_ACTIVITY_ENTRIES: usize = 2000;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    /// Unix seconds.
+    pub at: u64,
+    pub kind: ActivityKind,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    MessageSent,
+    TurnFinished,
+    TurnFailed,
+    TurnCancelled,
+    PermissionRequested,
+    PermissionAllowed,
+    PermissionDenied,
+    Rewound,
+    Forked,
+    AttachmentsRefused,
+    RepeatedCallsStopped,
+}
+
+impl ActivityKind {
+    /// The same name the kind is stored under, so an exported log and the database agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActivityKind::MessageSent => "message_sent",
+            ActivityKind::TurnFinished => "turn_finished",
+            ActivityKind::TurnFailed => "turn_failed",
+            ActivityKind::TurnCancelled => "turn_cancelled",
+            ActivityKind::PermissionRequested => "permission_requested",
+            ActivityKind::PermissionAllowed => "permission_allowed",
+            ActivityKind::PermissionDenied => "permission_denied",
+            ActivityKind::Rewound => "rewound",
+            ActivityKind::Forked => "forked",
+            ActivityKind::AttachmentsRefused => "attachments_refused",
+            ActivityKind::RepeatedCallsStopped => "repeated_calls_stopped",
+        }
+    }
+}
+
+impl Thread {
+    /// Adds to the activity timeline, dropping the oldest entries past [`MAX_ACTIVITY_ENTRIES`].
+    pub fn record(&mut self, kind: ActivityKind, detail: impl Into<String>) {
+        self.record_at(now_seconds(), kind, detail);
+    }
+
+    fn record_at(&mut self, at: u64, kind: ActivityKind, detail: impl Into<String>) {
+        self.activity.push(ActivityEntry {
+            at,
+            kind,
+            detail: detail.into(),
+        });
+        let excess = self.activity.len().saturating_sub(MAX_ACTIVITY_ENTRIES);
+        if excess > 0 {
+            self.activity.drain(..excess);
+        }
+    }
+
+    /// Keeps the summary that the panel lists in sync with the messages the thread view holds.
+    pub fn refresh_metadata(&mut self) {
+        self.metadata.message_count = self.messages.len();
+        self.metadata.updated_at = now_seconds();
+
+        let first_prompt = self
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User)
+            .map(|message| message.text.as_str())
+            .unwrap_or_default();
+
+        if !first_prompt.trim().is_empty() {
+            let title = summarize(first_prompt, TITLE_LENGTH);
+            self.metadata.title = if self.metadata.forked {
+                format!("{title} (fork)")
+            } else {
+                title
+            };
+        }
+
+        self.metadata.preview = self
+            .messages
+            .last()
+            .map(|message| summarize(&message.text, PREVIEW_LENGTH))
+            .unwrap_or_default();
+    }
+}
+
+/// A provider as the settings UI draws it.
+///
+/// Every field is resolved once, when the catalog or the environment is read, and never during
+/// `render`. The catalog carries 213 providers; recomputing display names, joining environment
+/// variable lists and probing the process environment on every frame is what made the old panel
+/// roster stutter.
+#[derive(Clone, Debug)]
+pub struct ProviderRow {
+    pub id: SharedString,
+    pub name: SharedString,
+    /// The environment variables that would connect this provider, already joined for display.
+    pub env_label: SharedString,
+    pub model_count: usize,
+    pub connected: bool,
+    /// The credential came from the OS credential store rather than the environment.
+    pub stored: bool,
+    pub supported: bool,
+    /// One of the first [`POPULAR_FILTER_LENGTH`] curated providers.
+    pub popular: bool,
+}
+
+/// A model of a connected provider, resolved once for the same reason as [`ProviderRow`].
+#[derive(Clone, Debug)]
+pub struct ModelRow {
+    pub model: ModelRef,
+    pub name: SharedString,
+    pub provider_name: SharedString,
+    pub detail: SharedString,
+    /// Whether the model is offered in the model selector.
+    pub enabled: bool,
+}
+
+/// An in-flight "set the API key for this provider" dialog.
+///
+/// The settings window is not a `Workspace`, so it has no modal layer to push onto. The dialog is
+/// therefore drawn by the settings page itself, and its state lives here because the store is the
+/// one thing both the panel and the settings window can reach.
+pub struct PendingApiKey {
+    pub provider_id: SharedString,
+    pub provider_name: SharedString,
+    pub env_label: SharedString,
+    pub mode: ApiKeyMode,
+    pub editor: Entity<Editor>,
+    pub error: Option<SharedString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApiKeyMode {
+    /// No key is stored for this provider yet.
+    Connect,
+    /// A key is stored; the dialog confirms removing it.
+    Disconnect,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CachedCatalog {
+    fetched_at: u64,
+    catalog: Catalog,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatalogState {
+    Idle,
+    Loading,
+    Loaded,
+    Failed(String),
+}
+
+pub enum CoworkStoreEvent {
+    ThreadsChanged,
+    CatalogChanged,
+}
+
+pub struct CoworkStore {
+    threads: Vec<ThreadMetadata>,
+    catalog: Catalog,
+    catalog_state: CatalogState,
+    connected: HashSet<String>,
+    /// API keys the user typed into Cowork, mirrored from the OS credential store. Keys read from
+    /// the environment are never copied here.
+    stored_keys: HashMap<String, String>,
+    disabled_models: HashSet<String>,
+    /// What each connected provider says it actually serves, asked once per session.
+    ///
+    /// Absent means "not asked, or asked and failed", which is treated as no opinion — a provider
+    /// that will not answer must not make its models disappear.
+    live_models: HashMap<String, Arc<HashSet<String>>>,
+    /// What a new thread starts on. Remembered rather than configured — see
+    /// [`CoworkStore::model_for_new_thread`].
+    last_model: Option<ModelRef>,
+    pending_api_key: Option<PendingApiKey>,
+    provider_list: Arc<[ProviderRow]>,
+    model_list: Arc<[ModelRow]>,
+    key_value_store: KeyValueStore,
+    http_client: Arc<dyn HttpClient>,
+    next_sequence: u64,
+    _load: Task<()>,
+    _refresh: Task<()>,
+    _settings: gpui::Subscription,
+}
+
+struct GlobalCoworkStore(Entity<CoworkStore>);
+
+impl Global for GlobalCoworkStore {}
+
+impl EventEmitter<CoworkStoreEvent> for CoworkStore {}
+
+impl CoworkStore {
+    pub fn global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalCoworkStore>()
+            .map(|global| global.0.clone())
+    }
+
+    pub fn set_global(store: Entity<Self>, cx: &mut App) {
+        cx.set_global(GlobalCoworkStore(store));
+    }
+
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let key_value_store = KeyValueStore::global(cx);
+        let http_client = cx.http_client();
+
+        let load = cx.spawn({
+            let key_value_store = key_value_store.clone();
+            async move |this, cx| {
+                let (loaded, last_model) = cx
+                    .background_spawn(async move {
+                        (
+                            read_index(&key_value_store),
+                            read_last_model(&key_value_store),
+                        )
+                    })
+                    .await;
+
+                this.update(cx, |this, cx| {
+                    this.load_stored_keys(cx);
+                    this.threads = loaded;
+                    this.last_model = last_model;
+                    this.next_sequence = this.threads.len() as u64;
+                    cx.emit(CoworkStoreEvent::ThreadsChanged);
+                    cx.notify();
+                })
+                .log_err();
+            }
+        });
+
+        let settings_subscription = cx.observe_global::<SettingsStore>(|this: &mut Self, cx| {
+            this.rebuild_rows(cx);
+            cx.emit(CoworkStoreEvent::CatalogChanged);
+            cx.notify();
+        });
+
+        Self {
+            threads: Vec::new(),
+            catalog: Catalog::default(),
+            catalog_state: CatalogState::Idle,
+            connected: HashSet::default(),
+            stored_keys: HashMap::default(),
+            disabled_models: HashSet::default(),
+            live_models: HashMap::default(),
+            last_model: None,
+            pending_api_key: None,
+            provider_list: Arc::from([]),
+            model_list: Arc::from([]),
+            key_value_store,
+            http_client,
+            next_sequence: 0,
+            _load: load,
+            _refresh: Task::ready(()),
+            _settings: settings_subscription,
+        }
+    }
+
+    pub fn threads(&self) -> &[ThreadMetadata] {
+        &self.threads
+    }
+
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    pub fn catalog_state(&self) -> &CatalogState {
+        &self.catalog_state
+    }
+
+    pub fn catalog_entries(&self) -> Vec<CatalogEntry> {
+        self.catalog
+            .entries(|provider_id| self.connected.contains(provider_id))
+            .into_iter()
+            .filter(|entry| !self.disabled_models.contains(&entry.model_ref.qualified()))
+            .filter(|entry| self.is_live(&entry.model_ref))
+            .collect()
+    }
+
+    /// Whether the provider still serves this model.
+    ///
+    /// The catalog is a community snapshot and drifts: OpenCode Zen lists 102 models where its
+    /// endpoint serves 70. Offering one that answers 401 is worse than not offering it. Where the
+    /// provider has not been asked, or would not answer, everything is offered as before.
+    fn is_live(&self, model: &ModelRef) -> bool {
+        match self.live_models.get(&model.provider_id) {
+            Some(live) => live.contains(&model.model_id),
+            None => true,
+        }
+    }
+
+    /// Asks each connected provider what it serves, once per session.
+    ///
+    /// Best effort throughout: a provider that refuses, or answers something unrecognised, simply
+    /// keeps its catalog listing. Nothing here can fail a user action.
+    fn refresh_live_models(&mut self, cx: &mut Context<Self>) {
+        let pending = self
+            .connected
+            .iter()
+            .filter(|provider_id| !self.live_models.contains_key(*provider_id))
+            .filter_map(|provider_id| {
+                let provider = self.catalog.providers.get(provider_id)?;
+                provider.api_base()?;
+                Some((
+                    provider_id.clone(),
+                    provider.clone(),
+                    self.api_key(provider_id),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        if pending.is_empty() {
+            return;
+        }
+
+        let http_client = self.http_client.clone();
+        cx.spawn(async move |this, cx| {
+            for (provider_id, provider, api_key) in pending {
+                let listed = provider::list_models(
+                    http_client.clone(),
+                    &provider_id,
+                    &provider,
+                    api_key.as_deref(),
+                )
+                .await;
+
+                let live = match listed {
+                    Ok(live) if !live.is_empty() => live,
+                    Ok(_) => continue,
+                    Err(error) => {
+                        log::debug!("cowork: {provider_id} did not list its models: {error:#}");
+                        continue;
+                    }
+                };
+
+                if this
+                    .update(cx, |this, cx| {
+                        this.live_models
+                            .insert(provider_id, Arc::new(live.into_iter().collect()));
+                        this.rebuild_rows(cx);
+                        cx.emit(CoworkStoreEvent::CatalogChanged);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The credential to authenticate a request with. A key typed into Cowork wins over the
+    /// environment, so setting one in the UI takes effect without restarting Anna.
+    pub fn api_key(&self, provider_id: &str) -> Option<String> {
+        if let Some(key) = self.stored_keys.get(provider_id) {
+            return Some(key.clone());
+        }
+        let provider = self.catalog.providers.get(provider_id)?;
+        provider.env_vars().iter().find_map(|name| credential(name))
+    }
+
+    pub fn pending_api_key(&self) -> Option<&PendingApiKey> {
+        self.pending_api_key.as_ref()
+    }
+
+    /// A provider with a stored key opens a confirmation to remove it; anything else opens the
+    /// dialog to add one.
+    pub fn begin_api_key(&mut self, row: &ProviderRow, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = if row.stored {
+            ApiKeyMode::Disconnect
+        } else {
+            ApiKeyMode::Connect
+        };
+
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_masked(true, cx);
+            editor.set_placeholder_text("Paste the API key", window, cx);
+            editor
+        });
+        if mode == ApiKeyMode::Connect {
+            window.focus(&editor.focus_handle(cx), cx);
+        }
+
+        self.pending_api_key = Some(PendingApiKey {
+            provider_id: row.id.clone(),
+            provider_name: row.name.clone(),
+            env_label: row.env_label.clone(),
+            mode,
+            editor,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Forgets the stored key for the provider named by the open dialog.
+    pub fn remove_api_key(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_api_key.as_ref() else {
+            return;
+        };
+        let provider_id = pending.provider_id.to_string();
+        self.stored_keys.remove(&provider_id);
+        cx.delete_credentials(&credential_url(&provider_id)).detach();
+
+        self.pending_api_key = None;
+        self.persist_stored_key_index(cx);
+        self.rebuild_rows(cx);
+        cx.emit(CoworkStoreEvent::CatalogChanged);
+        cx.notify();
+    }
+
+    /// Shows or hides a model in the selector by writing `cowork.disabled_models`.
+    pub fn set_model_enabled(
+        &mut self,
+        model: &ModelRef,
+        enabled: bool,
+        fs: Arc<dyn fs::Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        let qualified = model.qualified();
+        settings::update_settings_file(fs, cx, move |settings, _| {
+            let disabled = settings
+                .cowork
+                .get_or_insert_default()
+                .disabled_models
+                .get_or_insert_default();
+            if enabled {
+                disabled.retain(|entry| entry != &qualified);
+            } else if !disabled.contains(&qualified) {
+                disabled.push(qualified);
+            }
+        });
+    }
+
+    pub fn cancel_api_key(&mut self, cx: &mut Context<Self>) {
+        self.pending_api_key = None;
+        cx.notify();
+    }
+
+    /// Saves the typed key to the OS credential store, or removes it when the field is empty.
+    pub fn submit_api_key(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_api_key.as_ref() else {
+            return;
+        };
+        let provider_id = pending.provider_id.to_string();
+        let key = pending.editor.read(cx).text(cx).trim().to_owned();
+        let url = credential_url(&provider_id);
+
+        if let Some(problem) = implausible_key(&key) {
+            if let Some(pending) = self.pending_api_key.as_mut() {
+                pending.error = Some(problem.into());
+            }
+            cx.notify();
+            return;
+        }
+
+        if key.is_empty() {
+            self.stored_keys.remove(&provider_id);
+            cx.delete_credentials(&url).detach();
+        } else {
+            self.stored_keys.insert(provider_id.clone(), key.clone());
+            let write = cx.write_credentials(&url, &provider_id, key.as_bytes());
+            cx.spawn(async move |this, cx| {
+                if let Err(error) = write.await {
+                    log::warn!("cowork: could not store the API key: {error:#}");
+                    this.update(cx, |this, cx| {
+                        // The key still works for this session; only persistence failed.
+                        if let Some(pending) = this.pending_api_key.as_mut() {
+                            pending.error = Some(format!("{error:#}").into());
+                            cx.notify();
+                        }
+                    })
+                    .log_err();
+                }
+            })
+            .detach();
+        }
+
+        self.pending_api_key = None;
+        self.persist_stored_key_index(cx);
+        self.rebuild_rows(cx);
+        cx.emit(CoworkStoreEvent::CatalogChanged);
+        cx.notify();
+    }
+
+    fn persist_stored_key_index(&self, cx: &mut Context<Self>) {
+        let ids = self.stored_keys.keys().cloned().collect::<Vec<_>>();
+        let key_value_store = self.key_value_store.clone();
+        cx.background_spawn(async move {
+            let raw = serde_json::to_string(&ids)?;
+            key_value_store
+                .scoped(KVP_NAMESPACE)
+                .write(STORED_KEYS_KEY.to_owned(), raw)
+                .await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Reads back the keys typed in previous sessions. Only the providers listed in the index are
+    /// touched, so this is a handful of credential-store reads rather than one per catalog entry.
+    fn load_stored_keys(&mut self, cx: &mut Context<Self>) {
+        let key_value_store = self.key_value_store.clone();
+        cx.spawn(async move |this, cx| {
+            let ids = cx
+                .background_spawn(async move {
+                    key_value_store
+                        .scoped(KVP_NAMESPACE)
+                        .read(STORED_KEYS_KEY)
+                        .ok()
+                        .flatten()
+                        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                        .unwrap_or_default()
+                })
+                .await;
+
+            for id in ids {
+                let read = cx.update(|cx| cx.read_credentials(&credential_url(&id)));
+                let Ok(Some((_, key))) = read.await else {
+                    continue;
+                };
+
+                let Ok(key) = String::from_utf8(key) else {
+                    continue;
+                };
+                if this
+                    .update(cx, |this, _| {
+                        this.stored_keys.insert(id.clone(), key);
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                this.rebuild_rows(cx);
+                cx.emit(CoworkStoreEvent::CatalogChanged);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    pub fn is_connected(&self, provider_id: &str) -> bool {
+        self.connected.contains(provider_id)
+    }
+
+    pub fn connected_count(&self) -> usize {
+        self.connected.len()
+    }
+
+    /// Provider rows ordered connected first, then the curated popular set, then the rest.
+    pub fn provider_list(&self) -> Arc<[ProviderRow]> {
+        self.provider_list.clone()
+    }
+
+    /// Model rows grouped by provider. Only connected providers appear.
+    pub fn model_list(&self) -> Arc<[ModelRow]> {
+        self.model_list.clone()
+    }
+
+    /// Re-reads the environment and rebuilds the cached rows. Cheap enough to call when the
+    /// settings window opens, and never called from `render`.
+    pub fn refresh_connections(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_rows(cx);
+        self.refresh_live_models(cx);
+        cx.emit(CoworkStoreEvent::CatalogChanged);
+        cx.notify();
+    }
+
+    fn rebuild_rows(&mut self, cx: &App) {
+        self.disabled_models = CoworkSettings::get_global(cx)
+            .disabled_models
+            .iter()
+            .cloned()
+            .collect();
+
+        self.connected = self
+            .catalog
+            .providers
+            .iter()
+            .filter(|(id, provider)| {
+                self.stored_keys.contains_key(*id)
+                    || provider
+                        .env_vars()
+                        .iter()
+                        .any(|name| credential_is_present(name))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let popular_rank = |id: &str| POPULAR_PROVIDERS.iter().position(|entry| *entry == id);
+
+        let mut rows = self
+            .catalog
+            .providers
+            .iter()
+            .filter(|(_, provider)| !provider.models.is_empty())
+            .map(|(id, provider)| ProviderRow {
+                id: id.clone().into(),
+                name: provider.display_name(id).into(),
+                env_label: if provider.env_vars().is_empty() {
+                    SharedString::new_static("no key required")
+                } else {
+                    provider.env_vars().join(" or ").into()
+                },
+                model_count: provider.models.len(),
+                connected: self.connected.contains(id),
+                stored: self.stored_keys.contains_key(id),
+                supported: provider.support() == Support::Supported,
+                popular: POPULAR_PROVIDERS
+                    .iter()
+                    .take(POPULAR_FILTER_LENGTH)
+                    .any(|popular| popular == id),
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.name.to_lowercase());
+
+        let (connected, rest): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| row.connected);
+        let (mut popular, other): (Vec<_>, Vec<_>) =
+            rest.into_iter().partition(|row| popular_rank(&row.id).is_some());
+        popular.sort_by_key(|row| popular_rank(&row.id).unwrap_or(usize::MAX));
+
+        let mut list = connected;
+        list.extend(popular);
+        list.extend(other);
+        self.provider_list = Arc::from(list);
+
+        let mut models = Vec::new();
+        let mut provider_names = self
+            .connected
+            .iter()
+            .filter_map(|id| {
+                let provider = self.catalog.providers.get(id)?;
+                (provider.support() == Support::Supported)
+                    .then(|| (id.clone(), provider.display_name(id)))
+            })
+            .collect::<Vec<_>>();
+        provider_names.sort_by_key(|(_, name)| name.to_lowercase());
+
+        for (id, name) in provider_names {
+            let Some(provider) = self.catalog.providers.get(&id) else {
+                continue;
+            };
+            let mut entries = provider
+                .models
+                .iter()
+                .filter(|(_, model)| !model.is_deprecated())
+                .map(|(model_key, model)| ModelRow {
+                    model: ModelRef {
+                        provider_id: id.clone(),
+                        model_id: model_key.clone(),
+                    },
+                    name: model.display_name(model_key).into(),
+                    provider_name: name.clone().into(),
+                    detail: describe_model(model).into(),
+                    enabled: !self
+                        .disabled_models
+                        .contains(&format!("{id}/{model_key}")),
+                })
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                continue;
+            }
+            entries.sort_by_key(|row| row.name.to_lowercase());
+            models.extend(entries);
+        }
+        self.model_list = Arc::from(models);
+    }
+
+    /// The model a new thread starts on: the one used last, falling back to the first on offer.
+    ///
+    /// There is deliberately no setting for this. A configured default is something the user would
+    /// have to keep in step by hand with the providers they have actually connected and the models
+    /// they have hidden, and it names a model that may not exist by the time it is read. The answer
+    /// they want is almost always the model they used last, so that is what is remembered.
+    pub fn model_for_new_thread(&self) -> Option<ModelRef> {
+        // Only offered while it is still reachable: a model whose provider was disconnected, or
+        // which the user has since hidden, would fail every request.
+        if let Some(model) = &self.last_model
+            && self.connected.contains(&model.provider_id)
+            && self.catalog.model(model).is_some()
+            && !self.disabled_models.contains(&model.qualified())
+        {
+            return Some(model.clone());
+        }
+
+        self.catalog_entries()
+            .into_iter()
+            .next()
+            .map(|entry| entry.model_ref)
+    }
+
+    /// Records the model as the one to start the next thread on.
+    pub fn remember_model(&mut self, model: ModelRef, cx: &mut Context<Self>) {
+        if self.last_model.as_ref() == Some(&model) {
+            return;
+        }
+
+        let qualified = model.qualified();
+        self.last_model = Some(model);
+        let key_value_store = self.key_value_store.clone();
+        cx.background_spawn(async move {
+            key_value_store
+                .scoped(KVP_NAMESPACE)
+                .write(LAST_MODEL_KEY.to_owned(), qualified)
+                .await
+        })
+        .detach_and_log_err(cx);
+        cx.notify();
+    }
+
+    pub fn load_catalog(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
+        if self.catalog_state == CatalogState::Loading {
+            return;
+        }
+
+        let url = CoworkSettings::get_global(cx).catalog_url.clone();
+        let key_value_store = self.key_value_store.clone();
+        let http_client = self.http_client.clone();
+
+        self.catalog_state = CatalogState::Loading;
+        cx.emit(CoworkStoreEvent::CatalogChanged);
+        cx.notify();
+
+        self._refresh = cx.spawn(async move |this, cx| {
+            let cached = cx
+                .background_spawn({
+                    let key_value_store = key_value_store.clone();
+                    async move { read_cached_catalog(&key_value_store) }
+                })
+                .await;
+
+            let is_fresh = cached
+                .as_ref()
+                .is_some_and(|cached| age_of(cached.fetched_at) < CATALOG_STALE_AFTER);
+
+            if let Some(cached) = cached.clone() {
+                this.update(cx, |this, cx| {
+                    this.catalog = cached.catalog;
+                    this.catalog_state = CatalogState::Loaded;
+                    this.rebuild_rows(cx);
+                    cx.emit(CoworkStoreEvent::CatalogChanged);
+                    cx.notify();
+                })
+                .log_err();
+
+                if is_fresh && !force_refresh {
+                    return;
+                }
+            }
+
+            let fetched = crate::catalog::fetch(http_client, &url).await;
+
+            match fetched {
+                Ok(catalog) => {
+                    let cache = CachedCatalog {
+                        fetched_at: now_seconds(),
+                        catalog: catalog.clone(),
+                    };
+                    cx.background_spawn(
+                        async move { write_cached_catalog(&key_value_store, &cache).await },
+                    )
+                    .await
+                    .log_err();
+
+                    this.update(cx, |this, cx| {
+                        this.catalog = catalog;
+                        this.catalog_state = CatalogState::Loaded;
+                        this.rebuild_rows(cx);
+                        cx.emit(CoworkStoreEvent::CatalogChanged);
+                        cx.notify();
+                    })
+                    .log_err();
+                }
+                Err(error) => {
+                    log::warn!("cowork: failed to load the models.dev catalog: {error:#}");
+                    this.update(cx, |this, cx| {
+                        // A stale cache is still usable, so a failed refresh must not discard it.
+                        if cached.is_none() {
+                            this.catalog_state = CatalogState::Failed(format!("{error:#}"));
+                        }
+                        cx.emit(CoworkStoreEvent::CatalogChanged);
+                        cx.notify();
+                    })
+                    .log_err();
+                }
+            }
+        });
+    }
+
+    pub fn create_thread(
+        &mut self,
+        model: ModelRef,
+        project: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Thread {
+        let thread = self.blank_thread(model, project);
+
+        // Written to disk here, rather than when the first reply arrives.
+        //
+        // A thread used to reach the database only through `persist`, which runs on send and when
+        // a turn ends. So a session the user created and then left alone — or closed the window on
+        // before a reply landed — had never been written at all, and was simply gone at the next
+        // launch, with nothing to explain where it went. A thread created here is handed its work
+        // at once, so it should outlive the window it was created in.
+        self.save_thread(thread.clone(), cx);
+
+        thread
+    }
+
+    /// A thread that is not stored yet, for a composer the user has not typed into.
+    ///
+    /// Nothing is written and nothing is listed: the view that shows it saves it through `persist`
+    /// when its first message is sent. A "+" pressed by mistake and closed again should leave no
+    /// empty conversation behind in the panel.
+    pub fn draft_thread(&mut self, model: ModelRef, project: Option<String>) -> Thread {
+        self.blank_thread(model, project)
+    }
+
+    /// Starts a new thread from a copy of earlier messages, leaving the source thread as it was.
+    pub fn fork_thread(
+        &mut self,
+        source: &ThreadMetadata,
+        messages: Vec<Message>,
+        cx: &mut Context<Self>,
+    ) -> Thread {
+        let mut thread = self.blank_thread(source.model.clone(), source.project.clone());
+        thread.record(
+            ActivityKind::Forked,
+            format!(
+                "Started as a fork of “{}” (thread {}), carrying its first {} message(s)",
+                source.title,
+                source.id.as_str(),
+                messages.len()
+            ),
+        );
+        thread.messages = messages;
+        thread.metadata.forked = true;
+        // A fork taken at the very first message has no prompt to be titled from yet.
+        thread.metadata.title = format!("{} (fork)", source.title);
+        thread.refresh_metadata();
+
+        self.save_thread(thread.clone(), cx);
+
+        thread
+    }
+
+    fn blank_thread(&mut self, model: ModelRef, project: Option<String>) -> Thread {
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let now = now_seconds();
+        Thread {
+            metadata: ThreadMetadata {
+                id: ThreadId::new(self.next_sequence),
+                title: "New thread".to_owned(),
+                model,
+                created_at: now,
+                updated_at: now,
+                message_count: 0,
+                preview: String::new(),
+                context_tokens: None,
+                project,
+                forked: false,
+            },
+            messages: Vec::new(),
+            activity: Vec::new(),
+        }
+    }
+
+    pub fn load_thread(&self, id: ThreadId, cx: &App) -> Task<Result<Thread>> {
+        let key_value_store = self.key_value_store.clone();
+        cx.background_spawn(async move { read_thread(&key_value_store, &id) })
+    }
+
+    pub fn save_thread(&mut self, thread: Thread, cx: &mut Context<Self>) {
+        let metadata = thread.metadata.clone();
+        match self
+            .threads
+            .iter_mut()
+            .find(|existing| existing.id == metadata.id)
+        {
+            Some(existing) => *existing = metadata,
+            None => self.threads.insert(0, metadata),
+        }
+        self.sort_threads();
+
+        let key_value_store = self.key_value_store.clone();
+        let index = self.threads.clone();
+        cx.background_spawn(async move {
+            write_thread(&key_value_store, &thread).await?;
+            write_index(&key_value_store, &index).await
+        })
+        .detach_and_log_err(cx);
+
+        cx.emit(CoworkStoreEvent::ThreadsChanged);
+        cx.notify();
+    }
+
+    pub fn delete_thread(&mut self, id: ThreadId, cx: &mut Context<Self>) {
+        self.threads.retain(|thread| thread.id != id);
+
+        let key_value_store = self.key_value_store.clone();
+        let index = self.threads.clone();
+        cx.background_spawn(async move {
+            delete_thread(&key_value_store, &id).await?;
+            write_index(&key_value_store, &index).await
+        })
+        .detach_and_log_err(cx);
+
+        cx.emit(CoworkStoreEvent::ThreadsChanged);
+        cx.notify();
+    }
+
+    fn sort_threads(&mut self) {
+        self.threads
+            .sort_by_key(|thread| Reverse(thread.updated_at));
+    }
+}
+
+fn thread_key(id: &ThreadId) -> String {
+    format!("thread/{}", id.as_str())
+}
+
+fn read_last_model(key_value_store: &KeyValueStore) -> Option<ModelRef> {
+    key_value_store
+        .scoped(KVP_NAMESPACE)
+        .read(LAST_MODEL_KEY)
+        .ok()
+        .flatten()
+        .and_then(|raw| ModelRef::parse(&raw))
+}
+
+fn read_index(key_value_store: &KeyValueStore) -> Vec<ThreadMetadata> {
+    let Some(raw) = key_value_store
+        .scoped(KVP_NAMESPACE)
+        .read(INDEX_KEY)
+        .context("reading the cowork thread index")
+        .log_err()
+        .flatten()
+    else {
+        return Vec::new();
+    };
+
+    match serde_json::from_str::<Vec<ThreadMetadata>>(&raw) {
+        Ok(mut threads) => {
+            threads.sort_by_key(|thread| Reverse(thread.updated_at));
+            threads
+        }
+        Err(error) => {
+            log::warn!("cowork: discarding an unreadable thread index: {error:#}");
+            Vec::new()
+        }
+    }
+}
+
+async fn write_index(key_value_store: &KeyValueStore, index: &[ThreadMetadata]) -> Result<()> {
+    let raw = serde_json::to_string(index).context("serializing the cowork thread index")?;
+    key_value_store
+        .scoped(KVP_NAMESPACE)
+        .write(INDEX_KEY.to_owned(), raw)
+        .await
+        .context("writing the cowork thread index")
+}
+
+fn read_thread(key_value_store: &KeyValueStore, id: &ThreadId) -> Result<Thread> {
+    let raw = key_value_store
+        .scoped(KVP_NAMESPACE)
+        .read(&thread_key(id))
+        .context("reading a cowork thread")?
+        .with_context(|| format!("cowork thread {} is no longer stored", id.as_str()))?;
+
+    serde_json::from_str(&raw).context("parsing a cowork thread")
+}
+
+async fn write_thread(key_value_store: &KeyValueStore, thread: &Thread) -> Result<()> {
+    let raw = serde_json::to_string(thread).context("serializing a cowork thread")?;
+    key_value_store
+        .scoped(KVP_NAMESPACE)
+        .write(thread_key(&thread.metadata.id), raw)
+        .await
+        .context("writing a cowork thread")
+}
+
+async fn delete_thread(key_value_store: &KeyValueStore, id: &ThreadId) -> Result<()> {
+    key_value_store
+        .scoped(KVP_NAMESPACE)
+        .delete(thread_key(id))
+        .await
+        .context("deleting a cowork thread")
+}
+
+fn read_cached_catalog(key_value_store: &KeyValueStore) -> Option<CachedCatalog> {
+    let raw = key_value_store
+        .scoped(KVP_NAMESPACE)
+        .read(CATALOG_KEY)
+        .context("reading the cached models.dev catalog")
+        .log_err()
+        .flatten()?;
+
+    serde_json::from_str(&raw)
+        .context("parsing the cached models.dev catalog")
+        .log_err()
+}
+
+async fn write_cached_catalog(
+    key_value_store: &KeyValueStore,
+    cache: &CachedCatalog,
+) -> Result<()> {
+    let raw = serde_json::to_string(cache).context("serializing the models.dev catalog cache")?;
+    key_value_store
+        .scoped(KVP_NAMESPACE)
+        .write(CATALOG_KEY.to_owned(), raw)
+        .await
+        .context("writing the models.dev catalog cache")
+}
+
+/// A one-line summary of a model's capabilities for the settings list.
+fn describe_model(model: &crate::catalog::Model) -> String {
+    let mut parts = Vec::new();
+    if let Some(context) = model.limit.and_then(|limit| limit.context) {
+        parts.push(format!("{}k context", context / 1000));
+    }
+    if model.reasoning {
+        parts.push("reasoning".to_owned());
+    }
+    if model.tool_call {
+        parts.push("tools".to_owned());
+    }
+    parts.join(" · ")
+}
+
+/// Where a provider's key lives in the OS credential store.
+fn credential_url(provider_id: &str) -> String {
+    format!("cowork://{provider_id}")
+}
+
+/// Why a pasted value cannot be an API key, if it cannot.
+///
+/// Deliberately narrow: providers disagree on prefixes and lengths, so the only rules are ones no
+/// key anywhere breaks. What they catch is the common accident — the clipboard held something else,
+/// an error message or a sentence, when the key was pasted — which otherwise surfaces much later as
+/// a provider's 401 that says nothing about the key being the problem.
+fn implausible_key(key: &str) -> Option<&'static str> {
+    if key.chars().any(char::is_whitespace) {
+        Some(
+            "An API key never contains spaces or line breaks. Something else may have been on the \
+             clipboard.",
+        )
+    } else if !key.is_ascii() {
+        Some("An API key is plain ASCII. Something else may have been on the clipboard.")
+    } else {
+        None
+    }
+}
+
+/// Reads a credential from the environment. They are read from the environment variable the
+/// catalog declares for the provider, which is the same contract the AI SDK uses.
+pub fn credential(env_var: &str) -> Option<String> {
+    std::env::var(env_var)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+pub fn credential_is_present(env_var: &str) -> bool {
+    credential(env_var).is_some()
+}
+
+pub fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn age_of(timestamp: u64) -> Duration {
+    Duration::from_secs(now_seconds().saturating_sub(timestamp))
+}
+
+/// Collapses a message down to a single line that fits in the panel's list.
+fn summarize(text: &str, max_length: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_length {
+        return collapsed;
+    }
+
+    let truncated = collapsed
+        .char_indices()
+        .nth(max_length)
+        .map(|(index, _)| &collapsed[..index])
+        .unwrap_or(&collapsed);
+    format!("{}…", truncated.trim_end())
+}
+
+/// A compact "when did this last change" label for the thread list.
+pub fn format_age(timestamp: u64) -> String {
+    let seconds = now_seconds().saturating_sub(timestamp);
+    match seconds {
+        0..=59 => "now".to_owned(),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86399 => format!("{}h", seconds / 3600),
+        86400..=2591999 => format!("{}d", seconds / 86400),
+        _ => format!("{}mo", seconds / 2592000),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread_with(messages: Vec<Message>) -> Thread {
+        Thread {
+            metadata: ThreadMetadata {
+                id: ThreadId("test".into()),
+                title: "New thread".to_owned(),
+                model: ModelRef {
+                    provider_id: "anthropic".to_owned(),
+                    model_id: "claude-sonnet-4-5".to_owned(),
+                },
+                created_at: 0,
+                updated_at: 0,
+                message_count: 0,
+                preview: String::new(),
+                context_tokens: None,
+                project: None,
+                forked: false,
+            },
+            messages,
+            activity: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_thread_stored_before_the_activity_timeline_existed_still_loads() {
+        // The shape an earlier build wrote: no `activity`, and messages with no field beyond the
+        // ones they always had. Failing to parse it would lose the conversation outright.
+        let stored = r#"{
+            "metadata": {
+                "id": "0001726000000000-1",
+                "title": "Fix the parser",
+                "model": { "provider_id": "anthropic", "model_id": "claude-sonnet-4-5" },
+                "created_at": 1726000000,
+                "updated_at": 1726000100,
+                "message_count": 2,
+                "preview": "Done."
+            },
+            "messages": [
+                { "role": "user", "text": "Fix the parser" },
+                { "role": "assistant", "text": "Done." }
+            ]
+        }"#;
+
+        let thread: Thread = serde_json::from_str(stored).expect("an old thread still parses");
+
+        assert_eq!(thread.messages.len(), 2);
+        assert!(thread.activity.is_empty());
+    }
+
+    #[test]
+    fn an_empty_timeline_is_not_written_at_all() {
+        // Otherwise every thread saved from now on grows an `"activity": []` for nothing.
+        let raw = serde_json::to_string(&thread_with(Vec::new())).expect("a thread serializes");
+        assert!(!raw.contains("activity"), "got: {raw}");
+    }
+
+    #[test]
+    fn the_activity_timeline_keeps_only_the_most_recent_entries() {
+        let mut thread = thread_with(Vec::new());
+        for at in 0..(MAX_ACTIVITY_ENTRIES as u64 + 10) {
+            thread.record_at(at, ActivityKind::PermissionAllowed, format!("entry {at}"));
+        }
+
+        assert_eq!(thread.activity.len(), MAX_ACTIVITY_ENTRIES);
+        assert_eq!(
+            thread.activity.first().map(|entry| entry.at),
+            Some(10),
+            "the oldest entries are the ones dropped"
+        );
+        assert_eq!(
+            thread.activity.last().map(|entry| entry.at),
+            Some(MAX_ACTIVITY_ENTRIES as u64 + 9)
+        );
+    }
+
+    #[test]
+    fn an_activity_kind_is_named_the_way_it_is_stored() {
+        for kind in [
+            ActivityKind::MessageSent,
+            ActivityKind::TurnFinished,
+            ActivityKind::TurnFailed,
+            ActivityKind::TurnCancelled,
+            ActivityKind::PermissionRequested,
+            ActivityKind::PermissionAllowed,
+            ActivityKind::PermissionDenied,
+            ActivityKind::Rewound,
+            ActivityKind::Forked,
+            ActivityKind::AttachmentsRefused,
+            ActivityKind::RepeatedCallsStopped,
+        ] {
+            let stored = serde_json::to_string(&kind).expect("a kind serializes");
+            assert_eq!(stored, format!("\"{}\"", kind.as_str()));
+        }
+    }
+
+    #[test]
+    fn a_fork_still_says_so_after_it_is_saved() {
+        let mut thread = thread_with(vec![Message::user("Fix the parser")]);
+        thread.metadata.forked = true;
+        thread.refresh_metadata();
+        assert_eq!(thread.metadata.title, "Fix the parser (fork)");
+    }
+
+    #[test]
+    fn a_pasted_sentence_is_not_taken_for_an_api_key() {
+        // The value that was actually saved once: error text copied a moment before the key dialog.
+        assert!(implausible_key("openrouter has no API key. Add one from Settings").is_some());
+        assert!(implausible_key("sk-or-v1-abc\u{2192}").is_some());
+        assert!(implausible_key("sk-or-v1-0123456789abcdef").is_none());
+        assert!(implausible_key("AIzaSyD-0123456789_abcdef").is_none());
+    }
+
+    fn scoped_to(project: Option<&str>) -> ThreadMetadata {
+        let mut metadata = thread_with(Vec::new()).metadata;
+        metadata.project = project.map(str::to_owned);
+        metadata
+    }
+
+    fn folders(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| (*path).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_thread_is_listed_only_in_the_project_it_was_about() {
+        let here = scoped_to(Some("/home/a/project"));
+
+        assert!(here.belongs_to(&folders(&["/home/a/project"])));
+        assert!(
+            !here.belongs_to(&folders(&["/home/a/other"])),
+            "the index is shared by every window, so this is the whole point"
+        );
+    }
+
+    #[test]
+    fn adding_a_second_folder_does_not_hide_the_first_folder_s_threads() {
+        // The bug this is here for: the panel used to match on whichever folder came first, so
+        // adding one — or opening the project after the order had changed — made a conversation
+        // vanish from the list while it was still sitting in the database.
+        let here = scoped_to(Some("/home/a/project"));
+
+        assert!(here.belongs_to(&folders(&["/home/a/project", "/home/a/library"])));
+        assert!(
+            here.belongs_to(&folders(&["/home/a/library", "/home/a/project"])),
+            "the order folders happen to be in must not decide what is listed"
+        );
+    }
+
+    #[test]
+    fn a_thread_written_before_scoping_existed_is_still_shown() {
+        // Losing sight of an old conversation is worse than showing it in the wrong place.
+        let legacy = scoped_to(None);
+
+        assert!(legacy.belongs_to(&folders(&["/home/a/project"])));
+        assert!(legacy.belongs_to(&[]));
+    }
+
+    #[test]
+    fn a_window_with_no_folder_open_hides_nothing() {
+        let scoped = scoped_to(Some("/home/a/project"));
+
+        assert!(scoped.belongs_to(&[]), "there is nothing to filter by");
+    }
+
+    #[test]
+    fn metadata_titles_a_thread_from_its_first_prompt() {
+        let mut thread = thread_with(vec![
+            Message::user("  Explain   the  borrow checker\n"),
+            Message::assistant("It tracks lifetimes."),
+        ]);
+
+        thread.refresh_metadata();
+
+        assert_eq!(thread.metadata.title, "Explain the borrow checker");
+        assert_eq!(thread.metadata.preview, "It tracks lifetimes.");
+        assert_eq!(thread.metadata.message_count, 2);
+    }
+
+    #[test]
+    fn metadata_keeps_the_placeholder_title_until_a_prompt_arrives() {
+        let mut thread = thread_with(Vec::new());
+
+        thread.refresh_metadata();
+
+        assert_eq!(thread.metadata.title, "New thread");
+        assert_eq!(thread.metadata.preview, "");
+    }
+
+    #[test]
+    fn summaries_are_truncated_on_character_boundaries() {
+        let summary = summarize("ação ação ação ação ação ação", 10);
+
+        assert!(summary.ends_with('…'), "got: {summary}");
+        assert!(summary.chars().count() <= 11, "got: {summary}");
+    }
+
+    #[test]
+    fn ages_read_as_compact_units() {
+        let now = now_seconds();
+
+        assert_eq!(format_age(now), "now");
+        assert_eq!(format_age(now.saturating_sub(120)), "2m");
+        assert_eq!(format_age(now.saturating_sub(7200)), "2h");
+        assert_eq!(format_age(now.saturating_sub(172800)), "2d");
+    }
+
+    #[test]
+    fn thread_ids_are_unique_per_sequence() {
+        assert_ne!(ThreadId::new(1), ThreadId::new(2));
+    }
+
+    #[gpui::test]
+    async fn a_draft_is_stored_only_once_its_first_message_is_saved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let store = cx.new(CoworkStore::new);
+        cx.executor().run_until_parked();
+        let key_value_store = store.read_with(cx, |store, _| store.key_value_store.clone());
+        let model = thread_with(Vec::new()).metadata.model;
+
+        let mut draft = store.update(cx, |store, _| {
+            store.draft_thread(model, Some("/project".to_owned()))
+        });
+        cx.executor().run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert!(
+                store
+                    .threads()
+                    .iter()
+                    .all(|thread| thread.id != draft.metadata.id),
+                "a draft is not listed in the panel"
+            );
+        });
+        assert!(
+            read_thread(&key_value_store, &draft.metadata.id).is_err(),
+            "nothing is written for a draft"
+        );
+
+        // What the view's `persist` hands the store when the first message is sent.
+        draft.messages.push(Message::user("Fix the parser"));
+        draft.refresh_metadata();
+        store.update(cx, |store, cx| store.save_thread(draft.clone(), cx));
+        cx.executor().run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert!(
+                store
+                    .threads()
+                    .iter()
+                    .any(|thread| thread.id == draft.metadata.id),
+                "a sent thread is listed"
+            );
+        });
+        let stored = read_thread(&key_value_store, &draft.metadata.id)
+            .expect("a thread is written once its first message is sent");
+        assert_eq!(stored.metadata.title, "Fix the parser");
+        assert_eq!(stored.messages.len(), 1);
+    }
+}

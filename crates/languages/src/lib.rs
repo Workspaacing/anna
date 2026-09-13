@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod bash;
+mod biome;
 mod c;
 mod cpp;
 mod css;
@@ -62,6 +63,7 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
     let bash_lsp_adapter = Arc::new(bash::BashLspAdapter::new(node.clone()));
     let c_lsp_adapter = Arc::new(c::CLspAdapter);
     let css_lsp_adapter = Arc::new(css::CssLspAdapter::new(node.clone()));
+    let biome_adapter = Arc::new(biome::BiomeLspAdapter::new(node.clone()));
     let eslint_adapter = Arc::new(eslint::EsLintLspAdapter::new(node.clone(), fs.clone()));
     let go_context_provider = Arc::new(go::GoContextProvider);
     let go_lsp_adapter = Arc::new(go::GoLspAdapter);
@@ -294,6 +296,29 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
         languages.register_lsp_adapter(language.into(), eslint_adapter.clone());
     }
 
+    // Biome covers JSON and CSS as well as the JavaScript family, which is most of where it wins
+    // over the other two. Names that only exist when an extension supplies them are harmless here:
+    // registering an adapter for a language nobody has installed does nothing.
+    // HTML and XML are left out on purpose: Biome touches HTML only behind an explicit opt-in in
+    // `biome.json` and does not handle XML at all, so attaching the server to those files would
+    // start a process that has nothing to say.
+    let biome_languages = [
+        "TSX",
+        "JSX",
+        "TypeScript",
+        "JavaScript",
+        "JSON",
+        "JSONC",
+        "CSS",
+        "GraphQL",
+        "Vue.js",
+        "Svelte",
+        "Astro",
+    ];
+    for language in biome_languages {
+        languages.register_lsp_adapter(language.into(), biome_adapter.clone());
+    }
+
     let mut subscription = languages.subscribe();
     let mut prev_language_settings = languages.language_settings();
 
@@ -394,4 +419,35 @@ pub fn language(name: &str, grammar: tree_sitter::Language) -> Arc<Language> {
 fn load_config(name: &str) -> LanguageConfig {
     let grammars_loaded = cfg!(any(feature = "load-grammars", test));
     grammars::load_config_for_feature(name, grammars_loaded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn test_keybind_context_language_resolves_by_shared_name(cx: &mut TestAppContext) {
+        let languages = Arc::new(LanguageRegistry::new(cx.executor()));
+        languages.register_native_grammars([("rust", tree_sitter_rust::LANGUAGE)]);
+        cx.update(|cx| {
+            register_language(
+                &languages,
+                "zed-keybind-context",
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                cx,
+            );
+        });
+
+        let language = languages
+            .language_for_name(KEYBIND_CONTEXT_LANGUAGE_NAME)
+            .await
+            .expect("the keymap editor's lookup name should resolve to the registered language");
+        assert_eq!(language.name().as_ref(), KEYBIND_CONTEXT_LANGUAGE_NAME);
+        assert!(language.grammar().is_some());
+    }
 }

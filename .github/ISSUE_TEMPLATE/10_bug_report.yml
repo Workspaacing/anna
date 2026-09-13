@@ -1,22 +1,20 @@
 name: Report a bug
-description: Report a problem with Zed.
+description: Report a problem with Anna.
 type: Bug
 labels: "state:needs triage"
 body:
   - type: markdown
     attributes:
       value: |
-        Is this bug already reported? Upvote to get it noticed faster. [Here’s the search](https://github.com/zed-industries/zed/issues). Upvote means giving it a :+1: reaction.
+        Is this bug already reported? Upvote to get it noticed faster. [Here’s the search](https://github.com/Workspaacing/anna/issues). Upvote means giving it a :+1: reaction.
 
-        Feature request? Please open in [discussions](https://github.com/zed-industries/zed/discussions/new/choose) instead.
-
-        Just have a question or need support? Welcome to [Discord Support Forums](https://discord.com/invite/zedindustries).
+        Feature request, or just have a question? Please open a [discussion](https://github.com/Workspaacing/anna/discussions/new/choose) instead.
   - type: textarea
     attributes:
       label: Reproduction steps
-      description: A step-by-step description of how to reproduce the bug from a **clean Zed install**. The more context you provide, the easier it is to find and fix the problem fast.
+      description: A step-by-step description of how to reproduce the bug from a **clean Anna install**. The more context you provide, the easier it is to find and fix the problem fast.
       placeholder: |
-        1. Start Zed
+        1. Start Anna
         2. Click X
     validations:
       required: true
@@ -33,11 +31,11 @@ body:
   - type: textarea
     id: environment
     attributes:
-      label: Zed version and system specs
+      label: Anna version and system specs
       description: |
-        Open the command palette in Zed, then type “zed: copy system specs into clipboard”.
+        Open the command palette in Anna, then type “anna: copy system specs into clipboard”.
       placeholder: |
-        Zed: v0.215.0 (Zed Nightly bfe141ea79aa4984028934067ba75c48d99136ae)
+        Anna: v1.0.0 (stable 71758a3f0c2d4e6b8a9c1d3e5f7a9b0c2d4e6f8a)
         OS: macOS 15.1
         Memory: 36 GiB
         Architecture: aarch64
@@ -45,13 +43,13 @@ body:
       required: true
   - type: textarea
     attributes:
-      label: Attach Zed log file
+      label: Attach Anna log file
       description: |
-        Open the command palette in Zed, then type `zed: open log` to see the last 1000 lines. Or type `zed: reveal log in file manager` in the command palette to reveal the log file itself.
+        Open the command palette in Anna, then type `anna: open log` to see the last 1000 lines. Or type `anna: reveal log in file manager` in the command palette to reveal the log file itself.
 
         ⚠️ **Please review your log file for secrets (API keys, tokens, etc.) and partially or fully redact them before posting.**
       value: |
-        <details><summary>Zed.log</summary>
+        <details><summary>Anna.log</summary>
 
         <!-- Paste your log inside the code block. -->
         ```log
@@ -63,9 +61,9 @@ body:
       required: false
   - type: textarea
     attributes:
-      label: Relevant Zed settings
+      label: Relevant Anna settings
       description: |
-        Open the command palette in Zed, then type “zed: open settings file” and copy/paste any relevant (e.g., LSP-specific) settings.
+        Open the command palette in Anna, then type “anna: open settings file” and copy/paste any relevant (e.g., LSP-specific) settings.
 
         ⚠️ **Please review your settings file for secrets (API keys, tokens, etc.) and partially or fully redact them before posting.**
       value: |
@@ -83,7 +81,7 @@ body:
     attributes:
       label: Relevant Keymap
       description: |
-        Open the command palette in Zed, then type “zed: open keymap file” and copy/paste the file’s contents.
+        Open the command palette in Anna, then type “anna: open keymap file” and copy/paste the file’s contents.
       value: |
         <details><summary>keymap.json</summary>
 
@@ -99,10 +97,9 @@ body:
     attributes:
       label: (for AI issues) Model provider details
       placeholder: |
-        - Provider: (Anthropic via ZedPro, Anthropic via API key, Copilot Chat, Mistral, OpenAI, etc.)
+        - Provider: (Anthropic, OpenAI, Google, Mistral, etc.)
         - Model Name: (Claude Sonnet 4.5, Gemini 3.1 Pro, GPT-5)
-        - Mode: (Agent Panel, Inline Assistant, or Terminal Assistant)
-        - Other details (ACPs, MCPs, other settings, etc.):
+        - Other details (the tool the agent was using, relevant `cowork` settings, etc.):
     validations:
       required: false
   - type: dropdown

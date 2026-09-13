@@ -1,11 +1,11 @@
 [package]
-description = "The fast, native VSCode alternative."
+description = "The AI engineering workspace."
 edition.workspace = true
 name = "wu"
-version = "1.0.6"
+version = "1.0.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
-default-run = "wu"
+default-run = "anna"
 
 [lints]
 workspace = true
@@ -17,7 +17,7 @@ inspector = [
     "ui/derive_inspector_reflection",
 ]
 tracy = ["ztracing/tracy"]
-# LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
+# LEAK_BACKTRACE=1 cargo run --features wu/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
 test-support = [
     "gpui/test-support",
@@ -48,7 +48,7 @@ visual-tests = [
 ]
 
 [[bin]]
-name = "wu"
+name = "anna"
 path = "src/main.rs"
 
 [[bin]]
@@ -126,6 +126,8 @@ line_ending_selector.workspace = true
 log.workspace = true
 lsp_locations.workspace = true
 markdown.workspace = true
+cowork.workspace = true
+github.workspace = true
 markdown_preview.workspace = true
 menu.workspace = true
 mimalloc = { version = "0.1", optional = true }
@@ -229,19 +231,19 @@ search = { workspace = true, features = ["test-support"] }
 
 [package.metadata.bundle-dev]
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
-identifier = "me.farshed.Wu-Dev"
-name = "Wu Dev"
+identifier = "com.workspaacing.Anna-Dev"
+name = "Anna Dev"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["wu"]
+osx_url_schemes = ["anna"]
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-identifier = "me.farshed.Wu"
-name = "Wu"
+identifier = "com.workspaacing.Anna"
+name = "Anna"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["wu"]
+osx_url_schemes = ["anna"]
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

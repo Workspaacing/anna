@@ -9,7 +9,8 @@ use thiserror::Error;
 
 use crate::{
     Appearance, AppearanceContent, ChevronIcons, DEFAULT_ICON_THEME_NAME, DirectoryIcons,
-    IconDefinition, IconTheme, IconThemeFamilyContent, Theme, ThemeFamily, default_icon_theme,
+    IconDefinition, IconTheme, IconThemeFamilyContent, LEGACY_DEFAULT_ICON_THEME_NAMES, Theme,
+    ThemeFamily, default_icon_theme,
 };
 
 /// The metadata for a theme.
@@ -226,11 +227,21 @@ impl ThemeRegistry {
     }
 
     /// Returns the icon theme with the specified name.
+    ///
+    /// A name the default icon theme had in an earlier release resolves to the
+    /// default icon theme, unless an icon theme is registered under that name.
     pub fn get_icon_theme(&self, name: &str) -> Result<Arc<IconTheme>, IconThemeNotFoundError> {
-        self.state
-            .read()
+        let state = self.state.read();
+        state
             .icon_themes
             .get(name)
+            .or_else(|| {
+                if LEGACY_DEFAULT_ICON_THEME_NAMES.contains(&name) {
+                    state.icon_themes.get(DEFAULT_ICON_THEME_NAME)
+                } else {
+                    None
+                }
+            })
             .ok_or_else(|| IconThemeNotFoundError(name.to_string().into()))
             .cloned()
     }

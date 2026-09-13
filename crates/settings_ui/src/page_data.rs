@@ -59,6 +59,7 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         search_and_files_page(),
         window_and_layout_page(),
         panels_page(),
+        cowork_page(),
         debugger_page(),
         terminal_page(),
         version_control_page(),
@@ -73,7 +74,7 @@ fn developer_page() -> SettingsPage {
     items.push(SettingsPageItem::SectionHeader("Instrumentation"));
     items.push(SettingsPageItem::SettingItem(SettingItem {
         title: "Performance Profiler",
-        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `wu: open performance profiler`. May lead to increased memory usage.",
+        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `anna: open performance profiler`. May lead to increased memory usage.",
         field: Box::new(SettingField {
             json_path: Some("instrumentation.performance_profiler.enabled"),
             pick: |settings_content| {
@@ -108,7 +109,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("General Settings"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Accessible Mode",
-                description: "Optimize Wu's interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.",
+                description: "Optimize Anna's interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.",
                 field: Box::new(SettingField {
                     json_path: Some("accessible_mode"),
                     pick: |settings_content| settings_content.workspace.accessible_mode.as_ref(),
@@ -213,7 +214,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "CLI Default Open Behavior",
-                description: "How `zed <path>` opens directories when no flag is specified.",
+                description: "How `anna <path>` opens directories when no flag is specified.",
                 field: Box::new(SettingField {
                     json_path: Some("cli_default_open_behavior"),
                     pick: |settings_content| {
@@ -257,7 +258,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("Security"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Trust All Projects By Default",
-                description: "When opening Wu, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
+                description: "When opening Anna, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
                 field: Box::new(SettingField {
                     json_path: Some("session.trust_all_projects"),
                     pick: |settings_content| {
@@ -305,7 +306,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Restore On Startup",
-                description: "What to restore from the previous session when opening Wu.",
+                description: "What to restore from the previous session when opening Anna.",
                 field: Box::new(SettingField {
                     json_path: Some("restore_on_startup"),
                     pick: |settings_content| settings_content.workspace.restore_on_startup.as_ref(),
@@ -554,7 +555,7 @@ fn appearance_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Icon Theme",
-                    description: "The custom set of icons Wu will associate with files and directories.",
+                    description: "The custom set of icons Anna will associate with files and directories.",
                     field: Box::new(SettingField {
                             json_path: Some("icon_theme$"),
                         pick: |settings_content| {
@@ -3118,7 +3119,7 @@ fn search_and_files_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("File Scan"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Exclusions",
-                description: "Files or globs of files that will be excluded by Wu entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
+                description: "Files or globs of files that will be excluded by Anna entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
                 field: Box::new(
                     SettingField {
                         json_path: Some("file_scan_exclusions"),
@@ -3140,7 +3141,7 @@ fn search_and_files_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Inclusions",
-                description: "Files or globs of files that will be included by Wu, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Wu's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
+                description: "Files or globs of files that will be included by Anna, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Anna's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
                 field: Box::new(
                     SettingField {
                         json_path: Some("file_scan_inclusions"),
@@ -4179,7 +4180,7 @@ fn window_and_layout_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Window Decorations",
-                description: "(Linux only) whether Wu or your compositor should draw window decorations.",
+                description: "(Linux only) whether Anna or your compositor should draw window decorations.",
                 field: Box::new(SettingField {
                     json_path: Some("window_decorations"),
                     pick: |settings_content| settings_content.workspace.window_decorations.as_ref(),
@@ -5570,6 +5571,380 @@ fn panels_page() -> SettingsPage {
     }
 }
 
+fn cowork_page() -> SettingsPage {
+    fn threads_section() -> [SettingsPageItem; 2] {
+        [
+            SettingsPageItem::SectionHeader("Threads"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Model Catalog URL",
+                description: "The models.dev catalog Anna reads its providers and models from. Cached locally and refreshed once a day.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.catalog_url"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.catalog_url.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().catalog_url = value;
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    placeholder: Some("https://models.dev/api.json"),
+                    should_do_titlecase: Some(false),
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
+        ]
+    }
+
+    fn panel_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Panel"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Anna Panel Button",
+                description: "Show the Anna panel button in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.button"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.button.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Anna Panel Dock",
+                description: "Where to dock the Anna panel.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.dock"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.dock.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().dock = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Anna Panel Default Width",
+                description: "Default width of the Anna panel in pixels.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.default_width"),
+                    pick: |settings_content| {
+                        settings_content.cowork.as_ref()?.default_width.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().default_width = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn agent_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Agent"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Ask Before Running Commands",
+                description: "How often the agent stops to ask. \"Ask\" questions every command, including ones that only read. \"Standard\" lets reading commands — `ls`, `git status`, `cargo check` — run, and asks before anything that changes something. \"Trusted\" asks only before what cannot be undone: deleting, pushing, publishing. \"Open\" never asks. A command that reaches outside this project asks at every level, including Open. Reading and writing files never asks: those changes land in the editor's own buffers, undo history and git gutter.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.permission"),
+                    pick: |settings_content| settings_content.cowork.as_ref()?.permission.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.cowork.get_or_insert_default().permission = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::DynamicItem(DynamicItem {
+                discriminant: SettingItem {
+                    files: USER,
+                    title: "Shell",
+                    description: "The shell the agent runs commands in. \"Terminal\" follows the shell configured under Terminal, so a command the agent runs behaves like one you would type yourself. Pick another only to give the agent a different shell from your own.",
+                    field: Box::new(SettingField {
+                        json_path: Some("cowork.shell$"),
+                        pick: |settings_content| {
+                            Some(
+                                &dynamic_variants::<settings::AgentShell>()[settings_content
+                                    .cowork
+                                    .as_ref()?
+                                    .shell
+                                    .as_ref()?
+                                    .discriminant()
+                                    as usize],
+                            )
+                        },
+                        write: |settings_content, value, _| {
+                            let Some(value) = value else {
+                                if let Some(cowork) = settings_content.cowork.as_mut() {
+                                    cowork.shell = None;
+                                }
+                                return;
+                            };
+                            let settings_value = settings_content
+                                .cowork
+                                .get_or_insert_default()
+                                .shell
+                                .get_or_insert_with(settings::AgentShell::default);
+                            let default_shell = if cfg!(target_os = "windows") {
+                                "powershell.exe"
+                            } else {
+                                "sh"
+                            };
+                            // Switching between the two that name a program keeps the name, so
+                            // adding arguments does not make the user type it again.
+                            *settings_value = match value {
+                                settings::AgentShellDiscriminants::Terminal => {
+                                    settings::AgentShell::Terminal
+                                }
+                                settings::AgentShellDiscriminants::System => {
+                                    settings::AgentShell::System
+                                }
+                                settings::AgentShellDiscriminants::Program => {
+                                    let program = match settings_value {
+                                        settings::AgentShell::Program(program) => program.clone(),
+                                        settings::AgentShell::WithArguments { program, .. } => {
+                                            program.clone()
+                                        }
+                                        _ => String::from(default_shell),
+                                    };
+                                    settings::AgentShell::Program(program)
+                                }
+                                settings::AgentShellDiscriminants::WithArguments => {
+                                    let (program, args) = match settings_value {
+                                        settings::AgentShell::Program(program) => {
+                                            (program.clone(), vec![])
+                                        }
+                                        settings::AgentShell::WithArguments { program, args } => {
+                                            (program.clone(), args.clone())
+                                        }
+                                        _ => (String::from(default_shell), vec![]),
+                                    };
+                                    settings::AgentShell::WithArguments { program, args }
+                                }
+                            };
+                        },
+                    }),
+                    metadata: None,
+                },
+                pick_discriminant: |settings_content| {
+                    Some(
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .shell
+                            .as_ref()?
+                            .discriminant() as usize,
+                    )
+                },
+                fields: dynamic_variants::<settings::AgentShell>()
+                    .into_iter()
+                    .map(|variant| match variant {
+                        settings::AgentShellDiscriminants::Terminal
+                        | settings::AgentShellDiscriminants::System => vec![],
+                        settings::AgentShellDiscriminants::Program
+                        | settings::AgentShellDiscriminants::WithArguments => vec![SettingItem {
+                            files: USER,
+                            title: "Program",
+                            description: "The shell program to run. Arguments, if any, are set in settings.json.",
+                            field: Box::new(SettingField {
+                                json_path: Some("cowork.shell"),
+                                pick: |settings_content| {
+                                    match settings_content.cowork.as_ref()?.shell.as_ref()? {
+                                        settings::AgentShell::Program(program) => Some(program),
+                                        settings::AgentShell::WithArguments { program, .. } => {
+                                            Some(program)
+                                        }
+                                        _ => None,
+                                    }
+                                },
+                                write: |settings_content, value, _| {
+                                    let Some(value) = value else {
+                                        return;
+                                    };
+                                    match settings_content
+                                        .cowork
+                                        .get_or_insert_default()
+                                        .shell
+                                        .as_mut()
+                                    {
+                                        Some(settings::AgentShell::Program(program)) => {
+                                            *program = value
+                                        }
+                                        Some(settings::AgentShell::WithArguments {
+                                            program, ..
+                                        }) => *program = value,
+                                        _ => return,
+                                    }
+                                },
+                            }),
+                            metadata: None,
+                        }],
+                    })
+                    .collect(),
+            }),
+        ]
+    }
+
+    fn verification_section() -> [SettingsPageItem; 5] {
+        [
+            SettingsPageItem::SectionHeader("Verification"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Format The Agent's Edits",
+                description: "Before saving a file the agent changed, run the project's own formatter over it — the same chain your edits go through on save. Which tool that is comes from the `formatter` setting for the language: Biome, ESLint's fix-all action, Prettier, or the language server. Biome and ESLint run as language servers Anna installs itself, and Prettier is built in, so all three obey the project's own config.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.verification.format"),
+                    pick: |settings_content| {
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .verification
+                            .as_ref()?
+                            .format
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .verification
+                            .get_or_insert_default()
+                            .format = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Report Diagnostics To The Agent",
+                description: "After the agent changes a file, hand it the errors and warnings your language servers report for that file, so it can correct them on its next step. This is the same analysis the editor already shows you.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.verification.diagnostics"),
+                    pick: |settings_content| {
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .verification
+                            .as_ref()?
+                            .diagnostics
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .verification
+                            .get_or_insert_default()
+                            .diagnostics = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Block Committed Secrets",
+                description: "Refuse to let the agent write an API key, access token or private key into the project, and tell it to read the value from the environment instead. Judges only the text the agent adds, never what was already in the file.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.verification.secret_scan"),
+                    pick: |settings_content| {
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .verification
+                            .as_ref()?
+                            .secret_scan
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .verification
+                            .get_or_insert_default()
+                            .secret_scan = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Check Dependencies For Advisories",
+                description: "When the agent edits a manifest or lockfile (Cargo, npm, PyPI or Go), check its packages against the OSV database — the same RustSec, GitHub Advisory and PyPA data Dependabot draws on — and report anything vulnerable along with the version that fixes it. Sends only package names and versions to osv.dev.",
+                field: Box::new(SettingField {
+                    json_path: Some("cowork.verification.dependency_audit"),
+                    pick: |settings_content| {
+                        settings_content
+                            .cowork
+                            .as_ref()?
+                            .verification
+                            .as_ref()?
+                            .dependency_audit
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .cowork
+                            .get_or_insert_default()
+                            .verification
+                            .get_or_insert_default()
+                            .dependency_audit = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn catalog_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Catalog"),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Providers".into(),
+                r#type: crate::SubPageType::Other,
+                description: Some(
+                    "Which models.dev providers Anna can reach, and the environment variable                      that connects each one."
+                        .into(),
+                ),
+                search_aliases: &["api key", "credentials", "models.dev", "connect"],
+                json_path: None,
+                in_json: false,
+                files: USER,
+                render: |settings_window, scroll_handle, window, cx| {
+                    crate::cowork_pages::render_providers(settings_window, scroll_handle, window, cx)
+                },
+            }),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Models".into(),
+                r#type: crate::SubPageType::Other,
+                description: Some(
+                    "Every model offered by a connected provider, grouped by provider.".into(),
+                ),
+                search_aliases: &["model", "catalog"],
+                json_path: None,
+                in_json: false,
+                files: USER,
+                render: |settings_window, scroll_handle, window, cx| {
+                    crate::cowork_pages::render_models(settings_window, scroll_handle, window, cx)
+                },
+            }),
+        ]
+    }
+
+    SettingsPage {
+        title: "Anna",
+        items: concat_sections![
+            threads_section(),
+            catalog_section(),
+            agent_section(),
+            verification_section(),
+            panel_section()
+        ],
+    }
+}
+
 fn debugger_page() -> SettingsPage {
     fn general_section() -> [SettingsPageItem; 6] {
         [
@@ -5598,7 +5973,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Save Breakpoints",
-                description: "Whether breakpoints should be reused across Wu sessions.",
+                description: "Whether breakpoints should be reused across Anna sessions.",
                 field: Box::new(SettingField {
                     json_path: Some("debugger.save_breakpoints"),
                     pick: |settings_content| {
@@ -5633,7 +6008,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Log DAP Communications",
-                description: "Whether to log messages between active debug adapters and Wu.",
+                description: "Whether to log messages between active debug adapters and Anna.",
                 field: Box::new(SettingField {
                     json_path: Some("debugger.log_dap_communications"),
                     pick: |settings_content| {
@@ -6541,7 +6916,7 @@ fn version_control_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Disable Git Integration",
-                    description: "Disable all Git integration features in Wu.",
+                    description: "Disable all Git integration features in Anna.",
                     field: Box::new(SettingField::<bool> {
                         json_path: Some("git.disable_git"),
                         pick: |settings_content| {
@@ -7047,7 +7422,7 @@ fn network_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Server URL",
-                description: "The URL of the Wu server to connect to.",
+                description: "The URL of the server Anna connects to.",
                 field: Box::new(SettingField {
                     json_path: Some("server_url"),
                     pick: |settings_content| settings_content.server_url.as_ref(),
@@ -7585,7 +7960,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             SettingsPageItem::SectionHeader("Autoclose"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Autoclose",
-                description: "Whether to automatically type closing characters for you. For example, when you type '(', Wu will automatically add a closing ')' at the correct position.",
+                description: "Whether to automatically type closing characters for you. For example, when you type '(', Anna will automatically add a closing ')' at the correct position.",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).use_autoclose"),
                     pick: |settings_content| {
@@ -7604,7 +7979,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Auto Surround",
-                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Wu will automatically surround text with ().",
+                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Anna will automatically surround text with ().",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).use_auto_surround"),
                     pick: |settings_content| {
@@ -8128,7 +8503,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Prefer LSP",
-                description: "Use LSP tasks over Wu language extension tasks.",
+                description: "Use LSP tasks over Anna language extension tasks.",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).tasks.prefer_lsp"),
                     pick: |settings_content| {

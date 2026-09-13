@@ -4433,9 +4433,9 @@ fn parse_upstream_track(upstream_track: &str) -> Result<UpstreamTracking> {
 
 fn checkpoint_author_envs() -> HashMap<String, String> {
     HashMap::from_iter([
-        ("GIT_AUTHOR_NAME".to_string(), "Wu".to_string()),
+        ("GIT_AUTHOR_NAME".to_string(), "Anna".to_string()),
         ("GIT_AUTHOR_EMAIL".to_string(), "hi@zed.dev".to_string()),
-        ("GIT_COMMITTER_NAME".to_string(), "Wu".to_string()),
+        ("GIT_COMMITTER_NAME".to_string(), "Anna".to_string()),
         ("GIT_COMMITTER_EMAIL".to_string(), "hi@zed.dev".to_string()),
     ])
 }
@@ -6257,7 +6257,7 @@ mod tests {
     #[test]
     fn test_branches_parsing_containing_refs_with_missing_fields() {
         #[allow(clippy::octal_escapes)]
-        let input = " \090012116c03db04344ab10d50348553aa94f1ea0\0refs/heads/broken\n \0eb0cae33272689bd11030822939dd2701c52f81e\0895951d681e5561478c0acdd6905e8aacdfd2249\0refs/heads/dev\0\0\01762948725\0Wu\0Add feature\n*\0895951d681e5561478c0acdd6905e8aacdfd2249\0\0refs/heads/main\0\0\01762948695\0Wu\0Initial commit\n";
+        let input = " \090012116c03db04344ab10d50348553aa94f1ea0\0refs/heads/broken\n \0eb0cae33272689bd11030822939dd2701c52f81e\0895951d681e5561478c0acdd6905e8aacdfd2249\0refs/heads/dev\0\0\01762948725\0Anna\0Add feature\n*\0895951d681e5561478c0acdd6905e8aacdfd2249\0\0refs/heads/main\0\0\01762948695\0Anna\0Initial commit\n";
 
         let branches = parse_branch_input(input).unwrap();
         assert_eq!(branches.len(), 2);
@@ -6272,7 +6272,7 @@ mod tests {
                         sha: "eb0cae33272689bd11030822939dd2701c52f81e".into(),
                         subject: "Add feature".into(),
                         commit_timestamp: 1762948725,
-                        author_name: SharedString::new_static("Wu"),
+                        author_name: SharedString::new_static("Anna"),
                         has_parent: true,
                     })
                 },
@@ -6284,7 +6284,7 @@ mod tests {
                         sha: "895951d681e5561478c0acdd6905e8aacdfd2249".into(),
                         subject: "Initial commit".into(),
                         commit_timestamp: 1762948695,
-                        author_name: SharedString::new_static("Wu"),
+                        author_name: SharedString::new_static("Anna"),
                         has_parent: false,
                     })
                 }

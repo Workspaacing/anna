@@ -27,9 +27,10 @@ pub struct OpenRecentProject {
 }
 
 actions!(
-    wu,
+    anna,
     [
-        /// Show the Wu welcome screen
+        /// Show the Anna welcome screen
+        #[action(deprecated_aliases = ["wu::ShowWelcome"])]
         ShowWelcome
     ]
 );
@@ -394,9 +395,9 @@ impl Render for WelcomePage {
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Wu"
+            "Welcome back to Anna"
         } else {
-            "Welcome to Wu"
+            "Welcome to Anna"
         };
 
         h_flex()
@@ -430,7 +431,7 @@ impl Render for WelcomePage {
                             )
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
+                                    Label::new("The AI engineering workspace.")
                                         .size(LabelSize::Small)
                                         .color(Color::Muted)
                                         .italic(),

@@ -33,7 +33,7 @@ mod theme_preview;
 
 /// Imports settings from Visual Studio Code.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::ImportVsCodeSettings"])]
 #[serde(deny_unknown_fields)]
 pub struct ImportVsCodeSettings {
     #[serde(default)]
@@ -42,7 +42,7 @@ pub struct ImportVsCodeSettings {
 
 /// Imports settings from Cursor editor.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = wu)]
+#[action(namespace = anna, deprecated_aliases = ["wu::ImportCursorSettings"])]
 #[serde(deny_unknown_fields)]
 pub struct ImportCursorSettings {
     #[serde(default)]
@@ -283,11 +283,11 @@ impl Render for Onboarding {
                                             .child(
                                                 v_flex()
                                                     .child(
-                                                        Headline::new("Welcome to Wu")
+                                                        Headline::new("Welcome to Anna")
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("The editor that doesn't get in your way")
+                                                        Label::new("The AI engineering workspace.")
                                                             .color(Color::Muted)
                                                             .size(LabelSize::Small)
                                                             .italic(),

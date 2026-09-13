@@ -190,6 +190,9 @@ pub struct SettingsContent {
 
     pub call_hierarchy: Option<CallHierarchySettingsContent>,
 
+    /// Settings for the Anna panel and its AI threads.
+    pub cowork: Option<CoworkSettingsContent>,
+
     pub git_panel: Option<GitPanelSettingsContent>,
 
     pub tabs: Option<ItemSettingsContent>,
@@ -204,8 +207,8 @@ pub struct SettingsContent {
     /// Default: true
     pub auto_update: Option<bool>,
 
-    /// This base keymap settings adjusts the default keybindings in Wu to be similar
-    /// to other common code editors. By default, Wu's keymap closely follows VSCode's
+    /// This base keymap settings adjusts the default keybindings in Anna to be similar
+    /// to other common code editors. By default, Anna's keymap closely follows VSCode's
     /// keymap, with minor adjustments, this corresponds to the "VSCode" setting.
     ///
     /// Default: VSCode
@@ -258,20 +261,20 @@ pub struct SettingsContent {
     /// Default: off
     pub reduce_motion: Option<ReduceMotionMode>,
 
-    /// The URL of the Wu server to connect to.
+    /// The URL of the server Anna connects to.
     pub server_url: Option<String>,
 
     /// The URL used as the key for credential storage.
     ///
     /// When set, credentials are stored under this URL instead of `server_url`.
-    /// This allows running multiple Wu instances side by side without them
+    /// This allows running multiple Anna instances side by side without them
     /// overwriting each other's keychain entries.
     pub credentials_url: Option<String>,
 
     /// Configuration for session-related features
     pub session: Option<SessionSettingsContent>,
 
-    /// Configuration of the terminal in Wu.
+    /// Configuration of the terminal in Anna.
     pub terminal: Option<TerminalSettingsContent>,
 
     pub title_bar: Option<TitleBarSettingsContent>,
@@ -289,12 +292,12 @@ pub struct SettingsContent {
 }
 
 /// Configuration for developer-oriented instrumentation tools that collect
-/// diagnostic data about a running Wu instance.
+/// diagnostic data about a running Anna instance.
 #[with_fallible_options]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct InstrumentationSettingsContent {
     /// Configuration for the performance profiler, accessed via the
-    /// `wu: open performance profiler` action.
+    /// `anna: open performance profiler` action.
     pub performance_profiler: Option<PerformanceProfilerSettingsContent>,
 }
 
@@ -320,7 +323,7 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, file_finder, git_panel, tabs, tab_bar, status_bar, activity_bar, preview_tabs,
+        call_hierarchy, cowork, file_finder, git_panel, tabs, tab_bar, status_bar, activity_bar, preview_tabs,
         auto_update, base_keymap, debugger, diagnostics,
         git,
         global_lsp_settings, image_viewer, markdown_preview, hide_mouse,
@@ -392,7 +395,7 @@ pub enum ProfileBase {
     /// Apply profile settings on top of the user's current settings.
     #[default]
     User,
-    /// Apply profile settings on top of Wu's default settings, ignoring user customizations.
+    /// Apply profile settings on top of Anna's default settings, ignoring user customizations.
     Default,
 }
 
@@ -403,7 +406,7 @@ pub struct SettingsProfile {
     /// What base settings to start from before applying this profile's overrides.
     ///
     /// - `user`: Apply on top of user's settings (default)
-    /// - `default`: Apply on top of Wu's default settings, ignoring user customizations
+    /// - `default`: Apply on top of Anna's default settings, ignoring user customizations
     #[serde(default)]
     pub base: ProfileBase,
 
@@ -434,7 +437,7 @@ pub struct ExtensionsSettingsContent {
 
 /// Base key bindings scheme. Base keymaps can be overridden with user keymaps.
 ///
-/// Default: Wu
+/// Default: Anna
 #[derive(
     Copy,
     Clone,
@@ -463,7 +466,7 @@ pub enum BaseKeymapContent {
 
 impl strum::VariantNames for BaseKeymapContent {
     const VARIANTS: &'static [&'static str] = &[
-        "Wu",
+        "Anna",
         "VSCode",
         "JetBrains",
         "Sublime Text",
@@ -482,7 +485,7 @@ pub struct DebuggerSettingsContent {
     ///
     /// Default: line
     pub stepping_granularity: Option<SteppingGranularity>,
-    /// Whether the breakpoints should be reused across Wu sessions.
+    /// Whether the breakpoints should be reused across Anna sessions.
     ///
     /// Default: true
     pub save_breakpoints: Option<bool>,
@@ -494,7 +497,7 @@ pub struct DebuggerSettingsContent {
     ///
     /// Default: 2000ms
     pub timeout: Option<u64>,
-    /// Whether to log messages between active debug adapters and Wu
+    /// Whether to log messages between active debug adapters and Anna
     ///
     /// Default: true
     pub log_dap_communications: Option<bool>,
@@ -773,7 +776,7 @@ pub struct FileFinderSettingsContent {
     /// Default: true
     pub skip_focus_for_active_in_search: Option<bool>,
     /// Whether to use gitignored files when searching.
-    /// Only the file Wu had indexed will be used, not necessary all the gitignored files.
+    /// Only the file Anna had indexed will be used, not necessary all the gitignored files.
     ///
     /// Default: Smart
     pub include_ignored: Option<IncludeIgnoredContent>,
@@ -797,7 +800,7 @@ pub struct FileFinderSettingsContent {
 pub enum IncludeIgnoredContent {
     /// Use all gitignored files
     All,
-    /// Use only the files Wu had indexed
+    /// Use only the files Anna had indexed
     Indexed,
     /// Be smart and search for ignored when called from a gitignored worktree
     #[default]
@@ -974,6 +977,143 @@ pub struct MarkdownPreviewSettingsContent {
     ///
     /// Default: 800
     pub max_width: Option<PixelSetting>,
+}
+
+/// Settings for the Anna panel and its AI threads.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct CoworkSettingsContent {
+    /// Whether to show the Anna panel button in the status bar.
+    ///
+    /// Default: true
+    pub button: Option<bool>,
+    /// The position of the Anna panel.
+    ///
+    /// Default: left
+    pub dock: Option<DockSide>,
+    /// Customize default width (in pixels) taken by the Anna panel.
+    ///
+    /// Default: 300
+    pub default_width: Option<PixelSetting>,
+    /// The models.dev catalog Anna reads its providers and models from.
+    ///
+    /// Default: "https://models.dev/api.json"
+    pub catalog_url: Option<String>,
+    /// Models hidden from Anna's model selector, as `provider/model` identifiers. Listing the
+    /// hidden ones rather than the shown ones means models added to a provider later are available
+    /// by default.
+    ///
+    /// Default: []
+    pub disabled_models: Option<Vec<String>>,
+    /// The checks Anna runs over the agent's own work.
+    pub verification: Option<CoworkVerificationSettingsContent>,
+    /// The shell the agent runs commands in.
+    ///
+    /// Default: terminal
+    pub shell: Option<AgentShell>,
+    /// Approve every request the agent makes without asking.
+    ///
+    /// The agent asks before running a command, because nothing in the editor can undo one. With
+    /// this on it will not ask. Reading and writing files never asks either way: those changes land
+    /// in the editor's own buffers, undo history and git gutter.
+    ///
+    /// Default: false
+    pub auto_approve: Option<bool>,
+
+    /// How much the agent asks before doing something.
+    ///
+    /// Default: "standard"
+    pub permission: Option<AgentPermission>,
+}
+
+/// How often the agent stops to ask.
+///
+/// This is a ladder rather than a set of modes, because there is only one thing being traded: how
+/// much is done without a question. What is *reachable* is not on it — a command that leaves the
+/// project asks at every level including the last one, and that is a property rather than a
+/// preference.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, MergeFrom, PartialEq, Eq,
+    strum::VariantArray, strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPermission {
+    /// Ask before every command, including ones that only read.
+    Ask,
+    /// Ask before anything that changes something. Commands that only read — `ls`, `git status`,
+    /// `cargo check` — run without a question.
+    #[default]
+    Standard,
+    /// Ask only before what cannot be undone: deleting, pushing, publishing.
+    Trusted,
+    /// Never ask, except when a command reaches outside this project.
+    Open,
+}
+
+/// Which shell an Anna agent runs commands in.
+///
+/// The same three choices as `terminal.shell`, plus the one that should be the default: follow
+/// whatever the terminal is set to, so a command the agent runs behaves like one the user would
+/// type themselves. "Automatic" has to be a value rather than the absence of one, or it cannot be
+/// offered as a choice.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::EnumDiscriminants,
+)]
+#[strum_discriminants(derive(strum::VariantArray, strum::VariantNames, strum::FromRepr))]
+#[serde(rename_all = "snake_case")]
+pub enum AgentShell {
+    /// Use whatever `terminal.shell` is set to.
+    #[default]
+    Terminal,
+    /// Use the system's default shell, whatever the terminal is set to.
+    System,
+    /// Use a specific program with no arguments.
+    Program(String),
+    /// Use a specific program with arguments.
+    WithArguments {
+        /// The program to run.
+        program: String,
+        /// The arguments to pass to the program.
+        args: Vec<String>,
+    },
+}
+
+/// The checks that run after an Anna agent writes, changes or deletes something.
+///
+/// All of them are compiled into Anna and none of them consults a model, so leaving them on costs
+/// nothing per turn. Findings are handed back to the agent, which fixes them on its next step.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct CoworkVerificationSettingsContent {
+    /// Run the project's own formatter over a file the agent changed, before saving it — the
+    /// same chain your own edits go through on save, whether that is Biome, ESLint's fix-all
+    /// action, Prettier, or the language server.
+    ///
+    /// Default: true
+    pub format: Option<bool>,
+    /// Report the diagnostics the project's own language servers and linters produce for a file
+    /// the agent changed. This is the same analysis the editor shows the user.
+    ///
+    /// Default: true
+    pub diagnostics: Option<bool>,
+    /// Refuse to write API keys, tokens and private keys into the project.
+    ///
+    /// Default: true
+    pub secret_scan: Option<bool>,
+    /// Check dependency manifests the agent edits against the RustSec and OSV advisory
+    /// databases, and report known-vulnerable versions.
+    ///
+    /// Default: true
+    pub dependency_audit: Option<bool>,
 }
 
 /// The settings for the image viewer.

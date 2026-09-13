@@ -1175,7 +1175,8 @@ impl DebugPanel {
         let project = self.project.clone();
         self.workspace
             .update(cx, |workspace, cx| {
-                let Some(mut path) = workspace.absolute_path_of_worktree(worktree_id, cx) else {
+                let Some(worktree_path) = workspace.absolute_path_of_worktree(worktree_id, cx)
+                else {
                     return Task::ready(Err(anyhow!("Couldn't get worktree path")));
                 };
 
@@ -1186,33 +1187,45 @@ impl DebugPanel {
                     let fs =
                         workspace.read_with(cx, |workspace, _| workspace.app_state().fs.clone())?;
 
-                    path.push(paths::local_settings_folder_name());
-                    if !fs.is_dir(path.as_path()).await {
-                        fs.create_dir(path.as_path()).await?;
+                    // Adds to an existing `.anna`, `.wu` or `.zed` debug.json, so a new
+                    // `.anna/debug.json` never hides the configs of an older one.
+                    let mut existing_debug_file = None;
+                    for candidate in paths::local_debug_file_relative_paths() {
+                        let candidate = worktree_path.join(candidate.as_std_path());
+                        if fs.is_file(&candidate).await {
+                            existing_debug_file = Some(candidate);
+                            break;
+                        }
                     }
-                    path.pop();
+                    let debug_file = match existing_debug_file {
+                        Some(debug_file) => debug_file,
+                        None => {
+                            let settings_dir =
+                                worktree_path.join(paths::local_settings_folder_name());
+                            if !fs.is_dir(&settings_dir).await {
+                                fs.create_dir(&settings_dir).await?;
+                            }
+                            let debug_file = worktree_path
+                                .join(paths::local_debug_file_relative_path().as_std_path());
+                            fs.create_file(&debug_file, Default::default()).await?;
+                            fs.write(
+                                &debug_file,
+                                settings::initial_local_debug_tasks_content()
+                                    .to_string()
+                                    .as_bytes(),
+                            )
+                            .await?;
+                            debug_file
+                        }
+                    };
+                    let path = debug_file.as_path();
 
-                    path.push(paths::local_debug_file_relative_path().as_std_path());
-                    let path = path.as_path();
-
-                    if !fs.is_file(path).await {
-                        fs.create_file(path, Default::default()).await?;
-                        fs.write(
-                            path,
-                            settings::initial_local_debug_tasks_content()
-                                .to_string()
-                                .as_bytes(),
-                        )
-                        .await?;
-                    }
                     let project_path = workspace.update(cx, |workspace, cx| {
                         workspace
                             .project()
                             .read(cx)
                             .project_path_for_absolute_path(path, cx)
-                            .context(
-                                "Couldn't get project path for .wu/debug.json in active worktree",
-                            )
+                            .context("Couldn't get project path for debug.json in active worktree")
                     })??;
 
                     let editor = this
