@@ -1,3 +1,5 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
 <div align="center">
   <img src="crates/wu/resources/app-icon.png" alt="Anna" width="128">
   <h1>Anna</h1>
