@@ -1498,26 +1498,30 @@ mod tests {
 
         cx.update(|cx| {
             settings::init(cx);
+            cx.set_global(db::AppDatabase::test_new());
 
             let current_version = semver::Version::new(0, 100, 0);
             release_channel::init_test(current_version, ReleaseChannel::Stable, cx);
 
             let release_available = Arc::clone(&release_available);
             let dmg_rx = Arc::new(parking_lot::Mutex::new(Some(dmg_rx)));
+            let asset_name =
+                github_asset_name("anna", std::env::consts::OS, std::env::consts::ARCH)
+                    .expect("this platform should have a release asset");
             let fake_client_http = FakeHttpClient::create(move |req| {
                 let release_available = release_available.load(atomic::Ordering::Relaxed);
                 let dmg_rx = dmg_rx.clone();
+                let asset_name = asset_name.clone();
                 async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
-                    if release_available {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
-                        ).unwrap());
+                if req.uri().path() == "/repos/Workspaacing/anna/releases/latest" {
+                    let (tag_name, download) = if release_available {
+                        ("v0.100.1", "new-download")
                     } else {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
-                        ).unwrap());
-                    }
+                        ("v0.100.0", "old-download")
+                    };
+                    return Ok(Response::builder().status(200).body(
+                        format!(r#"{{"tag_name":"{tag_name}","assets":[{{"name":"{asset_name}","browser_download_url":"https://test.example/{download}"}}]}}"#).into()
+                    ).unwrap());
                 } else if req.uri().path() == "/new-download" {
                     return Ok(Response::builder().status(200).body({
                         let dmg_rx = dmg_rx.lock().take().unwrap();
