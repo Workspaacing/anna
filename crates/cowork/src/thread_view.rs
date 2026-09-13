@@ -1026,9 +1026,12 @@ impl CoworkThreadView {
             return;
         };
         message.reasoning.push_str(chunk);
+        // Marked from the whole text rather than chunk by chunk, because a chunk can end halfway
+        // through a word that only reads as code once it is complete.
+        let source = crate::code_spans::mark_code(&message.reasoning);
 
         match message.reasoning_rendered.clone() {
-            Some(markdown) => markdown.update(cx, |markdown, cx| markdown.append(chunk, cx)),
+            Some(markdown) => markdown.update(cx, |markdown, cx| markdown.replace(source, cx)),
             None => {
                 let source = message.reasoning.clone();
                 let markdown = render_markdown(&source, registry, cx);

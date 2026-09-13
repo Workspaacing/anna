@@ -92,7 +92,7 @@ pub struct WorkspaceSettingsContent {
     /// Note that this setting has no effect on Linux, where Anna will always
     /// use the built-in prompts.
     ///
-    /// Default: true
+    /// Default: false
     pub use_system_prompts: Option<bool>,
     /// Aliases for the command palette. When you type a key in this map,
     /// it will be assumed to equal the value.

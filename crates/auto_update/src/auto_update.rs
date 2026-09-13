@@ -211,6 +211,19 @@ impl AutoUpdateStatus {
     }
 }
 
+/// What a check found that the user has to decide on, or asked to be told.
+#[derive(Clone, Debug)]
+pub enum AutoUpdateEvent {
+    /// A newer release exists. Nothing is downloaded until [`AutoUpdater::approve`] is called with it.
+    UpdateAvailable { version: Version },
+    /// A check the user asked for found nothing newer than the running version.
+    UpToDate { version: Version },
+    /// A check the user asked for failed.
+    CheckFailed { error: Arc<anyhow::Error> },
+}
+
+impl gpui::EventEmitter<AutoUpdateEvent> for AutoUpdater {}
+
 pub struct AutoUpdater {
     status: AutoUpdateStatus,
     current_version: Version,
@@ -220,6 +233,10 @@ pub struct AutoUpdater {
     update_check_type: UpdateCheckType,
     _wake_subscription: gpui::Subscription,
     dismissed_status: Option<AutoUpdateStatus>,
+    /// The release the user agreed to install. No other version is downloaded.
+    approved_version: Option<Version>,
+    /// Releases the user put off, which the background check does not ask about again this session.
+    declined_versions: Vec<Version>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -387,6 +404,13 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
         .map(|channel| channel.poll_for_updates())
         .unwrap_or(false)
     {
+        drop(window.prompt(
+            gpui::PromptLevel::Info,
+            "Anna checks for updates only in release builds.",
+            Some("This is a development build. Build it again from source to update it."),
+            &["OK"],
+            cx,
+        ));
         return;
     }
 
@@ -522,6 +546,23 @@ impl AutoUpdater {
             update_check_type: UpdateCheckType::Automatic,
             _wake_subscription: wake_subscription,
             dismissed_status: None,
+            approved_version: None,
+            declined_versions: Vec::new(),
+        }
+    }
+
+    /// Downloads and installs `version`, which the user agreed to after
+    /// [`AutoUpdateEvent::UpdateAvailable`]. Checked again first, so a release published in the
+    /// meantime is asked about rather than installed in its place.
+    pub fn approve(&mut self, version: Version, cx: &mut Context<Self>) {
+        self.approved_version = Some(version);
+        self.poll(UpdateCheckType::Manual, cx);
+    }
+
+    /// Stops the background check from asking about `version` again this session.
+    pub fn decline(&mut self, version: Version) {
+        if !self.declined_versions.contains(&version) {
+            self.declined_versions.push(version);
         }
     }
 
@@ -590,6 +631,9 @@ impl AutoUpdater {
                 if let Err(error) = result {
                     let is_missing_dependency =
                         error.downcast_ref::<MissingDependencyError>().is_some();
+                    // The type now, not the one this poll started with: a manual check that
+                    // arrived while a background one was running joined it and expects an answer.
+                    let check_type = this.update_check_type;
                     this.status = match check_type {
                         UpdateCheckType::Automatic if is_missing_dependency => {
                             log::warn!("auto-update: {}", error);
@@ -604,9 +648,11 @@ impl AutoUpdater {
                         }
                         UpdateCheckType::Manual => {
                             log::error!("auto-update failed: error:{:?}", error);
-                            AutoUpdateStatus::Errored {
-                                error: Arc::new(error),
-                            }
+                            let error = Arc::new(error);
+                            cx.emit(AutoUpdateEvent::CheckFailed {
+                                error: error.clone(),
+                            });
+                            AutoUpdateStatus::Errored { error }
                         }
                     };
 
@@ -826,14 +872,44 @@ impl AutoUpdater {
         let Some(newer_version) = newer_version else {
             this.update(cx, |this, cx| {
                 let status = match previous_status {
+                    // Already downloaded: the title bar offers the restart, which is the answer.
                     AutoUpdateStatus::Updated { .. } => previous_status,
-                    _ => AutoUpdateStatus::Idle,
+                    _ => {
+                        if this.update_check_type.is_manual() {
+                            cx.emit(AutoUpdateEvent::UpToDate {
+                                version: this.current_version.clone(),
+                            });
+                        }
+                        AutoUpdateStatus::Idle
+                    }
                 };
                 this.status = status;
                 cx.notify();
             });
             return Ok(());
         };
+
+        // Nothing is downloaded that the user has not agreed to.
+        let approved = this.update(cx, |this, cx| {
+            if this.approved_version.as_ref() == Some(&newer_version) {
+                return true;
+            }
+            this.status = AutoUpdateStatus::Idle;
+            // A check the user started asks again about a version put off earlier; the background
+            // check does not, or "Later" would come back every twelve hours.
+            if this.update_check_type.is_manual()
+                || !this.declined_versions.contains(&newer_version)
+            {
+                cx.emit(AutoUpdateEvent::UpdateAvailable {
+                    version: newer_version.clone(),
+                });
+            }
+            cx.notify();
+            false
+        });
+        if !approved {
+            return Ok(());
+        }
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Downloading {
@@ -1547,6 +1623,14 @@ mod tests {
         release_available.store(true, atomic::Ordering::SeqCst);
         cx.background_executor.advance_clock(POLL_INTERVAL);
         cx.background_executor.run_until_parked();
+
+        // A newer release is only offered: nothing downloads until the user agrees to it.
+        auto_updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+        });
+        auto_updater.update(cx, |updater, cx| {
+            updater.approve(semver::Version::new(0, 100, 1), cx)
+        });
 
         loop {
             cx.background_executor.timer(Duration::from_millis(0)).await;
