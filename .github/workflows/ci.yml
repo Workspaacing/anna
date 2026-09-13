@@ -43,8 +43,10 @@ jobs:
           shared-key: ci-clippy-linux-x86_64
           add-job-id-key: 'false'
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Without --keep-going, Cargo stops at the first crate with a lint and a run reports one
+      # problem at a time.
       - name: Clippy
-        run: ./script/clippy
+        run: ./script/clippy --keep-going
 
   tests:
     runs-on: ubuntu-24.04
