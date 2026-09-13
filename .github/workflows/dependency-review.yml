@@ -1,0 +1,17 @@
+name: dependency review
+on:
+  pull_request:
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  dependency-review:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # Fails a pull request that adds a dependency with a known high or critical vulnerability,
+      # and says why in a comment, before it reaches main.
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
