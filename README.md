@@ -83,7 +83,13 @@ Make sure `~/.local/bin` is on your `PATH`, then run `anna`.
 
 ### Windows (x86_64)
 
-Download and run `Anna-x86_64.exe`. The installer isn't code-signed, so Windows SmartScreen may warn you. Click **More info**, then **Run anyway**.
+Download and run `Anna-x86_64.exe`.
+
+Anna's installer isn't code-signed yet, so the first time you run it Windows SmartScreen shows **"Windows protected your PC"** with an unknown publisher. Windows shows this for any download that isn't signed; it doesn't mean anything was detected in the file. Click **Run anyway**. On some versions of Windows, click **More info** first.
+
+### Verifying a download
+
+Every release file is built from this repository by the public [release workflow](https://github.com/Workspaacing/anna/actions/workflows/release.yml), and the [release page](https://github.com/Workspaacing/anna/releases/latest) lists each file's SHA-256 digest. Compare it with the digest of your download: `Get-FileHash .\Anna-x86_64.exe` on Windows, `shasum -a 256 <file>` on macOS, or `sha256sum <file>` on Linux.
 
 ## Building
 

@@ -26,6 +26,24 @@ Make sure `~/.local/bin` is on your `PATH`, then run `anna`.
 
 ### Windows (x86_64)
 
-Download and run `Anna-x86_64.exe`. The installer isn't code-signed, so Windows SmartScreen may warn you. Click **More info**, then **Run anyway**.
+Download and run `Anna-x86_64.exe`.
+
+Anna's installer isn't code-signed yet, so the first time you run it Windows SmartScreen shows **"Windows protected your PC"** with an unknown publisher. Windows shows this for any download that isn't signed; it doesn't mean anything was detected in the file. Click **Run anyway**. On some versions of Windows, click **More info** first.
+
+### Verifying a download
+
+Every file on this page is built from this repository's source code by the public [release workflow](https://github.com/Workspaacing/anna/actions/workflows/release.yml), and GitHub lists each file's SHA-256 digest next to it. To check that the file you downloaded is that file, compute its digest and compare it with the `sha256:` value shown here:
+
+```powershell
+# Windows (PowerShell)
+Get-FileHash .\Anna-x86_64.exe -Algorithm SHA256
+```
+
+```sh
+# macOS
+shasum -a 256 Anna-aarch64.dmg
+# Linux
+sha256sum anna-linux-$(uname -m).tar.gz
+```
 
 The `anna-remote-server-*` files are used by Anna's remote development feature. You don't need to download them yourself.
