@@ -369,6 +369,9 @@ async fn apply(
 
     let before = buffer_text(&buffer, cx).await;
     let summary = edit_buffer(&buffer, &change, cx).await?;
+    // What the edit alone produced. Compared with what was saved, it tells the formatter's changes
+    // apart from the model's: against `before`, every edit read as "changed by the formatter".
+    let edited = buffer_text(&buffer, cx).await;
 
     // Before saving, so the file lands formatted and auto-fixed rather than being rewritten a
     // moment later.
@@ -393,10 +396,19 @@ async fn apply(
     // Diffed before the buffer is handed to the checks, which consume it. Three lines of context
     // either side: enough to see where a change landed without pasting the file back into the
     // transcript, which is what made an earlier version unreadable.
-    let diff = language::unified_diff_with_context(&before, &saved, 1, 1, 3);
+    // The offsets are added to hunk positions the builder already numbers from one, so a file
+    // diffed from its first line passes zero; one here put every hunk a line below its change.
+    let diff = language::unified_diff_with_context(&before, &saved, 0, 0, 3);
     // Whether the formatter chain rewrote anything. Recorded here because `saved` is about to be
     // handed to the checks, which take it.
-    let formatted = before != saved;
+    let formatted = edited != saved;
+    // The model plans its next edit from this line, so it hears the size the file ended up at
+    // rather than the size of the text it sent.
+    let summary = if formatted {
+        format!("{summary}, formatted to {} lines", saved.lines().count())
+    } else {
+        summary
+    };
 
     // Hashed on the background for the reason `buffer_text` stringifies there, and before the
     // checks take `saved`.
