@@ -1,5 +1,5 @@
 name: release
-run-name: "${{ startsWith(github.ref, 'refs/tags/') && format('Release {0}', github.ref_name) || 'Warm the release build cache' }}"
+run-name: "${{ startsWith(github.ref, 'refs/tags/') && format('Release {0}', github.ref_name) || github.event_name == 'workflow_dispatch' && format('Test build of {0} ({1})', github.ref_name, inputs.platforms) || 'Warm the release build cache' }}"
 on:
   push:
     tags:
@@ -17,11 +17,25 @@ on:
   schedule:
     # GitHub evicts caches that go unused for 7 days.
     - cron: '0 6 * * 1'
+  # A manual run builds the chosen platforms from the chosen branch and uploads the installers
+  # to the run's page, to download and try a change without building it locally. It never
+  # publishes a release.
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: Platforms to build
+        type: choice
+        default: windows
+        options:
+          - windows
+          - macos
+          - linux
+          - all
 permissions:
   contents: write
 concurrency:
-  group: release-${{ github.ref }}
+  # By event too, so a test build on main and a cache-warming push to main do not cancel each other.
+  group: release-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 env:
   CARGO_TERM_COLOR: always
@@ -42,7 +56,7 @@ jobs:
 
   bundle_mac:
     needs: check_version
-    if: ${{ !cancelled() && needs.check_version.result != 'failure' }}
+    if: ${{ !cancelled() && needs.check_version.result != 'failure' && (github.event_name != 'workflow_dispatch' || inputs.platforms == 'macos' || inputs.platforms == 'all') }}
     runs-on: macos-14
     timeout-minutes: 300
     steps:
@@ -81,10 +95,13 @@ jobs:
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
           APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
         run: script/bundle-mac aarch64-apple-darwin
-      - if: startsWith(github.ref, 'refs/tags/')
+      # A tag hands these to the release job. A manual test build keeps them for a week, and 0
+      # leaves a tag's at the repository's default.
+      - if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: macos-aarch64
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 7 || 0 }}
           path: |
             target/aarch64-apple-darwin/release/Anna-aarch64.dmg
             target/anna-remote-server-macos-aarch64.gz
@@ -98,7 +115,7 @@ jobs:
 
   bundle_linux:
     needs: check_version
-    if: ${{ !cancelled() && needs.check_version.result != 'failure' }}
+    if: ${{ !cancelled() && needs.check_version.result != 'failure' && (github.event_name != 'workflow_dispatch' || inputs.platforms == 'linux' || inputs.platforms == 'all') }}
     strategy:
       fail-fast: false
       matrix:
@@ -125,10 +142,11 @@ jobs:
         run: echo stable > crates/wu/RELEASE_CHANNEL
       - name: Bundle
         run: ./script/bundle-linux
-      - if: startsWith(github.ref, 'refs/tags/')
+      - if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 7 || 0 }}
           path: |
             target/release/anna-linux-${{ matrix.arch }}.tar.gz
             target/anna-remote-server-linux-${{ matrix.arch }}.gz
@@ -136,7 +154,7 @@ jobs:
 
   bundle_windows:
     needs: check_version
-    if: ${{ !cancelled() && needs.check_version.result != 'failure' }}
+    if: ${{ !cancelled() && needs.check_version.result != 'failure' && (github.event_name != 'workflow_dispatch' || inputs.platforms == 'windows' || inputs.platforms == 'all') }}
     runs-on: windows-2022
     timeout-minutes: 300
     steps:
@@ -155,10 +173,11 @@ jobs:
       - name: Bundle
         run: script/bundle-windows.ps1 -Architecture x86_64
         shell: pwsh
-      - if: startsWith(github.ref, 'refs/tags/')
+      - if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 7 || 0 }}
           path: |
             target/Anna-x86_64.exe
             target/anna-remote-server-windows-x86_64.gz
@@ -166,7 +185,8 @@ jobs:
 
   release:
     needs: [bundle_mac, bundle_linux, bundle_windows]
-    if: startsWith(github.ref, 'refs/tags/')
+    # Only a pushed tag publishes, even when a manual run is started on a tag.
+    if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
