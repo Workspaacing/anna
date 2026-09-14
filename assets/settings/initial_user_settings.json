@@ -11,7 +11,7 @@
   "buffer_font_size": 15,
   "theme": {
     "mode": "system",
-    "light": "Catppuccin Latte",
-    "dark": "Catppuccin Mocha",
+    "light": "Anna Neutral Light",
+    "dark": "Anna Neutral Dark",
   },
 }

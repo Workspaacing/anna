@@ -8,8 +8,8 @@
   // - "dark": Use the theme indicated by the "dark" field
   "theme": {
     "mode": "system",
-    "light": "Catppuccin Latte",
-    "dark": "Catppuccin Mocha",
+    "light": "Anna Neutral Light",
+    "dark": "Anna Neutral Dark",
   },
   "icon_theme": "Anna (Default)",
   // The name of a base set of key bindings to use.
