@@ -1026,8 +1026,8 @@ pub struct CoworkSettingsContent {
     pub permission: Option<AgentPermission>,
     /// Your own instructions for Anna's agents, added to what they are told in every project.
     ///
-    /// A project's `AGENTS.md`, `CLAUDE.md` or `.rules` is read as well and takes precedence where
-    /// the two disagree.
+    /// A project's `AGENTS.md`, `CLAUDE.md` or `.rules` is read as well. Where the two disagree,
+    /// these instructions win, and neither can change Anna's safety rules.
     ///
     /// Default: ""
     pub instructions: Option<String>,

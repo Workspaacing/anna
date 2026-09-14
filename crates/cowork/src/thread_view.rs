@@ -281,10 +281,31 @@ impl CoworkThreadView {
 
         // Once the view exists, because the warm-up stores its handle back onto it.
         view.warm_up_toolchain(cx);
+        view.load_instructions(cx);
         view
     }
 
-    /// Reads the user's instructioore has not saved, which saves it when its first message is sent.
+    /// Reads the user's instructions and the project's rules as soon as the thread opens, so a
+    /// session log exported before the next message shows the system prompt it would be sent with.
+    /// Each turn reads them again, so an edited rules file still applies from the next message.
+    fn load_instructions(&mut self, cx: &mut Context<Self>) {
+        let fs = self.fs.clone();
+        let folders = project_folders(&self.project, cx);
+        let setting = CoworkSettings::get_global(cx).instructions.clone();
+        cx.spawn(async move |this, cx| {
+            let user_instructions =
+                instructions::load_user_instructions(fs.as_ref(), &setting, paths::agents_file())
+                    .await;
+            let project_rules = instructions::load_rules(fs.as_ref(), &folders).await;
+            this.update(cx, |this, _| {
+                this.user_instructions = user_instructions;
+                this.project_rules = project_rules;
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// A view over a thread the store has not saved, which saves it when its first message is sent.
     pub fn draft(
         thread: Thread,
         store: Entity<CoworkStore>,
