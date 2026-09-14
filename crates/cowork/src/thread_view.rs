@@ -6,11 +6,11 @@ use crate::{
     model_selector::ModelSelector,
     provider::{
         self, Attachment, AttachmentKind, CompletionEvent, CompletionRequest, Message, Role,
-        StopReason, ToolCall, ToolResult,
+        Served, StepRecord, StopReason, ToolCall, ToolResult,
     },
     permission::{Decision, DecidedBy, PermissionBroker, PermissionEvent, PermissionRequest},
     session_log::{self, LogContent, ThreadLog},
-    thread::{ActivityKind, CoworkStore, Thread, ThreadId},
+    thread::{ActivityKind, CoworkStore, Thread, ThreadId, now_seconds},
     tool::{ToolContext, ToolKind, ToolRegistry},
     verify::{CheckReport, Finding, Severity},
 };
@@ -36,6 +36,7 @@ use std::{
 use crate::waiting::{OpenPrompt, WaitingOnYou};
 use crate::image_preview::ImagePreview;
 use gpui::StyledText;
+use release_channel::AppVersion;
 use settings::AgentPermission;
 use ui::{
     Button, ButtonStyle, ContextMenu, ContextMenuEntry, CopyButton, Divider, PopoverMenu, Tooltip,
@@ -755,6 +756,7 @@ impl CoworkThreadView {
             current_error: self.error.as_ref().map(|error| error.to_string()),
             branch: self.branch_name(cx).map(|branch| branch.to_string()),
             open_in_view: true,
+            system_prompt: Some(self.current_system_prompt(cx)),
         }
     }
 
@@ -1057,6 +1059,16 @@ impl CoworkThreadView {
         if input == 0 && output == 0 {
             return;
         }
+        if let Some(step) = self.current_step() {
+            // Anthropic reports input when the message starts and output when it ends, each time
+            // with the other at zero, so a zero never replaces a count already known.
+            if input > 0 {
+                step.input_tokens = Some(input);
+            }
+            if output > 0 {
+                step.output_tokens = Some(output);
+            }
+        }
         self.thread.metadata.context_tokens = Some(input.saturating_add(output));
         cx.notify();
     }
@@ -1305,6 +1317,68 @@ impl CoworkThreadView {
         self.follow_the_end();
     }
 
+    /// Starts the record of the step whose assistant message was just pushed.
+    fn begin_step(&mut self, cx: &App) {
+        let app_version = AppVersion::global(cx).to_string();
+        if let Some(message) = self.thread.messages.last_mut() {
+            message.step = Some(StepRecord {
+                started_at: now_seconds(),
+                app_version,
+                ..StepRecord::default()
+            });
+        }
+    }
+
+    /// The record of the step being streamed, on the stored copy of its assistant message.
+    fn current_step(&mut self) -> Option<&mut StepRecord> {
+        self.thread
+            .messages
+            .last_mut()
+            .filter(|message| message.role == Role::Assistant)
+            .and_then(|message| message.step.as_mut())
+    }
+
+    fn record_served(&mut self, served: Served) {
+        let Some(step) = self.current_step() else {
+            return;
+        };
+        // Logged only when it is news: Gemini names the model on every chunk, and a line per chunk
+        // pushes the warnings before a reply out of the session log's excerpt.
+        if let Some(model) = served
+            .model
+            .as_ref()
+            .filter(|model| step.model.as_ref() != Some(*model))
+        {
+            match &served.provider {
+                Some(provider) => {
+                    log::info!("cowork: step answered by {model} through {provider}")
+                }
+                None => log::info!("cowork: step answered by {model}"),
+            }
+        }
+        if served.model.is_some() {
+            step.model = served.model;
+        }
+        if served.provider.is_some() {
+            step.provider = served.provider;
+        }
+        if served.response_id.is_some() {
+            step.response_id = served.response_id;
+        }
+    }
+
+    fn record_stop(&mut self, reason: StopReason) {
+        if let Some(step) = self.current_step() {
+            step.stop_reason = Some(reason.as_str().to_owned());
+        }
+    }
+
+    fn end_step(&mut self, took: std::time::Duration) {
+        if let Some(step) = self.current_step() {
+            step.duration_ms = Some(u64::try_from(took.as_millis()).unwrap_or(u64::MAX));
+        }
+    }
+
     fn extend_last_message(&mut self, chunk: &str, cx: &mut Context<Self>) {
         let Some(message) = self.messages.last_mut() else {
             return;
@@ -1365,14 +1439,18 @@ impl CoworkThreadView {
 
                 if this
                     .update(cx, |this, cx| {
-                        this.push_message(Role::Assistant, String::new(), cx)
+                        this.push_message(Role::Assistant, String::new(), cx);
+                        this.begin_step(cx);
                     })
                     .is_err()
                 {
                     return;
                 }
 
+                let started = std::time::Instant::now();
                 let outcome = Self::stream_one_step(&this, http_client.clone(), request, cx).await;
+                this.update(cx, |this, _| this.end_step(started.elapsed()))
+                    .log_err();
                 let (calls, stop) = match outcome {
                     Ok(outcome) => outcome,
                     Err(error) => {
@@ -1544,6 +1622,14 @@ impl CoworkThreadView {
                         return Ok((Vec::new(), None));
                     }
                 }
+                CompletionEvent::Served(served) => {
+                    if this
+                        .update(cx, |this, _| this.record_served(served))
+                        .is_err()
+                    {
+                        return Ok((Vec::new(), None));
+                    }
+                }
                 CompletionEvent::Stop(reason) => {
                     // Recorded rather than breaking on. OpenAI-compatible providers send the
                     // usage chunk *after* the one carrying `finish_reason`, so stopping here
@@ -1553,6 +1639,8 @@ impl CoworkThreadView {
                     // stream, and letting it overwrite `ToolUse` dropped the calls.
                     if stop.is_none() {
                         stop = Some(reason);
+                        this.update(cx, |this, _| this.record_stop(reason))
+                            .log_err();
                     }
                 }
             }
@@ -1715,6 +1803,7 @@ impl CoworkThreadView {
             diff: String::new(),
             checks: None,
             checkpoint: None,
+            duration_ms: None,
         };
 
         let Some(tool) = tools.get(&call.name) else {
@@ -1732,8 +1821,12 @@ impl CoworkThreadView {
             }
         };
 
+        let started = std::time::Instant::now();
         let run = cx.update(|cx| tool.run(arguments, context, cx));
-        match run.await {
+        let outcome = run.await;
+        // Around the whole run, so a command that waited for the user's approval counts the wait.
+        let duration_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        match outcome {
             Ok(output) => ToolResult {
                 call_id: call.id.clone(),
                 content: output.content,
@@ -1742,8 +1835,12 @@ impl CoworkThreadView {
                 diff: output.diff,
                 checks: output.checks,
                 checkpoint: output.checkpoint,
+                duration_ms,
             },
-            Err(failure) => error(format!("{failure:#}")),
+            Err(failure) => ToolResult {
+                duration_ms,
+                ..error(format!("{failure:#}"))
+            },
         }
     }
 
@@ -1776,6 +1873,15 @@ impl CoworkThreadView {
         cx.notify();
     }
 
+    /// The system prompt this thread sends, which the session log shows as well.
+    fn current_system_prompt(&self, cx: &App) -> String {
+        system_prompt(
+            os_name(std::env::consts::OS),
+            self.thread.metadata.project.as_deref(),
+            &project_folders(&self.project, cx),
+        )
+    }
+
     fn build_request(&self, cx: &App) -> Result<CompletionRequest> {
         let model = self.thread.metadata.model.clone();
         let store = self.store.read(cx);
@@ -1802,11 +1908,7 @@ impl CoworkThreadView {
             model: catalog_model.clone(),
             model_id: model.model_id.clone(),
             api_key,
-            system: Some(system_prompt(
-                os_name(std::env::consts::OS),
-                self.thread.metadata.project.as_deref(),
-                &project_folders(&self.project, cx),
-            )),
+            system: Some(self.current_system_prompt(cx)),
             messages: self.thread.messages.clone(),
             tools: self.tools.definitions(),
             // Every model publishes its own ceiling, so asking for less would be leaving the
@@ -1816,10 +1918,24 @@ impl CoworkThreadView {
     }
 
     fn fail(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
-        log::warn!("cowork: completion failed: {error:#}");
+        self.fail_after_step(error, None, cx);
+    }
+
+    /// A failure, with the step it ended when that step's message is gone: the model and response
+    /// id are what to look up in the provider's own logs.
+    fn fail_after_step(
+        &mut self,
+        error: anyhow::Error,
+        step: Option<&StepRecord>,
+        cx: &mut Context<Self>,
+    ) {
         let message = format!("{error:#}");
-        self.thread
-            .record(ActivityKind::TurnFailed, message.clone());
+        let detail = match step.and_then(describe_failed_step) {
+            Some(step) => format!("{message} ({step})"),
+            None => message.clone(),
+        };
+        log::warn!("cowork: completion failed: {detail}");
+        self.thread.record(ActivityKind::TurnFailed, detail);
         self.error = Some(message.into());
         self.completion = None;
         // Written at once, so the record of the failure outlives the window it happened in. Some
@@ -1831,15 +1947,16 @@ impl CoworkThreadView {
     /// A failure once streaming was under way. An assistant turn that never received a chunk is
     /// dropped so the thread does not keep a blank message, but partial output is preserved.
     fn finish_with_error(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
+        let mut dropped_step = None;
         if self
             .messages
             .last()
             .is_some_and(|message| message.role == Role::Assistant && message.text.is_empty())
         {
             self.messages.pop();
-            self.thread.messages.pop();
+            dropped_step = self.thread.messages.pop().and_then(|message| message.step);
         }
-        self.fail(error, cx);
+        self.fail_after_step(error, dropped_step.as_ref(), cx);
     }
 
     fn finish(&mut self, cx: &mut Context<Self>) {
@@ -3374,6 +3491,21 @@ fn describe_unreadable(model: &str, unreadable: &UnreadableAttachments) -> Optio
 }
 
 /// The project's open folders, as the name the user knows and the path a command runs in.
+/// Who answered a step that failed, for a failure whose message is dropped with the step on it.
+fn describe_failed_step(step: &StepRecord) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(model) = &step.model {
+        parts.push(format!("answered by {model}"));
+    }
+    if let Some(provider) = &step.provider {
+        parts.push(format!("through {provider}"));
+    }
+    if let Some(response_id) = &step.response_id {
+        parts.push(format!("response id {response_id}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 pub fn project_folders(project: &Entity<Project>, cx: &App) -> Vec<(String, String)> {
     project
         .read(cx)
@@ -3861,6 +3993,21 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_step_is_described_by_what_the_provider_reported() {
+        assert_eq!(describe_failed_step(&StepRecord::default()), None);
+
+        let step = StepRecord {
+            model: Some("claude-opus-5".to_owned()),
+            response_id: Some("msg_01".to_owned()),
+            ..StepRecord::default()
+        };
+        assert_eq!(
+            describe_failed_step(&step).as_deref(),
+            Some("answered by claude-opus-5, response id msg_01")
+        );
+    }
+
+    #[test]
     fn operating_systems_are_named_the_way_people_write_them() {
         assert_eq!(os_name("windows"), "Windows");
         assert_eq!(os_name("macos"), "macOS");
@@ -4007,6 +4154,7 @@ mod tests {
                 before,
                 after_digest: 0,
             }),
+            duration_ms: None,
         }
     }
 

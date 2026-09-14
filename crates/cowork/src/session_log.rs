@@ -13,7 +13,7 @@
 use crate::{
     checkpoint::Before,
     cowork_settings::CoworkSettings,
-    provider::{AttachmentKind, Role, ToolCall, ToolResult},
+    provider::{AttachmentKind, Role, StepRecord, ToolCall, ToolResult},
     thread::{ActivityEntry, ActivityKind, Thread, ThreadMetadata, now_seconds},
     thread_view::{permission_detail, permission_label},
     verify::{self, CheckReport, Severity},
@@ -55,6 +55,9 @@ pub struct ThreadLog {
     /// Whether this came from an open view, which decides what may legitimately be missing: check
     /// reports, reasoning and the error on screen are never stored.
     pub open_in_view: bool,
+    /// The system prompt the thread sends, as an open view builds it at export. Only a view knows
+    /// the folders it is built from.
+    pub system_prompt: Option<String>,
 }
 
 impl ThreadLog {
@@ -66,6 +69,7 @@ impl ThreadLog {
             current_error: None,
             branch: None,
             open_in_view: false,
+            system_prompt: None,
         }
     }
 }
@@ -340,7 +344,12 @@ fn render_thread(
     let mut body = String::new();
     if !thread.messages.is_empty() || !thread.activity.is_empty() || log.current_error.is_some() {
         summary.write(&mut body, level, "Summary", true);
-        write_transcript(&mut body, log, level);
+        if let Some(prompt) = &log.system_prompt {
+            push_heading(&mut body, level, "System prompt (as it would be sent now)");
+            push_fenced(&mut body, "text", prompt, "");
+            body.push('\n');
+        }
+        write_transcript(&mut body, log, level, environment.offset);
         write_activity(&mut body, &thread.activity, environment.offset, level);
         if let Some(error) = &log.current_error {
             push_heading(&mut body, level, "Current error");
@@ -440,6 +449,8 @@ fn folder(metadata: &ThreadMetadata) -> String {
 struct Summary {
     user_messages: usize,
     assistant_messages: usize,
+    /// How many steps each model answered, with the upstream provider when a router named one.
+    models: BTreeMap<String, usize>,
     turns_finished: usize,
     turns_failed: usize,
     turns_stopped_repeating: usize,
@@ -465,6 +476,15 @@ impl Summary {
                 Role::User => summary.user_messages += 1,
                 Role::Assistant => summary.assistant_messages += 1,
                 Role::Tool => {}
+            }
+            if let Some(step) = &message.step
+                && let Some(model) = &step.model
+            {
+                let key = match &step.provider {
+                    Some(provider) => format!("{model} via {provider}"),
+                    None => model.clone(),
+                };
+                *summary.models.entry(key).or_insert(0) += 1;
             }
             for call in &message.tool_calls {
                 *summary.tool_calls.entry(call.name.clone()).or_insert(0) += 1;
@@ -508,6 +528,7 @@ impl Summary {
     fn add(&mut self, other: &Summary) {
         self.user_messages += other.user_messages;
         self.assistant_messages += other.assistant_messages;
+        add_counts(&mut self.models, &other.models);
         self.turns_finished += other.turns_finished;
         self.turns_failed += other.turns_failed;
         self.turns_stopped_repeating += other.turns_stopped_repeating;
@@ -534,6 +555,17 @@ impl Summary {
                 "{} (one per model step; a turn that calls tools takes several)",
                 self.assistant_messages
             ),
+        );
+        push_item(
+            out,
+            "Models that answered",
+            &if self.models.is_empty() {
+                "none reported: the steps were recorded before Anna kept this, or the provider did \
+                 not say"
+                    .to_owned()
+            } else {
+                with_breakdown(&self.models)
+            },
         );
         push_item(out, "Turns finished", &self.turns_finished.to_string());
         push_item(out, "Turns failed", &self.turns_failed.to_string());
@@ -577,7 +609,7 @@ impl Summary {
     }
 }
 
-fn write_transcript(out: &mut String, log: &ThreadLog, level: usize) {
+fn write_transcript(out: &mut String, log: &ThreadLog, level: usize, offset: UtcOffset) {
     let messages = &log.thread.messages;
     push_heading(out, level, "Transcript");
     if messages.is_empty() {
@@ -617,6 +649,9 @@ fn write_transcript(out: &mut String, log: &ThreadLog, level: usize) {
             }
             Role::Assistant => {
                 push_heading(out, level + 1, &format!("Message {number} · assistant"));
+                if let Some(step) = &message.step {
+                    write_step(out, step, offset);
+                }
                 if let Some(reasoning) = log
                     .reasoning
                     .get(index)
@@ -650,6 +685,60 @@ fn write_transcript(out: &mut String, log: &ThreadLog, level: usize) {
                 }
             }
         }
+    }
+}
+
+/// How one model step went: who answered, how it ended, what it cost and how long it took.
+fn write_step(out: &mut String, step: &StepRecord, offset: UtcOffset) {
+    push_item(out, "Started", &format_time(step.started_at, offset));
+    push_item(
+        out,
+        "Answered by",
+        &step
+            .model
+            .as_deref()
+            .map(code)
+            .unwrap_or_else(|| "not reported by the provider".to_owned()),
+    );
+    if let Some(provider) = &step.provider {
+        push_item(out, "Served by", &code(provider));
+    }
+    if let Some(response_id) = &step.response_id {
+        push_item(out, "Response id", &code(response_id));
+    }
+    push_item(
+        out,
+        "Stop reason",
+        &step
+            .stop_reason
+            .as_deref()
+            .map(code)
+            .unwrap_or_else(|| "none: the stream ended without one".to_owned()),
+    );
+    let tokens = match (step.input_tokens, step.output_tokens) {
+        (None, None) => "not reported by the provider".to_owned(),
+        (input, output) => format!(
+            "{} in, {} out",
+            input.map_or_else(|| "?".to_owned(), |count| count.to_string()),
+            output.map_or_else(|| "?".to_owned(), |count| count.to_string()),
+        ),
+    };
+    push_item(out, "Tokens", &tokens);
+    if let Some(duration_ms) = step.duration_ms {
+        push_item(out, "Took", &describe_duration(duration_ms));
+    }
+    if !step.app_version.is_empty() {
+        push_item(out, "Anna version", &step.app_version);
+    }
+    out.push('\n');
+}
+
+/// Milliseconds below a second, seconds with one decimal from there.
+fn describe_duration(milliseconds: u64) -> String {
+    if milliseconds < 1000 {
+        format!("{milliseconds} ms")
+    } else {
+        format!("{:.1} s", milliseconds as f64 / 1000.0)
     }
 }
 
@@ -727,6 +816,9 @@ fn write_result(out: &mut String, result: &ToolResult, tool: Option<&str>, level
             "Checkpoint",
             &format!("{change} {}", code(&checkpoint.abs_path)),
         );
+    }
+    if let Some(duration_ms) = result.duration_ms {
+        push_item(out, "Took", &describe_duration(duration_ms));
     }
     out.push('\n');
 
@@ -833,8 +925,9 @@ fn render_log_excerpt(
                 &mut text,
                 "Kept",
                 &format!(
-                    "lines mentioning `cowork` (the agent's own), and every warning and error, \
-                     logged {window}; a line without a timestamp continues the entry above it"
+                    "lines mentioning `cowork` (the agent's own), the line Anna writes at each \
+                     start, and every warning and error, logged {window}; a line without a \
+                     timestamp continues the entry above it"
                 ),
             );
 
@@ -848,10 +941,34 @@ fn render_log_excerpt(
                 } else {
                     lines.len().to_string()
                 };
+                let (shown, repeats) = collapse_repeats(&lines);
                 push_item(&mut text, "Lines", &count);
+                if !repeats.is_empty() {
+                    let left_out = repeats.iter().map(|(_, times, _)| times).sum::<usize>();
+                    push_item(
+                        &mut text,
+                        "Repeated entries left out",
+                        &format!("{left_out}, listed after the excerpt"),
+                    );
+                }
                 text.push('\n');
-                push_fenced(&mut text, "text", &lines.join("\n"), "");
+                push_fenced(&mut text, "text", &shown.join("\n"), "");
                 text.push('\n');
+                if !repeats.is_empty() {
+                    text.push_str(
+                        "Entries left out because they repeat one shown above, with how many more \
+                         times each appeared:\n\n",
+                    );
+                    for (entry, times, last) in &repeats {
+                        let first_line = entry.lines().next().unwrap_or_default();
+                        text.push_str(&format!(
+                            "- {times} more, the last at {}: {}\n",
+                            code(last),
+                            code(first_line)
+                        ));
+                    }
+                    text.push('\n');
+                }
             }
         }
     }
@@ -878,7 +995,8 @@ fn log_excerpt(log: &str, since: Option<u64>) -> (Vec<&str>, usize) {
     for line in log.lines() {
         if let Some(logged_at) = line_timestamp(line) {
             let recent = since.is_none_or(|since| logged_at >= since);
-            keeping = recent && (mentions_cowork(line) || is_warning_or_error(line));
+            keeping = recent
+                && (mentions_cowork(line) || is_warning_or_error(line) || marks_app_start(line));
         }
         if keeping {
             kept.push(line);
@@ -888,6 +1006,77 @@ fn log_excerpt(log: &str, since: Option<u64>) -> (Vec<&str>, usize) {
     let matching = kept.len();
     let kept = kept.split_off(matching.saturating_sub(MAX_LOG_LINES));
     (kept, matching)
+}
+
+/// The excerpt without the entries that repeat an earlier one, and each left-out entry with how many
+/// more times it appeared and the timestamp of its last appearance, in the order they first
+/// repeated. Anna's start lines are never left out: they tell the runs apart, and every start of
+/// the same build writes the same line.
+///
+/// Anna logs the same warnings on every start: in one real log, thirteen lines about Biome came back
+/// seven times and buried the lines that differed. An entry is a timestamped line and the lines
+/// continuing it, compared without the timestamp.
+fn collapse_repeats<'a>(lines: &[&'a str]) -> (Vec<&'a str>, Vec<(String, usize, &'a str)>) {
+    let mut shown = Vec::new();
+    let mut repeats: Vec<(String, usize, &'a str)> = Vec::new();
+    let mut seen = HashSet::default();
+    let mut start = 0;
+    while start < lines.len() {
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line_timestamp(line).is_some())
+            .map_or(lines.len(), |offset| start + 1 + offset);
+        let entry = &lines[start..end];
+        if entry.first().is_some_and(|line| marks_app_start(line)) {
+            shown.extend_from_slice(entry);
+            start = end;
+            continue;
+        }
+        let key = entry
+            .iter()
+            .enumerate()
+            .map(|(position, line)| {
+                if position == 0 {
+                    without_timestamp(line)
+                } else {
+                    *line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if seen.insert(key.clone()) {
+            shown.extend_from_slice(entry);
+        } else {
+            let logged_at = entry
+                .first()
+                .and_then(|line| line.split(' ').next())
+                .unwrap_or_default();
+            match repeats.iter_mut().find(|(repeated, _, _)| *repeated == key) {
+                Some((_, times, last)) => {
+                    *times += 1;
+                    *last = logged_at;
+                }
+                None => repeats.push((key, 1, logged_at)),
+            }
+        }
+        start = end;
+    }
+    (shown, repeats)
+}
+
+fn without_timestamp(line: &str) -> &str {
+    match line_timestamp(line) {
+        Some(_) => line
+            .split_once(' ')
+            .map_or(line, |(_, rest)| rest.trim_start()),
+        None => line,
+    }
+}
+
+/// The line Anna writes when it starts, which carries its version: an excerpt can span several
+/// starts, and a line logged by an older version may mean something else.
+fn marks_app_start(line: &str) -> bool {
+    line.contains("========== starting")
 }
 
 fn line_timestamp(line: &str) -> Option<i64> {
@@ -1328,6 +1517,7 @@ mod tests {
             diff: String::new(),
             checks: None,
             checkpoint: None,
+            duration_ms: None,
         }
     }
 
@@ -1356,6 +1546,17 @@ mod tests {
         }];
 
         let mut assistant = Message::assistant("I will read the parser first.");
+        assistant.step = Some(StepRecord {
+            model: Some("anthropic/claude-sonnet-4.5".to_owned()),
+            provider: Some("Anthropic".to_owned()),
+            response_id: Some("gen-42".to_owned()),
+            stop_reason: Some("tool_use".to_owned()),
+            input_tokens: Some(1200),
+            output_tokens: Some(85),
+            started_at: CREATED_AT + 2,
+            duration_ms: Some(2400),
+            app_version: "1.0.6".to_owned(),
+        });
         assistant.tool_calls = vec![
             tool_call(
                 "call-read",
@@ -1373,6 +1574,7 @@ mod tests {
 
         let mut edited = tool_result("call-edit", "Edited src/parser.rs");
         edited.path = "src/parser.rs".to_owned();
+        edited.duration_ms = Some(40);
         edited.diff = "--- a/src/parser.rs\n+++ b/src/parser.rs\n@@ -1 +1 @@\n-a\n+b\n".to_owned();
         edited.checkpoint = Some(Checkpoint {
             abs_path: "/home/a/parser/src/parser.rs".to_owned(),
@@ -1429,6 +1631,10 @@ mod tests {
             current_error: Some("the provider answered 529: overloaded".to_owned()),
             branch: Some("main".to_owned()),
             open_in_view: true,
+            system_prompt: Some(
+                "You are Anna's coding agent, working in the user's project through tools."
+                    .to_owned(),
+            ),
         }
     }
 
@@ -1502,6 +1708,7 @@ mod tests {
                 "# Anna session log",
                 "## Session",
                 "## Summary",
+                "## System prompt (as it would be sent now)",
                 "## Transcript",
                 "### Message 1 · user",
                 "### Message 2 · assistant",
@@ -1532,6 +1739,16 @@ mod tests {
             "- Attachments sent: 1 (image: 1)",
             "- Files changed: 2",
             "- Intent: Reading the parser",
+            "- Models that answered: 1 (anthropic/claude-sonnet-4.5 via Anthropic: 1)",
+            "- Answered by: `anthropic/claude-sonnet-4.5`",
+            "- Served by: `Anthropic`",
+            "- Response id: `gen-42`",
+            "- Stop reason: `tool_use`",
+            "- Tokens: 1200 in, 85 out",
+            "- Took: 2.4 s",
+            "- Anna version: 1.0.6",
+            "- Took: 40 ms",
+            "You are Anna's coding agent, working in the user's project through tools.",
             "The parser lives in src/parser.rs.",
             "- Language servers attached: rust-analyzer",
             "  - warning [clippy] line 3: unused variable",
@@ -1679,6 +1896,86 @@ mod tests {
         assert_eq!(matching, MAX_LOG_LINES + 20);
         assert_eq!(kept.len(), MAX_LOG_LINES);
         assert_eq!(kept.first().copied(), Some(format!("{at} INFO  [cowork] line 20").as_str()));
+    }
+
+    #[test]
+    fn the_log_excerpt_keeps_the_line_anna_writes_when_it_starts() {
+        let at = format_time(CREATED_AT, UtcOffset::UTC);
+        let start =
+            format!("{at} INFO  [wu] ========== starting wu version 1.0.1, sha abc ==========");
+        let log = format!("{start}\n{at} INFO  [project] unrelated");
+
+        let (kept, _) = log_excerpt(&log, None);
+
+        assert_eq!(kept, vec![start.as_str()]);
+    }
+
+    #[test]
+    fn a_log_entry_repeated_on_every_start_is_shown_once() {
+        let first = format_time(CREATED_AT, UtcOffset::UTC);
+        let later = format_time(CREATED_AT + 60, UtcOffset::UTC);
+        let lines = [
+            format!("{first} WARN  [language] not registering biome"),
+            format!("{first} ERROR [lsp] shutdown failed"),
+            "  While handling prettier request".to_owned(),
+            format!("{later} WARN  [language] not registering biome"),
+            format!("{later} ERROR [lsp] shutdown failed"),
+            "  While handling prettier request".to_owned(),
+            format!("{later} ERROR [lsp] shutdown failed"),
+            "  a different continuation".to_owned(),
+        ];
+        let lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let (shown, repeats) = collapse_repeats(&lines);
+
+        assert_eq!(
+            shown,
+            vec![lines[0], lines[1], lines[2], lines[6], lines[7]]
+        );
+        assert_eq!(
+            repeats,
+            vec![
+                (
+                    "WARN  [language] not registering biome".to_owned(),
+                    1,
+                    later.as_str()
+                ),
+                (
+                    "ERROR [lsp] shutdown failed\n  While handling prettier request".to_owned(),
+                    1,
+                    later.as_str()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_start_stays_in_the_excerpt_even_when_its_line_repeats() {
+        let first = format_time(CREATED_AT, UtcOffset::UTC);
+        let later = format_time(CREATED_AT + 60, UtcOffset::UTC);
+        let lines = [
+            format!(
+                "{first} INFO  [anna] ========== starting anna version 1.0.1, sha abc =========="
+            ),
+            format!("{first} WARN  [language] not registering biome"),
+            format!(
+                "{later} INFO  [anna] ========== starting anna version 1.0.1, sha abc =========="
+            ),
+            format!("{later} WARN  [language] not registering biome"),
+        ];
+        let lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let (shown, repeats) = collapse_repeats(&lines);
+
+        assert_eq!(shown, vec![lines[0], lines[1], lines[2]]);
+        assert_eq!(
+            repeats,
+            vec![(
+                "WARN  [language] not registering biome".to_owned(),
+                1,
+                later.as_str()
+            )]
+        );
     }
 
     #[test]

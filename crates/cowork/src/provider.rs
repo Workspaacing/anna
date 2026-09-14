@@ -70,6 +70,9 @@ pub struct ToolResult {
     /// `content`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<crate::checkpoint::Checkpoint>,
+    /// How long the call took, for the session log. Never sent to a provider, like `diff`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Fields added after the first release default, so threads stored by an earlier version still load.
@@ -151,6 +154,44 @@ pub struct Message {
     pub tool_results: Vec<ToolResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// How this step went, on assistant messages. See [`StepRecord`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<StepRecord>,
+}
+
+/// How one model step went, kept on its assistant message for the session log.
+///
+/// Routers such as OpenRouter's `openrouter/free` send each request to a different model, so the
+/// model a thread asks for says little about which one answered. Never sent to a provider: each
+/// wire format builds its request body from the message's other fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepRecord {
+    /// The model that answered, as the provider named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The upstream provider a router sent the request to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The provider's id for the response, to find it in the provider's own logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    /// [`StopReason::as_str`] of the first stop reason given; absent when the stream ended without
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Unix seconds, when the request was sent.
+    #[serde(default)]
+    pub started_at: u64,
+    /// From sending the request to the end of the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// The Anna version that ran the step, since a thread outlives the version it started on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_version: String,
 }
 
 impl Message {
@@ -161,6 +202,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             attachments: Vec::new(),
+            step: None,
         }
     }
 
@@ -171,6 +213,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             attachments: Vec::new(),
+            step: None,
         }
     }
 
@@ -181,6 +224,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_results: results,
             attachments: Vec::new(),
+            step: None,
         }
     }
 }
@@ -218,6 +262,18 @@ pub enum StopReason {
     Other,
 }
 
+impl StopReason {
+    /// The name a step record and the session log use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::EndTurn => "end_turn",
+            StopReason::ToolUse => "tool_use",
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::Other => "other",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompletionEvent {
     Text(String),
@@ -237,6 +293,20 @@ pub enum CompletionEvent {
     ToolCallStart { id: String, name: String },
     ToolCallDelta { id: String, arguments: String },
     Stop(StopReason),
+    /// Who served the response, whenever the provider says any of it. OpenAI-compatible streams
+    /// report it once; Gemini repeats it on every chunk.
+    Served(Served),
+}
+
+/// Who served a response, as far as the provider says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Served {
+    /// The concrete model that answered.
+    pub model: Option<String>,
+    /// The upstream provider a router sent the request to, such as OpenRouter's `provider` field.
+    pub provider: Option<String>,
+    /// The provider's id for the response.
+    pub response_id: Option<String>,
 }
 
 /// Builds the chat endpoint for a provider. models.dev records some `api` bases with a version
@@ -832,6 +902,8 @@ struct SseState {
     stopped: bool,
     /// A stop reason has already been reported, so `[DONE]` must not report a second one.
     reported_stop: bool,
+    /// Who served the response has been reported, so later chunks repeating it add nothing.
+    reported_served: bool,
 }
 
 fn decode_sse(
@@ -899,16 +971,20 @@ fn decode_sse(
                 match decode_chunk(&chunk, wire_api, &mut state) {
                     Ok(events) if events.is_empty() => continue,
                     Ok(events) => {
-                        queued = events;
-                        let event = queued.remove(0);
                         // A stop reason is not the end of the stream, and treating it as one cost
                         // us the token counts: OpenAI-compatible providers send `finish_reason`
                         // in one chunk and `usage` in the next. The stream ends at `[DONE]`, or
                         // when the connection closes — which is what every one of the three
-                        // formats actually promises.
-                        if matches!(event, CompletionEvent::Stop(_)) {
+                        // formats actually promises. A stop anywhere in the chunk counts, since
+                        // what served the response or what it cost can come before it.
+                        if events
+                            .iter()
+                            .any(|event| matches!(event, CompletionEvent::Stop(_)))
+                        {
                             state.reported_stop = true;
                         }
+                        queued = events;
+                        let event = queued.remove(0);
                         return Some((Ok(event), (lines, wire_api, state, queued)));
                     }
                     Err(error) => {
@@ -919,6 +995,15 @@ fn decode_sse(
             }
         },
     )
+}
+
+/// The non-empty string at `pointer`, if there is one.
+fn string_at(value: &Value, pointer: &str) -> Option<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 fn stop_reason(raw: Option<&str>) -> StopReason {
@@ -954,6 +1039,14 @@ fn decode_google_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
     }
 
     let mut events = Vec::new();
+    let served = Served {
+        model: string_at(chunk, "/modelVersion"),
+        provider: None,
+        response_id: string_at(chunk, "/responseId"),
+    };
+    if served != Served::default() {
+        events.push(CompletionEvent::Served(served));
+    }
     if let Some(usage) = chunk.get("usageMetadata") {
         events.push(CompletionEvent::Usage {
             input: usage
@@ -1089,10 +1182,21 @@ fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
             }
             Ok(events)
         }
-        Some("message_start") => match chunk.pointer("/message/usage") {
-            Some(usage) => Ok(vec![anthropic_usage(usage)]),
-            None => Ok(Vec::new()),
-        },
+        Some("message_start") => {
+            let mut events = Vec::new();
+            let served = Served {
+                model: string_at(chunk, "/message/model"),
+                provider: None,
+                response_id: string_at(chunk, "/message/id"),
+            };
+            if served != Served::default() {
+                events.push(CompletionEvent::Served(served));
+            }
+            if let Some(usage) = chunk.pointer("/message/usage") {
+                events.push(anthropic_usage(usage));
+            }
+            Ok(events)
+        }
         // Nothing to report: `message_delta` already said why the message stopped, and a second
         // `EndTurn` here overwrote a `tool_use` or `max_tokens` given a moment before.
         Some("message_stop") => Ok(Vec::new()),
@@ -1128,6 +1232,18 @@ fn decode_openai_chunk(chunk: &Value, state: &mut SseState) -> Result<Vec<Comple
 
     // The usage chunk carries an empty `choices`, so it has to be read before bailing on one.
     let mut events = Vec::new();
+    // Every chunk repeats these; the first is enough.
+    if !state.reported_served {
+        let served = Served {
+            model: string_at(chunk, "/model"),
+            provider: string_at(chunk, "/provider"),
+            response_id: string_at(chunk, "/id"),
+        };
+        if served != Served::default() {
+            state.reported_served = true;
+            events.push(CompletionEvent::Served(served));
+        }
+    }
     if let Some(usage) = chunk.get("usage").filter(|usage| !usage.is_null()) {
         events.push(CompletionEvent::Usage {
             input: usage
@@ -1261,6 +1377,83 @@ mod tests {
                 .collect::<Vec<_>>()
                 .await
         })
+    }
+
+    #[test]
+    fn a_router_reports_which_model_answered_once() {
+        // OpenRouter repeats these on every chunk, and `provider` names the service it routed to.
+        let events = collect(
+            concat!(
+                r#"data: {"id":"gen-1","provider":"Chutes","model":"qwen/qwen3-coder:free","choices":[{"delta":{"content":"Hi"}}]}"#,
+                "\n",
+                r#"data: {"id":"gen-1","provider":"Chutes","model":"qwen/qwen3-coder:free","choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                "\n",
+                "data: [DONE]\n",
+            ),
+            WireApi::OpenAiCompatible,
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::Served(Served {
+                    model: Some("qwen/qwen3-coder:free".into()),
+                    provider: Some("Chutes".into()),
+                    response_id: Some("gen-1".into()),
+                }),
+                CompletionEvent::Text("Hi".into()),
+                CompletionEvent::Stop(StopReason::EndTurn),
+            ]
+        );
+    }
+
+    #[test]
+    fn anthropic_reports_which_model_answered_when_the_message_starts() {
+        let events = collect(
+            concat!(
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":12,\"output_tokens\":1}}}\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n",
+                "data: {\"type\":\"message_stop\"}\n",
+            ),
+            WireApi::Anthropic,
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::Served(Served {
+                    model: Some("claude-sonnet-4-5".into()),
+                    provider: None,
+                    response_id: Some("msg_1".into()),
+                }),
+                CompletionEvent::Usage {
+                    input: 12,
+                    output: 1
+                },
+                CompletionEvent::Usage {
+                    input: 0,
+                    output: 7
+                },
+                CompletionEvent::Stop(StopReason::EndTurn),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_step_record_is_kept_and_a_message_without_one_is_stored_as_before() {
+        let mut message = Message::assistant("hi");
+        let without = serde_json::to_string(&message).expect("serializes");
+        assert!(!without.contains("step"), "{without}");
+
+        message.step = Some(StepRecord {
+            model: Some("qwen/qwen3-coder:free".into()),
+            stop_reason: Some(StopReason::ToolUse.as_str().into()),
+            ..StepRecord::default()
+        });
+        let reloaded: Message =
+            serde_json::from_str(&serde_json::to_string(&message).expect("serializes"))
+                .expect("deserializes");
+        assert_eq!(reloaded.step, message.step);
     }
 
     #[test]
@@ -1463,6 +1656,7 @@ mod tests {
                     }],
                     tool_results: Vec::new(),
                     attachments: Vec::new(),
+                    step: None,
                 },
                 Message::tool_results(vec![ToolResult {
                     checks: None,
@@ -1472,6 +1666,7 @@ mod tests {
                     is_error: false,
                     path: String::new(),
                 diff: String::new(),
+                    duration_ms: None,
                 }]),
             ],
             tools: Vec::new(),
@@ -1631,6 +1826,7 @@ mod tests {
                     }],
                     tool_results: Vec::new(),
                     attachments: Vec::new(),
+                    step: None,
                 },
                 Message::tool_results(vec![ToolResult {
                     checks: None,
@@ -1640,6 +1836,7 @@ mod tests {
                     is_error: false,
                     path: String::new(),
                 diff: String::new(),
+                    duration_ms: None,
                 }]),
             ],
             tools: Vec::new(),
