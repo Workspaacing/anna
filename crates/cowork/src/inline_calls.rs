@@ -173,9 +173,73 @@ pub fn strip(text: &str, found: &[Inline]) -> String {
     out.trim().to_owned()
 }
 
+/// Markup a model uses to write a tool call as text in forms `find` does not read: the XML style of
+/// Qwen and Hermes models (`<function=read><parameter=path>…`), `<function_calls>`, or the tags
+/// around a body that did not parse.
+const CALL_MARKUP: [&str; 4] = [
+    "<tool_call>",
+    "</tool_call>",
+    "<function=",
+    "<function_calls>",
+];
+
+/// How many `<unk>` tokens in one reply mean the model's output fell apart.
+///
+/// A model emits `<unk>` for a token it cannot decode. One can be a tokenizer's quirk; a run of
+/// them is noise, and whatever follows it is not to be acted on. In the thread that prompted this,
+/// what followed was a call to read a Linux path on a Windows machine.
+const UNKNOWN_TOKEN_LIMIT: usize = 8;
+
+/// Whether a reply has degenerated into unknown tokens.
+pub fn degenerate(text: &str) -> bool {
+    text.matches("<unk>").count() >= UNKNOWN_TOKEN_LIMIT
+}
+
+/// Whether a reply writes out a tool call that `find` could not read.
+///
+/// Lines inside fenced code blocks are not counted, so a model explaining these formats, or quoting
+/// a file that contains them, is not taken for one that tried to use them.
+pub fn unread_call(text: &str) -> bool {
+    let mut in_fence = false;
+    text.lines().any(|line| {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            return false;
+        }
+        !in_fence && CALL_MARKUP.iter().any(|markup| line.contains(markup))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_that_fell_apart_into_unknown_tokens_is_degenerate() {
+        let noise = format!(
+            "Also, the body is{}  #include <iostream>",
+            "<unk>".repeat(180)
+        );
+        assert!(degenerate(&noise));
+        assert!(!degenerate("A tokenizer quirk: <unk> once."));
+    }
+
+    #[test]
+    fn a_call_written_in_xml_form_is_recognised_as_unread() {
+        // The form from the thread that prompted this: nothing `find` can parse, so nothing ran,
+        // and the turn was recorded as finished.
+        let text = "<function=read>\n<parameter=path>\n/home/user/project/planet.txt\n</parameter>\n</function>\n</tool_call>";
+        assert!(find(text).is_empty());
+        assert!(unread_call(text));
+    }
+
+    #[test]
+    fn call_markup_quoted_in_a_code_block_is_not_an_attempted_call() {
+        let text =
+            "Hermes models write calls like this:\n```xml\n<function=read>\n```\nThat is all.";
+        assert!(!unread_call(text));
+        assert!(!unread_call("An ordinary answer about a <div> element."));
+    }
 
     #[test]
     fn a_properly_tagged_call_is_found() {
