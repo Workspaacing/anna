@@ -5,7 +5,7 @@ use crate::{
 };
 use dap::requests::StackTrace;
 use editor::{DisplayPoint, display_map::DisplayRow};
-use gpui::{BackgroundExecutor, TestAppContext, VisualTestContext};
+use gpui::{BackgroundExecutor, BorrowAppContext, TestAppContext, VisualTestContext};
 use project::{FakeFs, Project};
 use serde_json::json;
 use tests::{init_test, init_test_workspace};
