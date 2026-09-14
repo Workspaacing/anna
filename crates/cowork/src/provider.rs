@@ -1288,11 +1288,13 @@ mod tests {
                 "\n",
                 "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n",
                 "data: {\"type\":\"ping\"}\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
                 "data: {\"type\":\"message_stop\"}\n",
             ),
             WireApi::Anthropic,
         );
 
+        // One stop, from `message_delta`: Anthropic always says why before `message_stop`.
         assert_eq!(
             events,
             vec![
