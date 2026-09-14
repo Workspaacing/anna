@@ -162,6 +162,16 @@ async fn test_handle_output_event(executor: BackgroundExecutor, cx: &mut TestApp
 #[gpui::test]
 async fn test_escape_code_processing(executor: BackgroundExecutor, cx: &mut TestAppContext) {
     init_test(cx);
+    // The expected rows assume a console as wide as the window. Docked left, the panel is 300px
+    // wide and the long lines below wrap onto extra rows.
+    cx.update(|cx| {
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.debugger.get_or_insert_default().dock =
+                    Some(workspace::dock::DockPosition::Bottom.into());
+            });
+        });
+    });
 
     let fs = FakeFs::new(executor.clone());
 

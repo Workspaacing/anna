@@ -1078,7 +1078,7 @@ mod tests {
             BTreeMap::from_iter([(
                 0,
                 ParsedMetadataBlock {
-                    content_range: 4..28,
+                    content_range: 4..27,
                     rows: Some(vec![
                         MetadataRow {
                             key: 4..9,
@@ -1086,7 +1086,7 @@ mod tests {
                         },
                         MetadataRow {
                             key: 16..22,
-                            value: 24..27,
+                            value: 24..26,
                         },
                     ]),
                 },

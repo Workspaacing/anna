@@ -34,3 +34,8 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter =  'package(editor) and test(test_random_blocks)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# Randomized tests that run past 60s on a 4-core GitHub runner.
+[[profile.default.overrides]]
+filter = '(package(worktree) and test(test_random_worktree_changes)) or (package(multi_buffer) and test(test_random_multibuffer))'
+slow-timeout = { period = "300s", terminate-after = 1 }

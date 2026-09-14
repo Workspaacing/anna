@@ -960,7 +960,9 @@ async fn test_extension_store_with_test_extension(cx: &mut TestAppContext) {
     await_or_timeout(
         &executor,
         "awaiting install_dev_extension",
-        60,
+        // Compiling the test extension to WebAssembly without a warm build cache takes minutes on
+        // a CI runner; nextest allows this test 300 seconds for the same reason.
+        300,
         extension_store.update(cx, |store, cx| {
             store.install_dev_extension(test_extension_dir.clone(), cx)
         }),

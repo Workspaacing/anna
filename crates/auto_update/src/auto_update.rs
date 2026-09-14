@@ -65,6 +65,12 @@ impl UpdateLock {
 
     fn try_acquire() -> Result<Self> {
         let path = Self::path();
+        // Anna creates this directory at startup, but nothing keeps it there afterwards, and tests
+        // never create it.
+        if let Some(directory) = path.parent() {
+            std::fs::create_dir_all(directory)
+                .with_context(|| format!("creating the directory of update lock {path:?}"))?;
+        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)

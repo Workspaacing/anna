@@ -1600,8 +1600,20 @@ fn test_bracket_colorization_indices_remain_stable_across_row_chunks(cx: &mut Ap
         "fixture should exceed the bounded tree-sitter query window"
     );
 
-    let buffer = cx.new(|cx| Buffer::local(text.clone(), cx).with_language(json_lang(), cx));
-    let snapshot = buffer.update(cx, |buffer, _| buffer.snapshot());
+    let buffer = cx.new(|cx| {
+        let mut buffer = Buffer::local(text.clone(), cx);
+        // A fixture this large can outlast the 10ms synchronous parse on a busy CI runner, and the
+        // parse then finishes in the background, leaving the snapshot below without a syntax tree.
+        buffer.set_sync_parse_timeout(Some(Duration::from_secs(60)));
+        buffer.with_language(json_lang(), cx)
+    });
+    let snapshot = buffer.update(cx, |buffer, _| {
+        assert!(
+            !buffer.is_parsing(),
+            "the fixture should be parsed synchronously"
+        );
+        buffer.snapshot()
+    });
 
     let late_open_offset = property_object_open_offsets[400];
     let late_matches = snapshot.fetch_bracket_ranges(late_open_offset..late_open_offset + 1, None);

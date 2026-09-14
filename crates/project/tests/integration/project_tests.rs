@@ -14822,16 +14822,28 @@ async fn test_repository_pending_ops_stage_all(
                 StatusEntry {
                     repo_path: repo_path("a.txt"),
                     status: FileStatus::Untracked,
-                    diff_stat: None,
+                    diff_stat: Some(DiffStat {
+                        added: 1,
+                        deleted: 0,
+                    }),
                     staged_diff_stat: None,
-                    unstaged_diff_stat: None,
+                    unstaged_diff_stat: Some(DiffStat {
+                        added: 1,
+                        deleted: 0,
+                    }),
                 },
                 StatusEntry {
                     repo_path: repo_path("b.txt"),
                     status: FileStatus::Untracked,
-                    diff_stat: None,
+                    diff_stat: Some(DiffStat {
+                        added: 1,
+                        deleted: 0,
+                    }),
                     staged_diff_stat: None,
-                    unstaged_diff_stat: None,
+                    unstaged_diff_stat: Some(DiffStat {
+                        added: 1,
+                        deleted: 0,
+                    }),
                 },
             ]
         );

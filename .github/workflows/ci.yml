@@ -60,6 +60,10 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install Linux dependencies
         run: ./script/linux
+      # The GPU texture atlas tests need a Vulkan adapter, and runners have no GPU: Mesa's lavapipe
+      # is a Vulkan driver that renders on the CPU.
+      - name: Install a software Vulkan driver
+        run: sudo apt-get install -y mesa-vulkan-drivers
       - name: Install Rust toolchain
         run: rustup show
       # The extension host tests compile a test extension to WebAssembly.
