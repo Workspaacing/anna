@@ -254,6 +254,56 @@ impl Client {
         serde_json::from_slice(&body).with_context(|| format!("parsing GitHub's answer for {path}"))
     }
 
+    /// A REST GET whose answer is text rather than JSON.
+    ///
+    /// A job's log is the case this exists for: GitHub answers with a redirect to a plain-text
+    /// file, and that file is the only place the reason a step failed is written down.
+    pub async fn rest_text(&self, path: &str) -> Result<String> {
+        let url = format!("{API_BASE}/{}", path.trim_start_matches('/'));
+        let request = Request::get(&url)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            .header("user-agent", "Anna")
+            .header("authorization", format!("Bearer {}", self.token))
+            .follow_redirects(http_client::RedirectPolicy::FollowAll)
+            .timeout(REQUEST_TIMEOUT)
+            .body(AsyncBody::empty())
+            .with_context(|| format!("building a request for {url}"))?;
+
+        let mut response = self
+            .http
+            .send(request)
+            .await
+            .with_context(|| format!("asking GitHub for {path}"))?;
+
+        let status = response.status();
+        let mut body = Vec::new();
+        response
+            .body_mut()
+            .read_to_end(&mut body)
+            .await
+            .context("reading GitHub's answer")?;
+
+        if status == http_client::StatusCode::UNAUTHORIZED {
+            return Err(Failure::Unauthorized.into());
+        }
+        if !status.is_success() {
+            let detail = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| format!("GitHub returned {status}"));
+            return Err(Failure::Message(detail).into());
+        }
+
+        // A log is whatever the job printed, which is not always UTF-8.
+        Ok(String::from_utf8_lossy(&body).into_owned())
+    }
+
     /// Runs one GraphQL query and returns its `data`, or the reduced failure.
     pub async fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
         let body = serde_json::to_vec(&json!({ "query": query, "variables": variables }))

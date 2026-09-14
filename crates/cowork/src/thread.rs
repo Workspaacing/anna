@@ -30,6 +30,7 @@ const INDEX_KEY: &str = "index";
 const CATALOG_KEY: &str = "catalog";
 const STORED_KEYS_KEY: &str = "providers_with_keys";
 const LAST_MODEL_KEY: &str = "last_model";
+const ARCHIVED_KEY: &str = "archived";
 const PREVIEW_LENGTH: usize = 120;
 const TITLE_LENGTH: usize = 48;
 
@@ -304,6 +305,9 @@ pub struct CoworkStore {
     /// What a new thread starts on. Remembered rather than configured — see
     /// [`CoworkStore::model_for_new_thread`].
     last_model: Option<ModelRef>,
+    /// Threads put away once their work was done. Kept apart from the index, which every open view
+    /// rewrites when its turn ends, so archiving a thread that is open does not get undone by it.
+    archived: HashSet<ThreadId>,
     pending_api_key: Option<PendingApiKey>,
     provider_list: Arc<[ProviderRow]>,
     model_list: Arc<[ModelRow]>,
@@ -338,11 +342,12 @@ impl CoworkStore {
         let load = cx.spawn({
             let key_value_store = key_value_store.clone();
             async move |this, cx| {
-                let (loaded, last_model) = cx
+                let (loaded, last_model, archived) = cx
                     .background_spawn(async move {
                         (
                             read_index(&key_value_store),
                             read_last_model(&key_value_store),
+                            read_archived(&key_value_store),
                         )
                     })
                     .await;
@@ -351,6 +356,7 @@ impl CoworkStore {
                     this.load_stored_keys(cx);
                     this.threads = loaded;
                     this.last_model = last_model;
+                    this.archived.extend(archived);
                     this.next_sequence = this.threads.len() as u64;
                     cx.emit(CoworkStoreEvent::ThreadsChanged);
                     cx.notify();
@@ -374,6 +380,7 @@ impl CoworkStore {
             disabled_models: HashSet::default(),
             live_models: HashMap::default(),
             last_model: None,
+            archived: HashSet::default(),
             pending_api_key: None,
             provider_list: Arc::from([]),
             model_list: Arc::from([]),
@@ -1028,8 +1035,45 @@ impl CoworkStore {
         cx.notify();
     }
 
+    pub fn is_archived(&self, id: &ThreadId) -> bool {
+        self.archived.contains(id)
+    }
+
+    /// Archives or restores a thread. An archived thread stays stored and a search still finds it;
+    /// the panel just stops listing it by default.
+    pub fn set_archived(&mut self, id: &ThreadId, archived: bool, cx: &mut Context<Self>) {
+        let changed = if archived {
+            self.archived.insert(id.clone())
+        } else {
+            self.archived.remove(id)
+        };
+        if !changed {
+            return;
+        }
+        self.persist_archived(cx);
+        cx.emit(CoworkStoreEvent::ThreadsChanged);
+        cx.notify();
+    }
+
+    fn persist_archived(&self, cx: &mut Context<Self>) {
+        let ids = self.archived.iter().cloned().collect::<Vec<_>>();
+        let key_value_store = self.key_value_store.clone();
+        cx.background_spawn(async move {
+            let raw = serde_json::to_string(&ids).context("serializing the archived threads")?;
+            key_value_store
+                .scoped(KVP_NAMESPACE)
+                .write(ARCHIVED_KEY.to_owned(), raw)
+                .await
+                .context("writing the archived threads")
+        })
+        .detach_and_log_err(cx);
+    }
+
     pub fn delete_thread(&mut self, id: ThreadId, cx: &mut Context<Self>) {
         self.threads.retain(|thread| thread.id != id);
+        if self.archived.remove(&id) {
+            self.persist_archived(cx);
+        }
 
         let key_value_store = self.key_value_store.clone();
         let index = self.threads.clone();
@@ -1060,6 +1104,22 @@ fn read_last_model(key_value_store: &KeyValueStore) -> Option<ModelRef> {
         .ok()
         .flatten()
         .and_then(|raw| ModelRef::parse(&raw))
+}
+
+fn read_archived(key_value_store: &KeyValueStore) -> HashSet<ThreadId> {
+    key_value_store
+        .scoped(KVP_NAMESPACE)
+        .read(ARCHIVED_KEY)
+        .context("reading the archived cowork threads")
+        .log_err()
+        .flatten()
+        .and_then(|raw| {
+            serde_json::from_str::<Vec<ThreadId>>(&raw)
+                .context("parsing the archived cowork threads")
+                .log_err()
+        })
+        .map(|ids| ids.into_iter().collect())
+        .unwrap_or_default()
 }
 
 fn read_index(key_value_store: &KeyValueStore) -> Vec<ThreadMetadata> {
