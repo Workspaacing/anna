@@ -6,11 +6,11 @@ use crate::{
     model_selector::ModelSelector,
     provider::{
         self, Attachment, AttachmentKind, CompletionEvent, CompletionRequest, Message, Role,
-        StopReason, ToolCall, ToolResult,
+        Served, StepRecord, StopReason, ToolCall, ToolResult,
     },
     permission::{Decision, DecidedBy, PermissionBroker, PermissionEvent, PermissionRequest},
     session_log::{self, LogContent, ThreadLog},
-    thread::{ActivityKind, CoworkStore, Thread, ThreadId},
+    thread::{ActivityKind, CoworkStore, Thread, ThreadId, now_seconds},
     tool::{ToolContext, ToolKind, ToolRegistry},
     verify::{CheckReport, Finding, Severity},
 };
@@ -36,6 +36,7 @@ use std::{
 use crate::waiting::{OpenPrompt, WaitingOnYou};
 use crate::image_preview::ImagePreview;
 use gpui::StyledText;
+use release_channel::AppVersion;
 use settings::AgentPermission;
 use ui::{
     Button, ButtonStyle, ContextMenu, ContextMenuEntry, CopyButton, Divider, PopoverMenu, Tooltip,
@@ -755,6 +756,7 @@ impl CoworkThreadView {
             current_error: self.error.as_ref().map(|error| error.to_string()),
             branch: self.branch_name(cx).map(|branch| branch.to_string()),
             open_in_view: true,
+            system_prompt: Some(self.current_system_prompt(cx)),
         }
     }
 
@@ -1057,6 +1059,16 @@ impl CoworkThreadView {
         if input == 0 && output == 0 {
             return;
         }
+        if let Some(step) = self.current_step() {
+            // Anthropic reports input when the message starts and output when it ends, each time
+            // with the other at zero, so a zero never replaces a count already known.
+            if input > 0 {
+                step.input_tokens = Some(input);
+            }
+            if output > 0 {
+                step.output_tokens = Some(output);
+            }
+        }
         self.thread.metadata.context_tokens = Some(input.saturating_add(output));
         cx.notify();
     }
@@ -1305,6 +1317,62 @@ impl CoworkThreadView {
         self.follow_the_end();
     }
 
+    /// Starts the record of the step whose assistant message was just pushed.
+    fn begin_step(&mut self, cx: &App) {
+        let app_version = AppVersion::global(cx).to_string();
+        if let Some(message) = self.thread.messages.last_mut() {
+            message.step = Some(StepRecord {
+                started_at: now_seconds(),
+                app_version,
+                ..StepRecord::default()
+            });
+        }
+    }
+
+    /// The record of the step being streamed, on the stored copy of its assistant message.
+    fn current_step(&mut self) -> Option<&mut StepRecord> {
+        self.thread
+            .messages
+            .last_mut()
+            .filter(|message| message.role == Role::Assistant)
+            .and_then(|message| message.step.as_mut())
+    }
+
+    fn record_served(&mut self, served: Served) {
+        if let Some(model) = &served.model {
+            match &served.provider {
+                Some(provider) => {
+                    log::info!("cowork: step answered by {model} through {provider}")
+                }
+                None => log::info!("cowork: step answered by {model}"),
+            }
+        }
+        let Some(step) = self.current_step() else {
+            return;
+        };
+        if served.model.is_some() {
+            step.model = served.model;
+        }
+        if served.provider.is_some() {
+            step.provider = served.provider;
+        }
+        if served.response_id.is_some() {
+            step.response_id = served.response_id;
+        }
+    }
+
+    fn record_stop(&mut self, reason: StopReason) {
+        if let Some(step) = self.current_step() {
+            step.stop_reason = Some(reason.as_str().to_owned());
+        }
+    }
+
+    fn end_step(&mut self, took: std::time::Duration) {
+        if let Some(step) = self.current_step() {
+            step.duration_ms = Some(u64::try_from(took.as_millis()).unwrap_or(u64::MAX));
+        }
+    }
+
     fn extend_last_message(&mut self, chunk: &str, cx: &mut Context<Self>) {
         let Some(message) = self.messages.last_mut() else {
             return;
@@ -1365,14 +1433,18 @@ impl CoworkThreadView {
 
                 if this
                     .update(cx, |this, cx| {
-                        this.push_message(Role::Assistant, String::new(), cx)
+                        this.push_message(Role::Assistant, String::new(), cx);
+                        this.begin_step(cx);
                     })
                     .is_err()
                 {
                     return;
                 }
 
+                let started = std::time::Instant::now();
                 let outcome = Self::stream_one_step(&this, http_client.clone(), request, cx).await;
+                this.update(cx, |this, _| this.end_step(started.elapsed()))
+                    .log_err();
                 let (calls, stop) = match outcome {
                     Ok(outcome) => outcome,
                     Err(error) => {
@@ -1544,6 +1616,14 @@ impl CoworkThreadView {
                         return Ok((Vec::new(), None));
                     }
                 }
+                CompletionEvent::Served(served) => {
+                    if this
+                        .update(cx, |this, _| this.record_served(served))
+                        .is_err()
+                    {
+                        return Ok((Vec::new(), None));
+                    }
+                }
                 CompletionEvent::Stop(reason) => {
                     // Recorded rather than breaking on. OpenAI-compatible providers send the
                     // usage chunk *after* the one carrying `finish_reason`, so stopping here
@@ -1553,6 +1633,8 @@ impl CoworkThreadView {
                     // stream, and letting it overwrite `ToolUse` dropped the calls.
                     if stop.is_none() {
                         stop = Some(reason);
+                        this.update(cx, |this, _| this.record_stop(reason))
+                            .log_err();
                     }
                 }
             }
@@ -1715,6 +1797,7 @@ impl CoworkThreadView {
             diff: String::new(),
             checks: None,
             checkpoint: None,
+            duration_ms: None,
         };
 
         let Some(tool) = tools.get(&call.name) else {
@@ -1732,8 +1815,12 @@ impl CoworkThreadView {
             }
         };
 
+        let started = std::time::Instant::now();
         let run = cx.update(|cx| tool.run(arguments, context, cx));
-        match run.await {
+        let outcome = run.await;
+        // Around the whole run, so a command that waited for the user's approval counts the wait.
+        let duration_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        match outcome {
             Ok(output) => ToolResult {
                 call_id: call.id.clone(),
                 content: output.content,
@@ -1742,8 +1829,12 @@ impl CoworkThreadView {
                 diff: output.diff,
                 checks: output.checks,
                 checkpoint: output.checkpoint,
+                duration_ms,
             },
-            Err(failure) => error(format!("{failure:#}")),
+            Err(failure) => ToolResult {
+                duration_ms,
+                ..error(format!("{failure:#}"))
+            },
         }
     }
 
@@ -1776,6 +1867,15 @@ impl CoworkThreadView {
         cx.notify();
     }
 
+    /// The system prompt this thread sends, which the session log shows as well.
+    fn current_system_prompt(&self, cx: &App) -> String {
+        system_prompt(
+            os_name(std::env::consts::OS),
+            self.thread.metadata.project.as_deref(),
+            &project_folders(&self.project, cx),
+        )
+    }
+
     fn build_request(&self, cx: &App) -> Result<CompletionRequest> {
         let model = self.thread.metadata.model.clone();
         let store = self.store.read(cx);
@@ -1802,11 +1902,7 @@ impl CoworkThreadView {
             model: catalog_model.clone(),
             model_id: model.model_id.clone(),
             api_key,
-            system: Some(system_prompt(
-                os_name(std::env::consts::OS),
-                self.thread.metadata.project.as_deref(),
-                &project_folders(&self.project, cx),
-            )),
+            system: Some(self.current_system_prompt(cx)),
             messages: self.thread.messages.clone(),
             tools: self.tools.definitions(),
             // Every model publishes its own ceiling, so asking for less would be leaving the
@@ -4007,6 +4103,7 @@ mod tests {
                 before,
                 after_digest: 0,
             }),
+            duration_ms: None,
         }
     }
 
