@@ -717,11 +717,16 @@ fn write_step(out: &mut String, step: &StepRecord, offset: UtcOffset) {
     );
     let tokens = match (step.input_tokens, step.output_tokens) {
         (None, None) => "not reported by the provider".to_owned(),
-        (input, output) => format!(
-            "{} in, {} out",
-            input.map_or_else(|| "?".to_owned(), |count| count.to_string()),
-            output.map_or_else(|| "?".to_owned(), |count| count.to_string()),
-        ),
+        (input, output) => {
+            let input = match (input, step.cached_input_tokens) {
+                (Some(input), Some(cached)) => format!("{input} ({cached} from the cache)"),
+                (input, _) => input.map_or_else(|| "?".to_owned(), |count| count.to_string()),
+            };
+            format!(
+                "{input} in, {} out",
+                output.map_or_else(|| "?".to_owned(), |count| count.to_string()),
+            )
+        }
     };
     push_item(out, "Tokens", &tokens);
     if let Some(duration_ms) = step.duration_ms {
@@ -1553,6 +1558,7 @@ mod tests {
             stop_reason: Some("tool_use".to_owned()),
             input_tokens: Some(1200),
             output_tokens: Some(85),
+            cached_input_tokens: Some(900),
             started_at: CREATED_AT + 2,
             duration_ms: Some(2400),
             app_version: "1.0.6".to_owned(),
@@ -1744,7 +1750,7 @@ mod tests {
             "- Served by: `Anthropic`",
             "- Response id: `gen-42`",
             "- Stop reason: `tool_use`",
-            "- Tokens: 1200 in, 85 out",
+            "- Tokens: 1200 (900 from the cache) in, 85 out",
             "- Took: 2.4 s",
             "- Anna version: 1.0.6",
             "- Took: 40 ms",

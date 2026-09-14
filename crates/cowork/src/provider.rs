@@ -183,6 +183,9 @@ pub struct StepRecord {
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// How much of the input the provider read from its prompt cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
     /// Unix seconds, when the request was sent.
     #[serde(default)]
     pub started_at: u64,
@@ -244,7 +247,11 @@ pub struct CompletionRequest {
     pub model: Model,
     pub model_id: String,
     pub api_key: String,
+    /// The part of the system prompt that stays the same for a turn.
     pub system: Option<String>,
+    /// The part of the system prompt that can change between requests, sent after `system` so a
+    /// prompt cache keeps reusing everything before it.
+    pub system_context: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     /// The model's published output ceiling, or `None` when models.dev declares none — in which
@@ -296,6 +303,9 @@ pub enum CompletionEvent {
     /// Who served the response, whenever the provider says any of it. OpenAI-compatible streams
     /// report it once; Gemini repeats it on every chunk.
     Served(Served),
+    /// How many input tokens the provider read from its prompt cache, when it reports any. Already
+    /// counted in `Usage::input`.
+    CachedInput(u64),
 }
 
 /// Who served a response, as far as the provider says.
@@ -582,6 +592,27 @@ fn anthropic_user_content(message: &Message) -> Result<Vec<Value>> {
     Ok(content)
 }
 
+/// The system prompt as Anthropic's text blocks: the stable part, marked for the prompt cache when
+/// `cache`, then the part that changes between requests.
+fn anthropic_system(request: &CompletionRequest, cache: bool) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    if let Some(system) = request.system.as_deref().filter(|text| !text.is_empty()) {
+        let mut block = json!({ "type": "text", "text": system });
+        if cache {
+            block["cache_control"] = json!({ "type": "ephemeral" });
+        }
+        blocks.push(block);
+    }
+    if let Some(context) = request
+        .system_context
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        blocks.push(json!({ "type": "text", "text": context }));
+    }
+    blocks
+}
+
 fn anthropic_body(request: &CompletionRequest) -> Result<Value> {
     let mut messages = Vec::new();
     for message in &request.messages {
@@ -624,6 +655,20 @@ fn anthropic_body(request: &CompletionRequest) -> Result<Value> {
         }
     }
 
+    // Anthropic's own API caches everything up to a marked block, at a tenth of the input price when
+    // read back. Two marks: the stable system prompt, which covers the tools sent before it, and the
+    // end of the conversation so far, which the next step of the turn repeats. Other services that
+    // speak this format are not all known to accept the marker, so they get none.
+    let cache = request.provider_id == "anthropic";
+    if cache
+        && let Some(block) = messages
+            .last_mut()
+            .and_then(|message| message["content"].as_array_mut())
+            .and_then(|blocks| blocks.last_mut())
+    {
+        block["cache_control"] = json!({ "type": "ephemeral" });
+    }
+
     let mut body = json!({
         "model": request.model_id,
         // Anthropic requires this field, so it is the one format that cannot simply omit it.
@@ -631,7 +676,8 @@ fn anthropic_body(request: &CompletionRequest) -> Result<Value> {
         "stream": true,
         "messages": messages,
     });
-    if let Some(system) = &request.system {
+    let system = anthropic_system(request, cache);
+    if !system.is_empty() {
         body["system"] = json!(system);
     }
     if !request.tools.is_empty() {
@@ -728,7 +774,7 @@ fn google_body(request: &CompletionRequest) -> Result<Value> {
     if let Some(limit) = request.max_output_tokens {
         body["generationConfig"] = json!({ "maxOutputTokens": limit });
     }
-    if let Some(system) = &request.system {
+    if let Some(system) = combined_system(request) {
         body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
     }
     if !request.tools.is_empty() {
@@ -808,9 +854,20 @@ fn openai_user_content(message: &Message) -> Result<Value> {
     Ok(json!(parts))
 }
 
+/// The system prompt as one text, for the formats that take a single one. The stable part comes
+/// first, so the automatic prompt caches of OpenAI, Google and the rest can reuse it.
+fn combined_system(request: &CompletionRequest) -> Option<String> {
+    let parts = [request.system.as_deref(), request.system_context.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 fn openai_body(request: &CompletionRequest) -> Result<Value> {
     let mut messages = Vec::new();
-    if let Some(system) = &request.system {
+    if let Some(system) = combined_system(request) {
         messages.push(json!({ "role": "system", "content": system }));
     }
 
@@ -1058,6 +1115,13 @@ fn decode_google_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
         });
+        if let Some(cached) = usage
+            .get("cachedContentTokenCount")
+            .and_then(Value::as_u64)
+            .filter(|tokens| *tokens > 0)
+        {
+            events.push(CompletionEvent::CachedInput(cached));
+        }
     }
 
     let Some(candidate) = chunk.pointer("/candidates/0") else {
@@ -1176,6 +1240,7 @@ fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
             let mut events = Vec::new();
             if let Some(usage) = chunk.get("usage") {
                 events.push(anthropic_usage(usage));
+                events.extend(anthropic_cached(usage));
             }
             if let Some(reason) = chunk.pointer("/delta/stop_reason").and_then(Value::as_str) {
                 events.push(CompletionEvent::Stop(stop_reason(Some(reason))));
@@ -1194,6 +1259,7 @@ fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
             }
             if let Some(usage) = chunk.pointer("/message/usage") {
                 events.push(anthropic_usage(usage));
+                events.extend(anthropic_cached(usage));
             }
             Ok(events)
         }
@@ -1211,18 +1277,33 @@ fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
     }
 }
 
-/// Anthropic reports the two counts separately and repeats the input on every delta.
+/// Anthropic reports the two counts separately and repeats the input on every delta. Tokens read
+/// from or written to the prompt cache are counted apart from `input_tokens`, so all three make up
+/// the input.
 fn anthropic_usage(usage: &Value) -> CompletionEvent {
     CompletionEvent::Usage {
-        input: usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
+        input: [
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+        .into_iter()
+        .map(|field| usage.get(field).and_then(Value::as_u64).unwrap_or(0))
+        .sum(),
         output: usage
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
     }
+}
+
+/// How much of the input Anthropic read from its prompt cache, when it read any.
+fn anthropic_cached(usage: &Value) -> Option<CompletionEvent> {
+    usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .filter(|tokens| *tokens > 0)
+        .map(CompletionEvent::CachedInput)
 }
 
 fn decode_openai_chunk(chunk: &Value, state: &mut SseState) -> Result<Vec<CompletionEvent>> {
@@ -1255,6 +1336,13 @@ fn decode_openai_chunk(chunk: &Value, state: &mut SseState) -> Result<Vec<Comple
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
         });
+        if let Some(cached) = usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+            .filter(|tokens| *tokens > 0)
+        {
+            events.push(CompletionEvent::CachedInput(cached));
+        }
     }
 
     let Some(choice) = chunk.pointer("/choices/0") else {
@@ -1326,6 +1414,7 @@ mod tests {
             model_id: "m".into(),
             api_key: "k".into(),
             system: None,
+            system_context: None,
             messages: vec![Message::user("hi")],
             tools: Vec::new(),
             max_output_tokens,
@@ -1377,6 +1466,78 @@ mod tests {
                 .collect::<Vec<_>>()
                 .await
         })
+    }
+
+    #[test]
+    fn anthropic_caches_the_stable_system_prompt_and_the_conversation_so_far() {
+        let mut request = request("@ai-sdk/anthropic", Some(64));
+        request.provider_id = "anthropic".into();
+        request.system = Some("how to work".into());
+        request.system_context = Some("today".into());
+
+        let body = anthropic_body(&request).unwrap();
+
+        assert_eq!(body["system"][0]["text"], "how to work");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["system"][1]["text"], "today");
+        assert!(
+            body["system"][1].get("cache_control").is_none(),
+            "what changes between requests is not cached"
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn another_service_speaking_anthropics_format_gets_no_cache_markers() {
+        let mut request = request("@ai-sdk/anthropic", Some(64));
+        request.system = Some("how to work".into());
+
+        let body = anthropic_body(&request).unwrap();
+
+        assert!(!body.to_string().contains("cache_control"), "{body}");
+        assert_eq!(body["system"][0]["text"], "how to work");
+    }
+
+    #[test]
+    fn a_single_system_text_puts_the_stable_part_first() {
+        let mut request = request("@ai-sdk/openai-compatible", Some(64));
+        request.system = Some("how to work".into());
+        request.system_context = Some("today".into());
+
+        let body = openai_body(&request).unwrap();
+
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "how to work\n\ntoday");
+    }
+
+    #[test]
+    fn cached_input_is_reported_and_still_counted_as_input() {
+        let events = collect(
+            concat!(
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":900,\"cache_creation_input_tokens\":80,\"output_tokens\":1}}}\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n",
+            ),
+            WireApi::Anthropic,
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::Usage {
+                    input: 1000,
+                    output: 1
+                },
+                CompletionEvent::CachedInput(900),
+                CompletionEvent::Usage {
+                    input: 0,
+                    output: 5
+                },
+                CompletionEvent::Stop(StopReason::EndTurn),
+            ]
+        );
     }
 
     #[test]
@@ -1644,6 +1805,7 @@ mod tests {
             model_id: "gemini".into(),
             api_key: "k".into(),
             system: Some("be brief".into()),
+            system_context: None,
             messages: vec![
                 Message::user("hi"),
                 Message {
@@ -1814,6 +1976,7 @@ mod tests {
             model_id: "m".into(),
             api_key: "k".into(),
             system: None,
+            system_context: None,
             messages: vec![
                 Message::user("hi"),
                 Message {

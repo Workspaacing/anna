@@ -20,6 +20,7 @@ mod document;
 mod image;
 mod image_preview;
 mod inline_calls;
+mod instructions;
 mod fetch;
 mod github_tools;
 mod gitleaks;

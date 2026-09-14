@@ -126,6 +126,10 @@
     //   "trusted"  — only before what cannot be undone: deleting, pushing, publishing
     //   "open"     — never, except when a command reaches outside this project
     "permission": "standard",
+    // Your own instructions for Anna's agents, added to what they are told in
+    // every project. A project's AGENTS.md, CLAUDE.md or .rules is read as
+    // well; where the two disagree, these instructions win.
+    "instructions": "",
     // The shell the agent runs commands in. "terminal" follows `terminal.shell`,
     // so a command the agent runs behaves like one you would type yourself.
     // Also accepts "system", a program name, or {"program": ..., "args": [...]}.

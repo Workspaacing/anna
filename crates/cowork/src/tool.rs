@@ -639,9 +639,9 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run a command in the project's shell and return its output. The user is asked to approve \
-         it first, and may decline. Runs in the project's root directory unless `cwd` says \
-         otherwise. Output is truncated to the last few thousand characters, so prefer commands \
+        "Run a command in the project's shell and return its output. Depending on the permission \
+         level, the user may be asked to approve it first and may decline. Runs in the thread's \
+         working folder unless `cwd` says otherwise. Output is truncated to the last few thousand characters, so prefer commands \
          that report concisely — `cargo test --quiet` over `cargo test`. Not for editing files: \
          use `edit` and `write`, whose changes the user can see and undo."
     }

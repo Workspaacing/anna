@@ -31,7 +31,7 @@ throws work away.
 ## Where this stands
 
 Phases 1 and 3 are built, and phase 5 is built in a different shape from the plan below. Phase 2 has
-no `glob` or `grep`, phase 4 is partly built, and phase 6 has only a base system prompt.
+no `glob` or `grep`, phase 4 is partly built, and phase 6 has the system prompt and project rules.
 
 | | |
 | --- | --- |
@@ -41,7 +41,7 @@ no `glob` or `grep`, phase 4 is partly built, and phase 6 has only a base system
 | 3. Permission broker | **built, for `shell` only** — file tools never ask. Four levels (`ask`, `standard`, `trusted`, `open`) decide what is asked by what a command would do; approval is once / always / reject, with "always" scoped to the program name. Unlike the plan, "always" is remembered for the project across sessions unless the command cannot be undone, and there are no allow/deny patterns. A command that reaches outside the project's folders is asked about at every level, and file tools refuse paths outside them. A project's settings file cannot set the level |
 | 4. The panel | **partly** — history, search, the model picker and session-log export; a turn's tool calls as one table, with each edit's diff expandable inline; a Stop button and `cowork::Cancel`, not bound to `escape`; a permission card; a Changes button that opens the editor's own diff of uncommitted changes. No per-hunk accept/reject of the agent's edits, and no `@` mentions |
 | 5. Undo | **built, differently** — rewind to any user message (conversation and code, conversation only, or code only), or fork from one. Backed by a checkpoint each `write` and `edit` records rather than by git snapshots: a file someone else changed since is left alone, and what a `shell` command changed is not restored |
-| 6. Extensibility | **barely started** — a base system prompt is sent (`system_prompt` in `thread_view.rs`: the OS, the thread's working folder, the project's folders, and how to use the tools). No rules such as `AGENTS.md`, skills, sub-agents, commands or MCP |
+| 6. Extensibility | **started** — `instructions.rs` builds the system prompt: a fixed base for every model, the user's `cowork.instructions`, and each folder's first rules file (`AGENTS.md`, `CLAUDE.md`, `.rules`, `GEMINI.md`, `.cursorrules`, `.github/copilot-instructions.md`, up to 24 KB, read at the start of each turn), then the environment as a separate part so the rest can be cached. No skills, sub-agents, commands or MCP |
 
 The verification pipeline arrived ahead of the plan because it is what makes an agent's edits
 trustworthy without a human reading every one: the model is told what it broke and fixes it on the
