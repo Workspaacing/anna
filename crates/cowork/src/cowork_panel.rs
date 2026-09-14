@@ -1,6 +1,7 @@
 use crate::{
     ExportAllSessionLogs, NewThread, OpenSettings, SelectModel, ToggleFocus,
     catalog::ModelRef,
+    ci_monitor::{CiMonitor, CiMonitorEvent},
     cowork_settings::CoworkSettings,
     model_selector::ModelSelector,
     session_log::{self, ExportedThread, LogContent, ThreadLog},
@@ -63,6 +64,7 @@ enum PendingThread {
 
 pub struct CoworkPanel {
     store: Entity<CoworkStore>,
+    ci: Entity<CiMonitor>,
     workspace: WeakEntity<Workspace>,
     /// Held directly rather than reached through the workspace.
     ///
@@ -104,6 +106,7 @@ impl CoworkPanel {
             CoworkStore::set_global(store.clone(), cx);
             store
         });
+        let ci = CiMonitor::get_or_create(&store, cx);
 
         cx.new(|cx| {
             let search_editor = cx.new(|cx| {
@@ -129,6 +132,15 @@ impl CoworkPanel {
                     }
                 },
             ));
+            subscriptions.push(cx.subscribe_in(
+                &ci,
+                window,
+                |this: &mut Self, _, event: &CiMonitorEvent, window, cx| {
+                    if let CiMonitorEvent::OpenThread(id) = event {
+                        this.open_thread_for_monitor(id.clone(), window, cx);
+                    }
+                },
+            ));
             subscriptions.push(cx.subscribe(
                 &search_editor,
                 |this: &mut Self, editor, event: &EditorEvent, cx| {
@@ -144,6 +156,7 @@ impl CoworkPanel {
 
             let mut this = Self {
                 store,
+                ci,
                 workspace: workspace_handle,
                 project,
                 fs,
@@ -182,11 +195,14 @@ impl CoworkPanel {
     fn refresh_visible_threads(&mut self, cx: &mut Context<Self>) {
         let query = self.query.trim().to_lowercase();
         let folders = self.project_folders(cx);
-        let threads = self.store.read(cx).threads();
+        let store = self.store.read(cx);
+        let threads = store.threads();
 
         self.visible_threads = threads
             .iter()
             .filter(|thread| thread.belongs_to(&folders))
+            // Archived threads leave the list, but a search still finds them.
+            .filter(|thread| !query.is_empty() || !store.is_archived(&thread.id))
             .filter(|thread| {
                 query.is_empty()
                     || thread.title.to_lowercase().contains(&query)
@@ -356,7 +372,35 @@ impl CoworkPanel {
         });
     }
 
-    fn open_thread(&mut self, id: ThreadId, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens a thread the CI monitor has something to wake, when it belongs to this window's project.
+    ///
+    /// Without a view there is no turn to run, so a thread nobody has open would never be woken.
+    /// It opens beside what the user is looking at rather than over it.
+    fn open_thread_for_monitor(&mut self, id: ThreadId, window: &mut Window, cx: &mut Context<Self>) {
+        let folders = self.project_folders(cx);
+        // A window with no folder open belongs to no project, and would claim every thread.
+        if folders.is_empty() {
+            return;
+        }
+        let belongs_here = self
+            .store
+            .read(cx)
+            .threads()
+            .iter()
+            .any(|thread| thread.id == id && thread.belongs_to(&folders));
+        if !belongs_here || !self.ci.update(cx, |ci, _| ci.claim_open(&id)) {
+            return;
+        }
+        self.open_thread(id, false, window, cx);
+    }
+
+    fn open_thread(
+        &mut self,
+        id: ThreadId,
+        activate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -367,9 +411,11 @@ impl CoworkPanel {
             |view| view.read(cx).thread_id() == &id,
         );
         if let Some(existing) = existing {
-            workspace.update(cx, |workspace, cx| {
-                workspace.activate_item(&existing, true, true, window, cx);
-            });
+            if activate {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.activate_item(&existing, true, true, window, cx);
+                });
+            }
             return;
         }
 
@@ -405,7 +451,13 @@ impl CoworkPanel {
                             cx,
                         )
                     });
-                    workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+                    if activate {
+                        workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+                    } else {
+                        workspace.active_pane().clone().update(cx, |pane, cx| {
+                            pane.add_item_inner(Box::new(view), false, false, false, None, window, cx)
+                        });
+                    }
                 })
                 .log_err();
         })
@@ -444,11 +496,13 @@ impl CoworkPanel {
         );
 
         let store = self.store.downgrade();
+        let ci = self.ci.downgrade();
         let id = thread.id;
         cx.spawn(async move |_, cx| {
             if answer.await.ok() != Some(0) {
                 return;
             }
+            ci.update(cx, |ci, cx| ci.unlink(&id, cx)).log_err();
             store
                 .update(cx, |store, cx| store.delete_thread(id, cx))
                 .log_err();
@@ -486,7 +540,7 @@ impl CoworkPanel {
     ) {
         if let Some(thread) = self.visible_threads.get(self.selected_index) {
             let id = thread.id.clone();
-            self.open_thread(id, window, cx);
+            self.open_thread(id, true, window, cx);
         }
     }
 
@@ -815,6 +869,7 @@ impl CoworkPanel {
         let id = thread.id.clone();
         // The whole record, because the confirmation names the thread being deleted.
         let to_delete = thread.clone();
+        let archived = self.store.read(cx).is_archived(&thread.id);
 
         ListItem::new(("cowork-thread", index))
             .inset(true)
@@ -835,9 +890,20 @@ impl CoworkPanel {
                             .justify_between()
                             .child(Label::new(thread.title.clone()).size(LabelSize::Small))
                             .child(
-                                Label::new(format_age(thread.updated_at))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
+                                h_flex()
+                                    .gap_1()
+                                    .when(archived, |this| {
+                                        this.child(
+                                            Label::new("archived")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                    })
+                                    .child(
+                                        Label::new(format_age(thread.updated_at))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
                             ),
                     )
                     .when(!thread.preview.is_empty(), |this| {
@@ -859,7 +925,7 @@ impl CoworkPanel {
             )
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.selected_index = index;
-                this.open_thread(id.clone(), window, cx);
+                this.open_thread(id.clone(), true, window, cx);
             }))
     }
 

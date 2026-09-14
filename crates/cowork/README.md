@@ -196,6 +196,44 @@ The Dependencies check is the only part of Anna's verification that touches the 
 package names and versions from the manifest that was just edited to `api.osv.dev`, and nothing
 else. Turn it off if that is not acceptable.
 
+## CI monitor
+
+A thread is linked to a pull request when its agent opens one (`gh pr create`) or pushes to a branch
+that has one, or when the user presses the pull-request button in the thread's header. The header
+then shows a chip with the number, repository, branch, lines added and removed, and a CI status
+button that opens the **CI monitoring** popover: checks in progress, passed, failed and skipped,
+the failing check names, a link to GitHub, and three toggles, all off by default and kept per
+thread:
+
+| Toggle | What it allows |
+| --- | --- |
+| Auto-fix CI and respond to review comments | When a check fails, a merge conflict appears or someone comments, the thread's agent is woken with a message saying what happened, and fixes, verifies, commits and pushes without asking. Conflicts are resolved by merging the base branch in, never by rebasing or force-pushing |
+| Auto-merge when ready | Merges once GitHub reports the pull request mergeable and every required check has passed — every check, when branch protection requires none |
+| Archive the thread after the PR merges or closes | Hides the thread from the panel's list; a search still finds it |
+
+`ci_monitor.rs` holds one monitor for the app. It polls GitHub once a minute per open linked pull
+request, backs off to fifteen minutes on failures, and stops once the pull request is merged or
+closed. Links and what was already handled live under the `pull_requests` key, apart from the
+threads, so a view saving its thread cannot overwrite them.
+
+Guards, each tested:
+
+- The agent is woken once per failing check per head commit, once per conflict per head and base
+  commit, and once per comment. Comments already on the pull request when monitoring starts, or
+  that arrive while auto-fix is off, are not replayed, and comments by bots or by the connected
+  account are ignored.
+- Fix attempts are capped at three per head commit and five in a row without CI passing. Past the
+  cap the chip shows a warning and the popover offers to resume.
+- Everything quoted from GitHub is placed in a `<github-data>` block that the message, and the
+  agent's base prompt, call data rather than instructions. Text that tries to close the block is
+  defused, and a branch name is put in a command only when it is plain.
+- A commit with no checks at all is not merged until five minutes after it was first seen, because
+  GitHub reports no checks before any are queued. A commit the agent was just woken for is not
+  merged for ten minutes, and a refused merge is not retried on the same commit.
+
+A wake-up waits while the thread is streaming or asking a question. A thread no window has open is
+opened in the background by a window whose project it belongs to.
+
 ## Credentials
 
 API keys are stored in the operating system's credential store — Windows Credential Manager, the

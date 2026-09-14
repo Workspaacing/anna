@@ -12,6 +12,7 @@
 mod audit;
 mod catalog;
 pub mod checkpoint;
+mod ci_monitor;
 mod code_spans;
 mod cowork_panel;
 mod consequence;
