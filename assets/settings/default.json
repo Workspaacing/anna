@@ -25,10 +25,9 @@
   // 8. "Cursor"
   // 9. "None"
   "base_keymap": "Zed",
-  // The name of a font to use for rendering text in the editor
-  // ".ZedMono" currently aliases to Lilex
-  // but this may change in the future.
-  "buffer_font_family": ".ZedMono",
+  // The name of a font to use for rendering text in the editor.
+  // Anna bundles "Geist Mono". ".ZedMono" (Lilex) is bundled too.
+  "buffer_font_family": "Geist Mono",
   // Set the buffer text's font fallbacks, this will be merged with
   // the platform's default fallbacks.
   "buffer_font_fallbacks": null,
@@ -52,11 +51,10 @@
   //           "custom": 2
   //         },
   "buffer_line_height": "comfortable",
-  // The name of a font to use for rendering text in the UI
-  // You can set this to ".SystemUIFont" to use the system font
-  // ".ZedSans" currently aliases to "IBM Plex Sans", but this may
-  // change in the future
-  "ui_font_family": ".ZedSans",
+  // The name of a font to use for rendering text in the UI.
+  // Anna bundles "Geist". ".ZedSans" (IBM Plex Sans) is bundled too, and
+  // ".SystemUIFont" uses the system font.
+  "ui_font_family": "Geist",
   // Set the UI's font fallbacks, this will be merged with the platform's
   // default font fallbacks.
   "ui_font_fallbacks": null,
