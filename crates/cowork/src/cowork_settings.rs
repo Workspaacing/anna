@@ -14,6 +14,8 @@ pub struct CoworkSettings {
     pub shell: Option<Shell>,
     // (resolved from `AgentShell::Terminal` to `None` in `from_settings`)
     pub permission: settings::AgentPermission,
+    /// The user's own instructions for every project, empty when there are none.
+    pub instructions: String,
 }
 
 /// Which of the built-in checks run after the agent changes something.
@@ -52,6 +54,7 @@ impl Settings for CoworkSettings {
             },
             shell: cowork.shell.clone().and_then(agent_shell_to_task_shell),
             permission: cowork.permission.unwrap(),
+            instructions: cowork.instructions.clone().unwrap_or_default(),
         }
     }
 }

@@ -3,6 +3,7 @@ use crate::{
     catalog::ModelRef,
     checkpoint,
     cowork_settings::CoworkSettings,
+    instructions::{self, Instructions},
     model_selector::ModelSelector,
     provider::{
         self, Attachment, AttachmentKind, CompletionEvent, CompletionRequest, Message, Role,
@@ -102,6 +103,10 @@ pub struct CoworkThreadView {
     permissions: Entity<PermissionBroker>,
     /// Pictures and files chosen but not yet sent.
     pending_attachments: PendingAttachments,
+    /// The user's own instructions, read again at the start of each turn.
+    user_instructions: Vec<Instructions>,
+    /// Each project folder's rules file, read again at the start of each turn.
+    project_rules: Vec<Instructions>,
     error: Option<SharedString>,
     completion: Option<Task<()>>,
     _permissions: gpui::Subscription,
@@ -263,6 +268,8 @@ impl CoworkThreadView {
             _warm_up: Task::ready(()),
             permissions,
             pending_attachments: PendingAttachments::default(),
+            user_instructions: Vec::new(),
+            project_rules: Vec::new(),
             error: None,
             completion: None,
             _permissions: permissions_subscription,
@@ -1418,8 +1425,27 @@ impl CoworkThreadView {
             .project
             .as_ref()
             .map(std::path::PathBuf::from);
+        let fs = self.fs.clone();
+        let folders = project_folders(&self.project, cx);
+        let setting = CoworkSettings::get_global(cx).instructions.clone();
 
         self.completion = Some(cx.spawn(async move |this, cx| {
+            // Read at the start of every turn, so an edited rules file applies from the next message
+            // without reopening the thread.
+            let user_instructions =
+                instructions::load_user_instructions(fs.as_ref(), &setting, paths::agents_file())
+                    .await;
+            let project_rules = instructions::load_rules(fs.as_ref(), &folders).await;
+            if this
+                .update(cx, |this, _| {
+                    this.user_instructions = user_instructions;
+                    this.project_rules = project_rules;
+                })
+                .is_err()
+            {
+                return;
+            }
+
             let mut recent: Vec<String> = Vec::new();
             loop {
                 let request = match this.update(cx, |this, cx| this.build_request(cx)) {
@@ -1611,6 +1637,18 @@ impl CoworkThreadView {
                 CompletionEvent::Usage { input, output } => {
                     if this
                         .update(cx, |this, cx| this.record_usage(input, output, cx))
+                        .is_err()
+                    {
+                        return Ok((Vec::new(), None));
+                    }
+                }
+                CompletionEvent::CachedInput(tokens) => {
+                    if this
+                        .update(cx, |this, _| {
+                            if let Some(step) = this.current_step() {
+                                step.cached_input_tokens = Some(tokens);
+                            }
+                        })
                         .is_err()
                     {
                         return Ok((Vec::new(), None));
@@ -1867,13 +1905,35 @@ impl CoworkThreadView {
         cx.notify();
     }
 
-    /// The system prompt this thread sends, which the session log shows as well.
+    /// The whole system prompt this thread sends, as the session log shows it.
     fn current_system_prompt(&self, cx: &App) -> String {
-        system_prompt(
-            os_name(std::env::consts::OS),
-            self.thread.metadata.project.as_deref(),
-            &project_folders(&self.project, cx),
+        format!(
+            "{}\n\n{}",
+            instructions::stable(&self.user_instructions, &self.project_rules),
+            instructions::environment(&self.agent_environment(cx))
         )
+    }
+
+    /// Where and when the agent is working, as the system prompt's changing part describes it.
+    fn agent_environment(&self, cx: &App) -> instructions::Environment {
+        let level = &CoworkSettings::get_global(cx).permission;
+        let knowledge = self
+            .store
+            .read(cx)
+            .catalog()
+            .model(&self.thread.metadata.model)
+            .and_then(|(_, model)| model.knowledge.clone());
+        instructions::Environment {
+            os: std::env::consts::OS.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            date: today(),
+            working_folder: self.thread.metadata.project.clone(),
+            folders: project_folders(&self.project, cx),
+            branch: self.branch_name(cx).map(|branch| branch.to_string()),
+            permission: format!("{} ({})", permission_label(level), permission_detail(level)),
+            model: self.thread.metadata.model.qualified(),
+            knowledge,
+        }
     }
 
     fn build_request(&self, cx: &App) -> Result<CompletionRequest> {
@@ -1902,7 +1962,11 @@ impl CoworkThreadView {
             model: catalog_model.clone(),
             model_id: model.model_id.clone(),
             api_key,
-            system: Some(self.current_system_prompt(cx)),
+            system: Some(instructions::stable(
+                &self.user_instructions,
+                &self.project_rules,
+            )),
+            system_context: Some(instructions::environment(&self.agent_environment(cx))),
             messages: self.thread.messages.clone(),
             tools: self.tools.definitions(),
             // Every model publishes its own ceiling, so asking for less would be leaving the
@@ -3292,61 +3356,13 @@ fn containing_repository<'a, T>(
         .map(|(_, repository)| repository)
 }
 
-/// How the model is asked to work, whatever the project.
-///
-/// Each line answers a mistake models made in real threads: a tool call written out as text, an
-/// edit copied from what the model sent rather than from what the formatter saved, a file read back
-/// after every write, a file pasted into the reply, and a summary describing an approach the model
-/// had already replaced.
-const AGENT_GUIDANCE: &str = "\
-How to work:
-- Call tools through tool calls. Never write a tool call out as text in a reply.
-- Read a file before editing it, and copy `old_text` from what `read` returned. After `write` and \
-`edit` the project's formatter may reformat the file, and the result says when it did.
-- The result of `write` and `edit` shows the change as saved, so there is no need to read the file \
-back just to check it.
-- Do not paste a file's contents into a reply after writing it. Say which files changed and how.
-- Describe what the files contain now, not an approach that was replaced.
-- If something cannot be done, or a tool keeps failing, say so plainly.
-- Reply in the language the user writes in.";
-
-/// What the model is told before the conversation: the machine, the folders and how to work.
-///
-/// Without it a model guesses, and its guesses are ones the tools cannot correct: a Linux path such
-/// as `/home/user/project` on a Windows machine, or shell syntax for the wrong system.
-fn system_prompt(os: &str, working_folder: Option<&str>, folders: &[(String, String)]) -> String {
-    let mut lines = vec![
-        "You are Anna's coding agent, working in the user's project through tools.".to_owned(),
-        String::new(),
-        format!("The computer runs {os}."),
-    ];
-    if let Some(folder) = working_folder {
-        lines.push(format!(
-            "Commands run in `{folder}` unless `cwd` names another directory. File paths may be \
-             absolute or relative to a project folder."
-        ));
-    }
-    if !folders.is_empty() {
-        lines.push("Folders open in the project:".to_owned());
-        lines.extend(
-            folders
-                .iter()
-                .map(|(name, path)| format!("- {name}: `{path}`")),
-        );
-    }
-    lines.push(String::new());
-    lines.push(AGENT_GUIDANCE.to_owned());
-    lines.join("\n")
-}
-
-/// The operating system as people write it, from `std::env::consts::OS`.
-fn os_name(os: &str) -> &str {
-    match os {
-        "windows" => "Windows",
-        "macos" => "macOS",
-        "linux" => "Linux",
-        other => other,
-    }
+/// The local date, for the environment the agent is told about.
+fn today() -> String {
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    time::OffsetDateTime::now_utc()
+        .to_offset(offset)
+        .date()
+        .to_string()
 }
 
 /// The name a picture pasted without a file is attached under.
@@ -3927,42 +3943,6 @@ impl Render for CoworkThreadView {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_system_prompt_says_where_the_agent_is_working() {
-        let folder = "C:\\Users\\USER\\Documents\\teste";
-        let folders = vec![("teste".to_owned(), folder.to_owned())];
-        let prompt = system_prompt("Windows", Some(folder), &folders);
-
-        assert!(prompt.contains("The computer runs Windows."), "{prompt}");
-        assert!(
-            prompt.contains("Commands run in `C:\\Users\\USER\\Documents\\teste`"),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("- teste: `C:\\Users\\USER\\Documents\\teste`"),
-            "{prompt}"
-        );
-        assert!(prompt.ends_with(AGENT_GUIDANCE), "{prompt}");
-
-        let without_a_folder = system_prompt("Linux", None, &[]);
-        assert!(
-            !without_a_folder.contains("Commands run in"),
-            "{without_a_folder}"
-        );
-        assert!(
-            !without_a_folder.contains("Folders open"),
-            "{without_a_folder}"
-        );
-    }
-
-    #[test]
-    fn operating_systems_are_named_the_way_people_write_them() {
-        assert_eq!(os_name("windows"), "Windows");
-        assert_eq!(os_name("macos"), "macOS");
-        assert_eq!(os_name("linux"), "Linux");
-        assert_eq!(os_name("freebsd"), "freebsd");
-    }
 
     fn attachment(media_type: &str, data: &str) -> Attachment {
         Attachment {
