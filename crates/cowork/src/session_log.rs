@@ -944,7 +944,7 @@ fn render_log_excerpt(
                 let (shown, repeats) = collapse_repeats(&lines);
                 push_item(&mut text, "Lines", &count);
                 if !repeats.is_empty() {
-                    let left_out = repeats.iter().map(|(_, times)| times).sum::<usize>();
+                    let left_out = repeats.iter().map(|(_, times, _)| times).sum::<usize>();
                     push_item(
                         &mut text,
                         "Repeated entries left out",
@@ -959,9 +959,13 @@ fn render_log_excerpt(
                         "Entries left out because they repeat one shown above, with how many more \
                          times each appeared:\n\n",
                     );
-                    for (entry, times) in &repeats {
+                    for (entry, times, last) in &repeats {
                         let first_line = entry.lines().next().unwrap_or_default();
-                        text.push_str(&format!("- {times} more: {}\n", code(first_line)));
+                        text.push_str(&format!(
+                            "- {times} more, the last at {}: {}\n",
+                            code(last),
+                            code(first_line)
+                        ));
                     }
                     text.push('\n');
                 }
@@ -1005,14 +1009,16 @@ fn log_excerpt(log: &str, since: Option<u64>) -> (Vec<&str>, usize) {
 }
 
 /// The excerpt without the entries that repeat an earlier one, and each left-out entry with how many
-/// more times it appeared, in the order they first repeated.
+/// more times it appeared and the timestamp of its last appearance, in the order they first
+/// repeated. Anna's start lines are never left out: they tell the runs apart, and every start of
+/// the same build writes the same line.
 ///
 /// Anna logs the same warnings on every start: in one real log, thirteen lines about Biome came back
 /// seven times and buried the lines that differed. An entry is a timestamped line and the lines
 /// continuing it, compared without the timestamp.
-fn collapse_repeats<'a>(lines: &[&'a str]) -> (Vec<&'a str>, Vec<(String, usize)>) {
+fn collapse_repeats<'a>(lines: &[&'a str]) -> (Vec<&'a str>, Vec<(String, usize, &'a str)>) {
     let mut shown = Vec::new();
-    let mut repeats: Vec<(String, usize)> = Vec::new();
+    let mut repeats: Vec<(String, usize, &'a str)> = Vec::new();
     let mut seen = HashSet::default();
     let mut start = 0;
     while start < lines.len() {
@@ -1021,6 +1027,11 @@ fn collapse_repeats<'a>(lines: &[&'a str]) -> (Vec<&'a str>, Vec<(String, usize)
             .position(|line| line_timestamp(line).is_some())
             .map_or(lines.len(), |offset| start + 1 + offset);
         let entry = &lines[start..end];
+        if entry.first().is_some_and(|line| marks_app_start(line)) {
+            shown.extend_from_slice(entry);
+            start = end;
+            continue;
+        }
         let key = entry
             .iter()
             .enumerate()
@@ -1036,13 +1047,16 @@ fn collapse_repeats<'a>(lines: &[&'a str]) -> (Vec<&'a str>, Vec<(String, usize)
         if seen.insert(key.clone()) {
             shown.extend_from_slice(entry);
         } else {
-            match repeats.iter().position(|(repeated, _)| *repeated == key) {
-                Some(index) => {
-                    if let Some((_, times)) = repeats.get_mut(index) {
-                        *times += 1;
-                    }
+            let logged_at = entry
+                .first()
+                .and_then(|line| line.split(' ').next())
+                .unwrap_or_default();
+            match repeats.iter_mut().find(|(repeated, _, _)| *repeated == key) {
+                Some((_, times, last)) => {
+                    *times += 1;
+                    *last = logged_at;
                 }
-                None => repeats.push((key, 1)),
+                None => repeats.push((key, 1, logged_at)),
             }
         }
         start = end;
@@ -1921,12 +1935,46 @@ mod tests {
         assert_eq!(
             repeats,
             vec![
-                ("WARN  [language] not registering biome".to_owned(), 1),
+                (
+                    "WARN  [language] not registering biome".to_owned(),
+                    1,
+                    later.as_str()
+                ),
                 (
                     "ERROR [lsp] shutdown failed\n  While handling prettier request".to_owned(),
-                    1
+                    1,
+                    later.as_str()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn every_start_stays_in_the_excerpt_even_when_its_line_repeats() {
+        let first = format_time(CREATED_AT, UtcOffset::UTC);
+        let later = format_time(CREATED_AT + 60, UtcOffset::UTC);
+        let lines = [
+            format!(
+                "{first} INFO  [anna] ========== starting anna version 1.0.1, sha abc =========="
+            ),
+            format!("{first} WARN  [language] not registering biome"),
+            format!(
+                "{later} INFO  [anna] ========== starting anna version 1.0.1, sha abc =========="
+            ),
+            format!("{later} WARN  [language] not registering biome"),
+        ];
+        let lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let (shown, repeats) = collapse_repeats(&lines);
+
+        assert_eq!(shown, vec![lines[0], lines[1], lines[2]]);
+        assert_eq!(
+            repeats,
+            vec![(
+                "WARN  [language] not registering biome".to_owned(),
+                1,
+                later.as_str()
+            )]
         );
     }
 

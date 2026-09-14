@@ -1339,7 +1339,16 @@ impl CoworkThreadView {
     }
 
     fn record_served(&mut self, served: Served) {
-        if let Some(model) = &served.model {
+        let Some(step) = self.current_step() else {
+            return;
+        };
+        // Logged only when it is news: Gemini names the model on every chunk, and a line per chunk
+        // pushes the warnings before a reply out of the session log's excerpt.
+        if let Some(model) = served
+            .model
+            .as_ref()
+            .filter(|model| step.model.as_ref() != Some(*model))
+        {
             match &served.provider {
                 Some(provider) => {
                     log::info!("cowork: step answered by {model} through {provider}")
@@ -1347,9 +1356,6 @@ impl CoworkThreadView {
                 None => log::info!("cowork: step answered by {model}"),
             }
         }
-        let Some(step) = self.current_step() else {
-            return;
-        };
         if served.model.is_some() {
             step.model = served.model;
         }
@@ -1912,10 +1918,24 @@ impl CoworkThreadView {
     }
 
     fn fail(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
-        log::warn!("cowork: completion failed: {error:#}");
+        self.fail_after_step(error, None, cx);
+    }
+
+    /// A failure, with the step it ended when that step's message is gone: the model and response
+    /// id are what to look up in the provider's own logs.
+    fn fail_after_step(
+        &mut self,
+        error: anyhow::Error,
+        step: Option<&StepRecord>,
+        cx: &mut Context<Self>,
+    ) {
         let message = format!("{error:#}");
-        self.thread
-            .record(ActivityKind::TurnFailed, message.clone());
+        let detail = match step.and_then(describe_failed_step) {
+            Some(step) => format!("{message} ({step})"),
+            None => message.clone(),
+        };
+        log::warn!("cowork: completion failed: {detail}");
+        self.thread.record(ActivityKind::TurnFailed, detail);
         self.error = Some(message.into());
         self.completion = None;
         // Written at once, so the record of the failure outlives the window it happened in. Some
@@ -1927,15 +1947,16 @@ impl CoworkThreadView {
     /// A failure once streaming was under way. An assistant turn that never received a chunk is
     /// dropped so the thread does not keep a blank message, but partial output is preserved.
     fn finish_with_error(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
+        let mut dropped_step = None;
         if self
             .messages
             .last()
             .is_some_and(|message| message.role == Role::Assistant && message.text.is_empty())
         {
             self.messages.pop();
-            self.thread.messages.pop();
+            dropped_step = self.thread.messages.pop().and_then(|message| message.step);
         }
-        self.fail(error, cx);
+        self.fail_after_step(error, dropped_step.as_ref(), cx);
     }
 
     fn finish(&mut self, cx: &mut Context<Self>) {
@@ -3470,6 +3491,21 @@ fn describe_unreadable(model: &str, unreadable: &UnreadableAttachments) -> Optio
 }
 
 /// The project's open folders, as the name the user knows and the path a command runs in.
+/// Who answered a step that failed, for a failure whose message is dropped with the step on it.
+fn describe_failed_step(step: &StepRecord) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(model) = &step.model {
+        parts.push(format!("answered by {model}"));
+    }
+    if let Some(provider) = &step.provider {
+        parts.push(format!("through {provider}"));
+    }
+    if let Some(response_id) = &step.response_id {
+        parts.push(format!("response id {response_id}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 pub fn project_folders(project: &Entity<Project>, cx: &App) -> Vec<(String, String)> {
     project
         .read(cx)
@@ -3953,6 +3989,21 @@ mod tests {
         assert!(
             !without_a_folder.contains("Folders open"),
             "{without_a_folder}"
+        );
+    }
+
+    #[test]
+    fn a_failed_step_is_described_by_what_the_provider_reported() {
+        assert_eq!(describe_failed_step(&StepRecord::default()), None);
+
+        let step = StepRecord {
+            model: Some("claude-opus-5".to_owned()),
+            response_id: Some("msg_01".to_owned()),
+            ..StepRecord::default()
+        };
+        assert_eq!(
+            describe_failed_step(&step).as_deref(),
+            Some("answered by claude-opus-5, response id msg_01")
         );
     }
 
