@@ -224,11 +224,12 @@ where
     div().pl_2().pt_2p5().child(
         v_flex()
             .elevation_2(app)
+            .rounded_control()
             .font(ui_font)
             .text_ui(app)
             .text_color(app.theme().colors().text)
-            .py_1()
-            .px_2()
+            .py_1p5()
+            .px_3()
             .map(|el| f(el, cx)),
     )
 }

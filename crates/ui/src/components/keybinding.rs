@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::PlatformStyle;
 use crate::utils::capitalize;
-use crate::{Icon, IconName, IconSize, h_flex, prelude::*};
+use crate::{Icon, IconName, IconSize, Radius, h_flex, prelude::*};
 use gpui::{
     Action, AnyElement, App, FocusHandle, IntoElement, KeybindingKeystroke, Keystroke,
     Modifiers, Window, relative,
@@ -198,7 +198,7 @@ impl RenderOnce for KeyBinding {
                     h_flex()
                         .flex_none()
                         .py_0p5()
-                        .rounded_xs()
+                        .rounded(Radius::Small.rems())
                         .text_color(cx.theme().colors().text_muted)
                         .children(render_keybinding_keystroke(
                             keystroke,

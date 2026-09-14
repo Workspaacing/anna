@@ -1,11 +1,21 @@
-use gpui::{App, Styled, hsla};
+use gpui::{App, Rems, Styled, hsla};
 
-use crate::ElevationIndex;
 use crate::prelude::*;
+use crate::{ElevationIndex, Radius};
+
+fn elevation_radius(index: ElevationIndex) -> Rems {
+    match index {
+        ElevationIndex::ModalSurface => Radius::ExtraLarge.rems(),
+        ElevationIndex::Background
+        | ElevationIndex::Surface
+        | ElevationIndex::EditorSurface
+        | ElevationIndex::ElevatedSurface => Radius::Large.rems(),
+    }
+}
 
 fn elevated<E: Styled>(this: E, cx: &App, index: ElevationIndex) -> E {
     this.bg(cx.theme().colors().elevated_surface_background)
-        .rounded_lg()
+        .rounded(elevation_radius(index))
         .border_1()
         .border_color(cx.theme().colors().border_variant)
         .shadow(index.shadow(cx))
@@ -13,7 +23,7 @@ fn elevated<E: Styled>(this: E, cx: &App, index: ElevationIndex) -> E {
 
 fn elevated_borderless<E: Styled>(this: E, cx: &mut App, index: ElevationIndex) -> E {
     this.bg(cx.theme().colors().elevated_surface_background)
-        .rounded_lg()
+        .rounded(elevation_radius(index))
         .shadow(index.shadow(cx))
 }
 
@@ -41,9 +51,30 @@ pub trait StyledExt: Styled + Sized {
         self.flex().flex_col()
     }
 
+    /// Rounds the corners like a control: buttons, chips, tooltips, and menu and list items.
+    ///
+    /// Sets `rounded()` to [`Radius::Medium`].
+    fn rounded_control(self) -> Self {
+        self.rounded(Radius::Medium.rems())
+    }
+
+    /// Rounds the corners like a container: inputs, popovers, menus and banners.
+    ///
+    /// Sets `rounded()` to [`Radius::Large`].
+    fn rounded_container(self) -> Self {
+        self.rounded(Radius::Large.rems())
+    }
+
+    /// Rounds the corners like a modal or dialog.
+    ///
+    /// Sets `rounded()` to [`Radius::ExtraLarge`].
+    fn rounded_dialog(self) -> Self {
+        self.rounded(Radius::ExtraLarge.rems())
+    }
+
     /// The [`Surface`](ElevationIndex::Surface) elevation level, located above the app background, is the standard level for all elements
     ///
-    /// Sets `bg()`, `rounded_lg()`, `border()`, `border_color()`, `shadow()`
+    /// Sets `bg()`, `rounded_container()`, `border()`, `border_color()`, `shadow()`
     ///
     /// Example Elements: Title Bar, Panel, Tab Bar, Editor
     fn elevation_1(self, cx: &App) -> Self {
@@ -59,7 +90,7 @@ pub trait StyledExt: Styled + Sized {
 
     /// Non-Modal Elevated Surfaces appear above the [`Surface`](ElevationIndex::Surface) layer and is used for things that should appear above most UI elements like an editor or panel, but not elements like popovers, context menus, modals, etc.
     ///
-    /// Sets `bg()`, `rounded_lg()`, `border()`, `border_color()`, `shadow()`
+    /// Sets `bg()`, `rounded_container()`, `border()`, `border_color()`, `shadow()`
     ///
     /// Examples: Notifications, Palettes, Detached/Floating Windows, Detached/Floating Panels
     fn elevation_2(self, cx: &App) -> Self {
@@ -79,7 +110,7 @@ pub trait StyledExt: Styled + Sized {
     ///
     /// If the element does not have this behavior, it should be rendered at the [`Elevated Surface`](ElevationIndex::ElevatedSurface) layer.
     ///
-    /// Sets `bg()`, `rounded_lg()`, `border()`, `border_color()`, `shadow()`
+    /// Sets `bg()`, `rounded_dialog()`, `border()`, `border_color()`, `shadow()`
     ///
     /// Examples: Settings Modal, Channel Management, Wizards/Setup UI, Dialogs
     fn elevation_3(self, cx: &App) -> Self {

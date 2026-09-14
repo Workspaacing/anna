@@ -6,7 +6,7 @@ use std::{rc::Rc, sync::Arc};
 
 use crate::utils::is_light;
 use crate::{Color, Icon, IconName, ToggleState, Tooltip};
-use crate::{ElevationIndex, KeyBinding, prelude::*};
+use crate::{ElevationIndex, KeyBinding, Radius, prelude::*};
 
 // TODO: Checkbox, CheckboxWithLabel, and Switch could all be
 // restructured to use a ToggleLike, similar to Button/Buttonlike, Label/Labellike
@@ -229,7 +229,7 @@ impl RenderOnce for Checkbox {
                     .items_center()
                     .m_1()
                     .size_4()
-                    .rounded_xs()
+                    .rounded(Radius::Small.rems())
                     .bg(bg_color)
                     .border_1()
                     .border_color(border_color)

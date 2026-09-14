@@ -73,7 +73,9 @@ impl RenderOnce for SplitButton {
             .inset();
 
         h_flex()
-            .when(is_filled_or_outlined, |this| this.relative().rounded_sm())
+            .when(is_filled_or_outlined, |this| {
+                this.relative().rounded_control()
+            })
             .when(self.style == SplitButtonStyle::Transparent, |this| {
                 this.gap_px()
             })
@@ -90,7 +92,7 @@ impl RenderOnce for SplitButton {
                     div()
                         .absolute()
                         .inset_0()
-                        .rounded_sm()
+                        .rounded_control()
                         .shadow(vec![outline]),
                 )
             })
