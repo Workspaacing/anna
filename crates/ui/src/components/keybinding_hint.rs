@@ -1,5 +1,5 @@
-use crate::KeyBinding;
 use crate::prelude::*;
+use crate::{KeyBinding, Radius};
 use gpui::{AnyElement, App, BoxShadow, FontStyle, Hsla, IntoElement, Window};
 use theme::Appearance;
 
@@ -236,7 +236,7 @@ impl RenderOnce for KeybindingHint {
             .children(self.prefix)
             .child(
                 h_flex()
-                    .rounded_sm()
+                    .rounded(Radius::Small.rems())
                     .px_0p5()
                     .mr_0p5()
                     .border_1()

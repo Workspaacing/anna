@@ -110,7 +110,7 @@ impl RenderOnce for Chip {
             .gap_0p5()
             .px_1()
             .border_1()
-            .rounded_sm()
+            .rounded_control()
             .border_color(border_color)
             .bg(bg_color)
             .overflow_hidden()

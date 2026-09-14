@@ -1,4 +1,4 @@
-use crate::prelude::*;
+use crate::{Radius, prelude::*};
 use gpui::{FontWeight, Rems, StyleRefinement, UnderlineStyle};
 use smallvec::SmallVec;
 
@@ -218,7 +218,7 @@ impl LabelCommon for LabelLike {
             .base
             .font(theme::theme_settings(cx).buffer_font(cx).clone())
             .bg(cx.theme().colors().element_background)
-            .rounded_sm()
+            .rounded(Radius::Small.rems())
             .px_0p5();
         self
     }

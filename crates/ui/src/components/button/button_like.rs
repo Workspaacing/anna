@@ -6,7 +6,7 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
-use crate::{DynamicSpacing, ElevationIndex, prelude::*};
+use crate::{DynamicSpacing, ElevationIndex, Radius, prelude::*};
 
 /// A trait for buttons that can be Selected. Enables setting the [`ButtonStyle`] of a button when it is selected.
 pub trait SelectableButton: Toggleable {
@@ -789,12 +789,25 @@ impl RenderOnce for ButtonLike {
             })
             .when(is_outlined, |this| this.border_1())
             .when_some(self.rounding, |this, rounding| {
-                this.when(rounding.top_left, |this| this.rounded_tl_sm())
-                    .when(rounding.top_right, |this| this.rounded_tr_sm())
-                    .when(rounding.bottom_right, |this| this.rounded_br_sm())
-                    .when(rounding.bottom_left, |this| this.rounded_bl_sm())
+                let corner_radius = match self.size {
+                    ButtonSize::Large => Radius::Large.rems(),
+                    ButtonSize::Medium
+                    | ButtonSize::Default
+                    | ButtonSize::Compact
+                    | ButtonSize::None => Radius::Medium.rems(),
+                };
+                this.when(rounding.top_left, |this| this.rounded_tl(corner_radius))
+                    .when(rounding.top_right, |this| this.rounded_tr(corner_radius))
+                    .when(rounding.bottom_right, |this| this.rounded_br(corner_radius))
+                    .when(rounding.bottom_left, |this| this.rounded_bl(corner_radius))
             })
-            .gap(DynamicSpacing::Base04.rems(cx))
+            .map(|this| match self.size {
+                ButtonSize::Large => this.gap(DynamicSpacing::Base06.rems(cx)),
+                ButtonSize::Medium
+                | ButtonSize::Default
+                | ButtonSize::Compact
+                | ButtonSize::None => this.gap(DynamicSpacing::Base04.rems(cx)),
+            })
             .map(|this| match self.size {
                 ButtonSize::Large | ButtonSize::Medium => this.px(DynamicSpacing::Base08.rems(cx)),
                 ButtonSize::Default | ButtonSize::Compact => {
