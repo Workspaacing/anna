@@ -2864,13 +2864,11 @@ impl Element for MarkdownElement {
                                         this.mb(self.style.list_spacing)
                                     }),
                                 });
-                            let leads_document =
-                                placement.is_some_and(|placement| placement.leads_document);
                             builder.push_div_with_flow_role(
                                 list,
                                 range,
                                 markdown_end,
-                                FlowRole::List { leads_document },
+                                FlowRole::List,
                             );
                         }
                         MarkdownTag::Item => {
@@ -3802,8 +3800,8 @@ enum FlowRole {
     Container,
     /// A list item's content, where paragraphs and nested lists take the list item spacing.
     ListItemContent,
-    /// A list. When the list is the document's first block, its first item takes no space either.
-    List { leads_document: bool },
+    /// A list, which carries the space above its first item.
+    List,
     /// A wrapper that blocks see through to the container around it.
     Transparent,
 }
@@ -3821,7 +3819,6 @@ enum FlowBlock {
 #[derive(Clone, Copy)]
 struct BlockPlacement {
     margin_top: Pixels,
-    leads_document: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -3985,16 +3982,14 @@ impl MarkdownElementBuilder {
     /// wrapper, and returns the space above it.
     fn place_block(&mut self, block: FlowBlock, margins: &BlockMargins) -> BlockPlacement {
         self.flush_text();
-        let Some((container_index, container)) = self
+        let Some(container) = self
             .div_stack
             .iter_mut()
-            .enumerate()
             .rev()
-            .find(|(_, entry)| entry.flow_role != FlowRole::Transparent)
+            .find(|entry| entry.flow_role != FlowRole::Transparent)
         else {
             return BlockPlacement {
                 margin_top: Pixels::ZERO,
-                leads_document: false,
             };
         };
         let flow_role = container.flow_role;
@@ -4002,12 +3997,9 @@ impl MarkdownElementBuilder {
         let is_first = previous_block.is_none() && !container.has_children;
 
         let margin_top = match (block, flow_role) {
-            (
-                FlowBlock::ListItem,
-                FlowRole::List {
-                    leads_document: true,
-                },
-            ) if is_first => Pixels::ZERO,
+            // GPUI margins add up instead of collapsing, and the list already carries the space
+            // above it.
+            (FlowBlock::ListItem, FlowRole::List) if is_first => Pixels::ZERO,
             (FlowBlock::ListItem, _) => margins.list_item,
             _ if is_first => Pixels::ZERO,
             _ if matches!(previous_block, Some(FlowBlock::Heading(_))) => margins.after_heading,
@@ -4022,10 +4014,7 @@ impl MarkdownElementBuilder {
             _ => margins.flow,
         };
 
-        BlockPlacement {
-            margin_top,
-            leads_document: is_first && container_index == 0,
-        }
+        BlockPlacement { margin_top }
     }
 
     fn push_image_child(&mut self, child: impl IntoElement) {
@@ -4103,8 +4092,18 @@ impl MarkdownElementBuilder {
 
     fn pop_div(&mut self) {
         self.flush_text();
-        let div = self.div_stack.pop().unwrap().div.into_any_element();
-        self.append_child(div);
+        let entry = self.div_stack.pop().unwrap();
+        // An empty wrapper, like the one around an HTML comment, renders nothing, so it must not
+        // stop the next block from being the first in its container.
+        let is_empty_wrapper = entry.flow_role == FlowRole::Transparent && !entry.has_children;
+        let div = entry.div.into_any_element();
+        if is_empty_wrapper {
+            if let Some(parent) = self.div_stack.last_mut() {
+                parent.div.extend([div]);
+            }
+        } else {
+            self.append_child(div);
+        }
     }
 
     fn push_list(&mut self, bullet_index: Option<u64>) {
@@ -7053,6 +7052,97 @@ mod tests {
             (gap - flow).abs() <= px(1.),
             "blocks should be one flow ({flow:?}) apart, got {gap:?}"
         );
+    }
+
+    fn render_typeset(
+        source: &str,
+        options: MarkdownOptions,
+        cx: &mut TestAppContext,
+    ) -> (BlockMargins, RenderedText) {
+        ensure_theme_initialized(cx);
+        let style = {
+            let window = cx.add_empty_window();
+            window.update(|window, cx| MarkdownStyle::typeset(Typeset::chat(), window, cx))
+        };
+        let BlockSpacing::Above(margins) = style.block_spacing else {
+            panic!("a typeset spaces blocks above them");
+        };
+        let markdown = cx.new(|cx| {
+            Markdown::new_with_options(source.to_string().into(), None, None, options, cx)
+        });
+        let rendered = render_markdown_entity_in_view(markdown, style, None, None, cx);
+        (margins, rendered)
+    }
+
+    fn line_top_and_bottom(rendered: &RenderedText, text: &str) -> (Pixels, Pixels) {
+        let line = rendered
+            .lines
+            .iter()
+            .find(|line| line.layout.wrapped_text().contains(text))
+            .unwrap_or_else(|| panic!("{text:?} should be rendered"));
+        let top = line.layout.bounds().top();
+        (top, top + line.layout.line_height())
+    }
+
+    #[track_caller]
+    fn assert_gap(rendered: &RenderedText, above: &str, below: &str, expected: Pixels) {
+        let (_, above_bottom) = line_top_and_bottom(rendered, above);
+        let (below_top, _) = line_top_and_bottom(rendered, below);
+        let gap = below_top - above_bottom;
+        assert!(
+            (gap - expected).abs() <= px(1.),
+            "{below:?} should be {expected:?} below {above:?}, got {gap:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn test_typeset_list_after_a_paragraph_is_one_flow_below_it(cx: &mut TestAppContext) {
+        let (margins, rendered) = render_typeset(
+            "Paragraph\n\n- Item\n- Next",
+            MarkdownOptions::default(),
+            cx,
+        );
+        assert_gap(&rendered, "Paragraph", "Item", margins.flow);
+        assert_gap(&rendered, "Item", "Next", margins.list_item);
+    }
+
+    #[gpui::test]
+    fn test_typeset_nested_list_is_one_list_item_space_below_its_item(cx: &mut TestAppContext) {
+        let (margins, rendered) =
+            render_typeset("- Parent\n  - Child", MarkdownOptions::default(), cx);
+        assert_gap(&rendered, "Parent", "Child", margins.list_item);
+    }
+
+    #[gpui::test]
+    fn test_typeset_html_list_is_spaced_like_a_markdown_list(cx: &mut TestAppContext) {
+        let (margins, rendered) = render_typeset(
+            "Paragraph\n\n<ul><li>Item</li><li>Next</li></ul>",
+            MarkdownOptions {
+                parse_html: true,
+                ..Default::default()
+            },
+            cx,
+        );
+        assert_gap(&rendered, "Paragraph", "Item", margins.flow);
+        assert_gap(&rendered, "Item", "Next", margins.list_item);
+    }
+
+    #[gpui::test]
+    fn test_typeset_leading_html_comment_takes_no_space(cx: &mut TestAppContext) {
+        for parse_html in [false, true] {
+            let options = || MarkdownOptions {
+                parse_html,
+                ..Default::default()
+            };
+            let (_, plain) = render_typeset("# Title", options(), cx);
+            let (_, commented) =
+                render_typeset("<!-- markdownlint-disable -->\n# Title", options(), cx);
+            assert_eq!(
+                line_top_and_bottom(&commented, "Title"),
+                line_top_and_bottom(&plain, "Title"),
+                "a leading comment should not push the first block down (parse_html: {parse_html})"
+            );
+        }
     }
 
     fn failing_image_source() -> ImageSource {

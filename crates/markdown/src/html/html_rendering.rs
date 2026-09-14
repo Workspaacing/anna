@@ -11,7 +11,7 @@ use crate::html::html_parser::{
     ParsedHtmlElement, ParsedHtmlList, ParsedHtmlListItemType, ParsedHtmlTable, ParsedHtmlTableRow,
     ParsedHtmlText,
 };
-use crate::{MarkdownElement, MarkdownElementBuilder};
+use crate::{FlowBlock, FlowRole, MarkdownElement, MarkdownElementBuilder, TableStyle};
 
 pub(crate) struct HtmlSourceAllocator {
     source_range: Range<usize>,
@@ -149,7 +149,15 @@ impl MarkdownElement {
         markdown_end: usize,
         cx: &mut App,
     ) {
-        builder.push_div(div().pl_2p5(), &list.source_range, markdown_end);
+        let placement = self.place_block(builder, FlowBlock::List);
+        builder.push_div_with_flow_role(
+            div()
+                .when(self.style.list_style.is_none(), |this| this.pl_2p5())
+                .when_some(placement, |this, placement| this.mt(placement.margin_top)),
+            &list.source_range,
+            markdown_end,
+            FlowRole::List,
+        );
 
         for list_item in &list.items {
             let bullet = match list_item.item_type {
@@ -190,21 +198,31 @@ impl MarkdownElement {
         markdown_end: usize,
         cx: &mut App,
     ) {
+        let actual_header_column_count = html_table_columns_count(&table.header);
+        let actual_body_column_count = html_table_columns_count(&table.body);
+        let max_column_count = actual_header_column_count.max(actual_body_column_count);
+
+        if table.caption.is_none() && max_column_count == 0 {
+            return;
+        }
+
+        let placement = self.place_block(builder, FlowBlock::Other);
+        // The space above the table goes above its caption when it has one.
+        let mut margin_top = placement.map(|placement| placement.margin_top);
+
         if let Some(caption) = &table.caption {
             builder.push_div(
-                div().when(!self.style.height_is_multiple_of_line_height, |el| {
-                    el.mb_2().line_height(rems(1.3))
-                }),
+                div()
+                    .when_some(margin_top.take(), |this, margin_top| this.mt(margin_top))
+                    .when(!self.style.height_is_multiple_of_line_height, |el| {
+                        el.mb_2().line_height(rems(1.3))
+                    }),
                 &table.source_range,
                 markdown_end,
             );
             self.render_html_paragraph(caption, source_allocator, builder, cx, markdown_end);
             builder.pop_div();
         }
-
-        let actual_header_column_count = html_table_columns_count(&table.header);
-        let actual_body_column_count = html_table_columns_count(&table.body);
-        let max_column_count = actual_header_column_count.max(actual_body_column_count);
 
         if max_column_count == 0 {
             return;
@@ -213,7 +231,13 @@ impl MarkdownElement {
         let total_rows = table.header.len() + table.body.len();
         let mut grid_occupied = vec![vec![false; max_column_count]; total_rows];
 
-        builder.push_div(div().flex(), &table.source_range, markdown_end);
+        builder.push_div(
+            div()
+                .flex()
+                .when_some(margin_top, |this, margin_top| this.mt(margin_top)),
+            &table.source_range,
+            markdown_end,
+        );
         builder.push_div(
             div()
                 .id(("html-table", table.source_range.start))
@@ -225,10 +249,16 @@ impl MarkdownElement {
                 .when(!self.style.table_columns_min_size, |this| {
                     this.grid_cols_max_content(max_column_count as u16)
                 })
-                .mb_2()
-                .border(px(1.5))
-                .border_color(cx.theme().colors().border)
-                .rounded_sm()
+                .when(placement.is_none(), |this| this.mb_2())
+                .map(|this| match self.style.table_style {
+                    TableStyle::Grid => this
+                        .border(px(1.5))
+                        .border_color(cx.theme().colors().border)
+                        .rounded_sm(),
+                    TableStyle::Rules { .. } => {
+                        this.border_b_1().border_color(self.style.rule_color)
+                    }
+                })
                 .overflow_hidden(),
             &table.source_range,
             markdown_end,
@@ -254,23 +284,44 @@ impl MarkdownElement {
                     _ => self.style.base_text_style.text_align,
                 };
 
-                let mut cell_div = div()
+                let cell_div = div()
                     .col_span(cell.col_span.min(max_span) as u16)
                     .row_span(cell.row_span.min(total_rows - row_index) as u16)
                     .flex()
                     .flex_col()
-                    .when(column_index > 0, |this| this.border_l_1())
-                    .when(row_index > 0, |this| this.border_t_1())
-                    .border_color(cx.theme().colors().border)
-                    .px_2()
-                    .py_1()
-                    .h_full()
-                    .when(cell.is_header, |this| {
-                        this.bg(cx.theme().colors().title_bar_background)
-                    })
-                    .when(!cell.is_header && row_index % 2 == 1, |this| {
-                        this.bg(cx.theme().colors().panel_background)
-                    });
+                    .h_full();
+                let mut cell_div = match self.style.table_style {
+                    TableStyle::Grid => cell_div
+                        .when(column_index > 0, |this| this.border_l_1())
+                        .when(row_index > 0, |this| this.border_t_1())
+                        .border_color(cx.theme().colors().border)
+                        .px_2()
+                        .py_1()
+                        .when(cell.is_header, |this| {
+                            this.bg(cx.theme().colors().title_bar_background)
+                        })
+                        .when(!cell.is_header && row_index % 2 == 1, |this| {
+                            this.bg(cx.theme().colors().panel_background)
+                        }),
+                    TableStyle::Rules {
+                        header_cell_padding,
+                        ..
+                    } => {
+                        let padding = if cell.is_header {
+                            header_cell_padding
+                        } else {
+                            self.style.table_cell_padding
+                        };
+                        cell_div
+                            .px(padding.x)
+                            .py(padding.y)
+                            .when(column_index == 0, |this| this.pl_0())
+                            .line_height(relative(1.5))
+                            .when(!cell.is_header, |this| {
+                                this.border_t_1().border_color(self.style.rule_color)
+                            })
+                    }
+                };
 
                 cell_div = match cell.alignment {
                     Alignment::Center => cell_div.items_center(),
@@ -278,8 +329,15 @@ impl MarkdownElement {
                     _ => cell_div,
                 };
 
+                let font_weight = match self.style.table_style {
+                    TableStyle::Rules {
+                        header_font_weight, ..
+                    } if cell.is_header => Some(header_font_weight),
+                    _ => None,
+                };
                 builder.push_text_style(TextStyleRefinement {
                     text_align: Some(text_align),
+                    font_weight,
                     ..Default::default()
                 });
                 builder.push_div(cell_div, &table.source_range, markdown_end);
@@ -326,13 +384,19 @@ impl MarkdownElement {
                 }
 
                 builder.push_div(
-                    div()
-                        .when(column_index > 0, |this| this.border_l_1())
-                        .when(row_index > 0, |this| this.border_t_1())
-                        .border_color(cx.theme().colors().border)
-                        .when(row_index % 2 == 1, |this| {
-                            this.bg(cx.theme().colors().panel_background)
-                        }),
+                    div().map(|this| match self.style.table_style {
+                        TableStyle::Grid => this
+                            .when(column_index > 0, |this| this.border_l_1())
+                            .when(row_index > 0, |this| this.border_t_1())
+                            .border_color(cx.theme().colors().border)
+                            .when(row_index % 2 == 1, |this| {
+                                this.bg(cx.theme().colors().panel_background)
+                            }),
+                        TableStyle::Rules { .. } => this
+                            .when(row_index >= table.header.len(), |this| {
+                                this.border_t_1().border_color(self.style.rule_color)
+                            }),
+                    }),
                     &table.source_range,
                     markdown_end,
                 );
