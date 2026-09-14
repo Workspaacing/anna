@@ -33,7 +33,8 @@ OSV query returning an advisory. Those need a human at a running build.
 ## Models
 
 Models come only from the [models.dev](https://models.dev) catalog (`catalog_url`, default
-`https://models.dev/api.json`) — the same registry the Vercel AI SDK publishes. The catalog is
+`https://models.dev/api.json`), an open registry that describes each provider by the Vercel AI SDK
+package that would drive it; Anna reads those package names only to pick a wire format. The catalog is
 fetched on first use, cached in Anna's key-value store, and refreshed when it is older than 24 hours
 or when the user asks for a refresh.
 

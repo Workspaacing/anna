@@ -542,10 +542,17 @@ async fn edit_buffer(
             // An edit tool is only trustworthy if it refuses to guess. Both of these mean the model
             // must look again, and saying which is which is what lets it recover in one step.
             match ranges.len() {
-                0 => bail!(
-                    "the text to replace does not appear in the file. Read it again; it may have \
-                     changed, or the whitespace may differ."
-                ),
+                0 => match match_ignoring_indentation(&text, old) {
+                    Some((line, found)) => bail!(
+                        "the text to replace does not appear in the file exactly, but the same \
+                         lines with different indentation start at line {line}; the formatter may \
+                         have reindented them. Copy `old_text` from the file as it is now:\n{found}"
+                    ),
+                    None => bail!(
+                        "the text to replace does not appear in the file. Read it again; it may \
+                         have changed, or the whitespace may differ."
+                    ),
+                },
                 count if count > 1 && !all => bail!(
                     "the text to replace appears {count} times. Include enough surrounding lines \
                      to make it unique, or pass `replace_all`."
@@ -566,6 +573,36 @@ async fn edit_buffer(
             })
         }
     }
+}
+
+/// The one place `needle`'s lines appear in `text` once each line is trimmed, as the line number it
+/// starts at and those lines as the file has them.
+///
+/// The usual reason an edit misses is a formatter that reindented the file after the model wrote
+/// it: the model copies `old_text` from what it sent rather than from what was saved. Handing back
+/// the lines as they are lets it retry in one step, while the tool still never picks a replacement
+/// on its own. A needle found in more than one place, or only blank lines, gets no hint.
+fn match_ignoring_indentation(text: &str, needle: &str) -> Option<(usize, String)> {
+    let wanted = needle.lines().map(str::trim).collect::<Vec<_>>();
+    if wanted.iter().all(|line| line.is_empty()) {
+        return None;
+    }
+
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut found = None;
+    for (index, window) in lines.windows(wanted.len()).enumerate() {
+        let same = window
+            .iter()
+            .zip(&wanted)
+            .all(|(line, wanted)| line.trim() == *wanted);
+        if same {
+            if found.is_some() {
+                return None;
+            }
+            found = Some((index + 1, window.join("\n")));
+        }
+    }
+    found
 }
 
 /// Every byte range in `text` holding `needle`, without overlaps.
@@ -1256,6 +1293,31 @@ fn list_directory(project: &Project, path: &str, cx: &App) -> Result<ToolOutput>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reindented_edit_is_pointed_at_the_lines_as_they_are_now() {
+        // What happened in a real thread: the model wrote the file with 8-space indentation, the
+        // formatter saved it with 12, and the next edit copied the text the model had sent.
+        let saved = "<style>\n            canvas {\n                display: block;\n            }\n</style>\n";
+        let sent = "        canvas {\n            display: block;\n        }";
+        assert!(occurrences(saved, sent).is_empty());
+
+        let (line, found) =
+            match_ignoring_indentation(saved, sent).expect("the same lines, reindented");
+        assert_eq!(line, 2);
+        assert_eq!(
+            found,
+            "            canvas {\n                display: block;\n            }"
+        );
+    }
+
+    #[test]
+    fn an_indentation_hint_is_only_given_for_one_place() {
+        let text = "a {\n  x;\n}\nb {\n  x;\n}\n";
+        assert_eq!(match_ignoring_indentation(text, "    x;"), None);
+        assert_eq!(match_ignoring_indentation(text, "\n\n"), None);
+        assert_eq!(match_ignoring_indentation(text, ""), None);
+    }
 
     fn project_folders() -> Vec<PathBuf> {
         vec![PathBuf::from(if cfg!(windows) {

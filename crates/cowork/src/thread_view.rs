@@ -1373,7 +1373,7 @@ impl CoworkThreadView {
                 }
 
                 let outcome = Self::stream_one_step(&this, http_client.clone(), request, cx).await;
-                let (calls, stopped_for_tools) = match outcome {
+                let (calls, stop) = match outcome {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         this.update(cx, |this, cx| this.finish_with_error(error, cx))
@@ -1382,8 +1382,25 @@ impl CoworkThreadView {
                     }
                 };
 
-                if !stopped_for_tools || calls.is_empty() {
-                    this.update(cx, |this, cx| this.finish(cx)).log_err();
+                // Calls are run whatever the stop reason says: some OpenAI-compatible servers send
+                // them with `stop`, and judging by the reason dropped them and ended the turn.
+                if calls.is_empty() {
+                    let unfinished = match stop {
+                        Some(StopReason::MaxTokens) => Some(
+                            "The model reached its output limit before finishing its answer. Ask \
+                             it to continue, or pick a model with a larger output limit.",
+                        ),
+                        Some(StopReason::Other) => Some(
+                            "The provider ended the model's answer before it finished, for \
+                             example with a content filter or an error of its own.",
+                        ),
+                        Some(StopReason::EndTurn | StopReason::ToolUse) | None => None,
+                    };
+                    this.update(cx, |this, cx| match unfinished {
+                        Some(reason) => this.finish_with_error(anyhow!(reason), cx),
+                        None => this.finish(cx),
+                    })
+                    .log_err();
                     return;
                 }
 
@@ -1479,10 +1496,10 @@ impl CoworkThreadView {
         http_client: Arc<dyn http_client::HttpClient>,
         request: CompletionRequest,
         cx: &mut gpui::AsyncApp,
-    ) -> Result<(Vec<ToolCall>, bool)> {
+    ) -> Result<(Vec<ToolCall>, Option<StopReason>)> {
         let mut stream = provider::stream_completion(http_client, request).await?;
         let mut calls: Vec<ToolCall> = Vec::new();
-        let mut stopped_for_tools = false;
+        let mut stop = None;
 
         while let Some(event) = stream.next().await {
             match event? {
@@ -1491,7 +1508,7 @@ impl CoworkThreadView {
                         .update(cx, |this, cx| this.extend_last_message(&chunk, cx))
                         .is_err()
                     {
-                        return Ok((Vec::new(), false));
+                        return Ok((Vec::new(), None));
                     }
                 }
                 CompletionEvent::ToolCallStart { id, name } => calls.push(ToolCall {
@@ -1516,7 +1533,7 @@ impl CoworkThreadView {
                         .update(cx, |this, cx| this.extend_reasoning(&chunk, cx))
                         .is_err()
                     {
-                        return Ok((Vec::new(), false));
+                        return Ok((Vec::new(), None));
                     }
                 }
                 CompletionEvent::Usage { input, output } => {
@@ -1524,7 +1541,7 @@ impl CoworkThreadView {
                         .update(cx, |this, cx| this.record_usage(input, output, cx))
                         .is_err()
                     {
-                        return Ok((Vec::new(), false));
+                        return Ok((Vec::new(), None));
                     }
                 }
                 CompletionEvent::Stop(reason) => {
@@ -1532,23 +1549,52 @@ impl CoworkThreadView {
                     // usage chunk *after* the one carrying `finish_reason`, so stopping here
                     // meant the token counts were never read and the context meter stayed
                     // empty. The stream ends on its own at `[DONE]`.
-                    stopped_for_tools = reason == StopReason::ToolUse;
+                    // The first reason given is kept. A later one only repeats the end of the
+                    // stream, and letting it overwrite `ToolUse` dropped the calls.
+                    if stop.is_none() {
+                        stop = Some(reason);
+                    }
                 }
             }
         }
 
-        // A model that emitted no structured call may still have asked for one — in the prose.
-        // The text is the only place left to look, and looking costs nothing when it is not there.
         if calls.is_empty() {
+            let text = this
+                .update(cx, |this, _| {
+                    this.messages
+                        .last()
+                        .map(|message| message.text.clone())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            // Checked before looking for calls in it: whatever a model writes after its output
+            // has fallen apart is not something to run.
+            if crate::inline_calls::degenerate(&text) {
+                return Err(anyhow!(
+                    "The model's reply fell apart into `<unk>` tokens, so nothing in it was run. \
+                     Send the message again, or pick another model."
+                ));
+            }
+
+            // A model that emitted no structured call may still have asked for one, in the prose.
+            // The text is the only place left to look, and looking costs nothing when it is not
+            // there.
             let salvaged = this
                 .update(cx, |this, cx| this.salvage_inline_calls(cx))
                 .unwrap_or_default();
             if !salvaged.is_empty() {
-                return Ok((salvaged, true));
+                return Ok((salvaged, Some(StopReason::ToolUse)));
+            }
+            if crate::inline_calls::unread_call(&text) {
+                return Err(anyhow!(
+                    "The model wrote a tool call as text, in a form Anna cannot read, instead of \
+                     calling the tool, so it was not run. Send the message again, or pick a model \
+                     that supports tool calling."
+                ));
             }
         }
 
-        Ok((calls, stopped_for_tools))
+        Ok((calls, stop))
     }
 
     /// Promotes tool calls the model wrote into its answer to real ones.
@@ -1756,7 +1802,11 @@ impl CoworkThreadView {
             model: catalog_model.clone(),
             model_id: model.model_id.clone(),
             api_key,
-            system: None,
+            system: Some(system_prompt(
+                os_name(std::env::consts::OS),
+                self.thread.metadata.project.as_deref(),
+                &project_folders(&self.project, cx),
+            )),
             messages: self.thread.messages.clone(),
             tools: self.tools.definitions(),
             // Every model publishes its own ceiling, so asking for less would be leaving the
@@ -3146,6 +3196,63 @@ fn containing_repository<'a, T>(
         .map(|(_, repository)| repository)
 }
 
+/// How the model is asked to work, whatever the project.
+///
+/// Each line answers a mistake models made in real threads: a tool call written out as text, an
+/// edit copied from what the model sent rather than from what the formatter saved, a file read back
+/// after every write, a file pasted into the reply, and a summary describing an approach the model
+/// had already replaced.
+const AGENT_GUIDANCE: &str = "\
+How to work:
+- Call tools through tool calls. Never write a tool call out as text in a reply.
+- Read a file before editing it, and copy `old_text` from what `read` returned. After `write` and \
+`edit` the project's formatter may reformat the file, and the result says when it did.
+- The result of `write` and `edit` shows the change as saved, so there is no need to read the file \
+back just to check it.
+- Do not paste a file's contents into a reply after writing it. Say which files changed and how.
+- Describe what the files contain now, not an approach that was replaced.
+- If something cannot be done, or a tool keeps failing, say so plainly.
+- Reply in the language the user writes in.";
+
+/// What the model is told before the conversation: the machine, the folders and how to work.
+///
+/// Without it a model guesses, and its guesses are ones the tools cannot correct: a Linux path such
+/// as `/home/user/project` on a Windows machine, or shell syntax for the wrong system.
+fn system_prompt(os: &str, working_folder: Option<&str>, folders: &[(String, String)]) -> String {
+    let mut lines = vec![
+        "You are Anna's coding agent, working in the user's project through tools.".to_owned(),
+        String::new(),
+        format!("The computer runs {os}."),
+    ];
+    if let Some(folder) = working_folder {
+        lines.push(format!(
+            "Commands run in `{folder}` unless `cwd` names another directory. File paths may be \
+             absolute or relative to a project folder."
+        ));
+    }
+    if !folders.is_empty() {
+        lines.push("Folders open in the project:".to_owned());
+        lines.extend(
+            folders
+                .iter()
+                .map(|(name, path)| format!("- {name}: `{path}`")),
+        );
+    }
+    lines.push(String::new());
+    lines.push(AGENT_GUIDANCE.to_owned());
+    lines.join("\n")
+}
+
+/// The operating system as people write it, from `std::env::consts::OS`.
+fn os_name(os: &str) -> &str {
+    match os {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    }
+}
+
 /// The name a picture pasted without a file is attached under.
 const PASTED_IMAGE_NAME: &str = "Pasted image";
 
@@ -3724,6 +3831,42 @@ impl Render for CoworkThreadView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_system_prompt_says_where_the_agent_is_working() {
+        let folder = "C:\\Users\\USER\\Documents\\teste";
+        let folders = vec![("teste".to_owned(), folder.to_owned())];
+        let prompt = system_prompt("Windows", Some(folder), &folders);
+
+        assert!(prompt.contains("The computer runs Windows."), "{prompt}");
+        assert!(
+            prompt.contains("Commands run in `C:\\Users\\USER\\Documents\\teste`"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("- teste: `C:\\Users\\USER\\Documents\\teste`"),
+            "{prompt}"
+        );
+        assert!(prompt.ends_with(AGENT_GUIDANCE), "{prompt}");
+
+        let without_a_folder = system_prompt("Linux", None, &[]);
+        assert!(
+            !without_a_folder.contains("Commands run in"),
+            "{without_a_folder}"
+        );
+        assert!(
+            !without_a_folder.contains("Folders open"),
+            "{without_a_folder}"
+        );
+    }
+
+    #[test]
+    fn operating_systems_are_named_the_way_people_write_them() {
+        assert_eq!(os_name("windows"), "Windows");
+        assert_eq!(os_name("macos"), "macOS");
+        assert_eq!(os_name("linux"), "Linux");
+        assert_eq!(os_name("freebsd"), "freebsd");
+    }
 
     fn attachment(media_type: &str, data: &str) -> Attachment {
         Attachment {

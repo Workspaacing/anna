@@ -1093,7 +1093,9 @@ fn decode_anthropic_chunk(chunk: &Value) -> Result<Vec<CompletionEvent>> {
             Some(usage) => Ok(vec![anthropic_usage(usage)]),
             None => Ok(Vec::new()),
         },
-        Some("message_stop") => Ok(vec![CompletionEvent::Stop(StopReason::EndTurn)]),
+        // Nothing to report: `message_delta` already said why the message stopped, and a second
+        // `EndTurn` here overwrote a `tool_use` or `max_tokens` given a moment before.
+        Some("message_stop") => Ok(Vec::new()),
         Some("error") => {
             let message = chunk
                 .pointer("/error/message")
@@ -1286,11 +1288,13 @@ mod tests {
                 "\n",
                 "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n",
                 "data: {\"type\":\"ping\"}\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
                 "data: {\"type\":\"message_stop\"}\n",
             ),
             WireApi::Anthropic,
         );
 
+        // One stop, from `message_delta`: Anthropic always says why before `message_stop`.
         assert_eq!(
             events,
             vec![
@@ -1309,6 +1313,9 @@ mod tests {
                 "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n",
                 "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"a.rs\\\"}\"}}\n",
                 "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n",
+                // Anthropic always ends with this. When it reported `EndTurn` too, the call above
+                // was never run.
+                "data: {\"type\":\"message_stop\"}\n",
             ),
             WireApi::Anthropic,
         );
