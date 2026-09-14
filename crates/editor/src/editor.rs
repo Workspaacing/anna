@@ -115,6 +115,8 @@ pub use text::Bias;
 
 use ::git::{Blame, status::FileStatus};
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, BuildError};
+pub use anna_actions::editor::RevealInFileManager;
+use anna_actions::editor::{MoveDown, MoveUp};
 use anyhow::{Context as _, Result, anyhow, bail};
 use blink_manager::BlinkManager;
 use code_context_menus::{
@@ -244,8 +246,6 @@ use workspace::{
     notifications::{DetachAndPromptErr, NotificationId, NotifyResultExt, NotifyTaskExt},
     searchable::SearchEvent,
 };
-pub use wu_actions::editor::RevealInFileManager;
-use wu_actions::editor::{MoveDown, MoveUp};
 
 use crate::{
     bookmarks::BookmarksTabState,
@@ -8633,7 +8633,7 @@ impl Editor {
 
     fn copy_path(
         &mut self,
-        _: &wu_actions::workspace::CopyPath,
+        _: &anna_actions::workspace::CopyPath,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -8648,7 +8648,7 @@ impl Editor {
 
     fn copy_relative_path(
         &mut self,
-        _: &wu_actions::workspace::CopyRelativePath,
+        _: &anna_actions::workspace::CopyRelativePath,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {

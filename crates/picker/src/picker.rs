@@ -1,3 +1,4 @@
+use anna_actions::editor::{MoveDown, MoveUp};
 use anyhow::Result;
 use gpui::Action;
 use gpui::{
@@ -18,7 +19,6 @@ use ui::{
 use ui_input::ErasedEditorEvent;
 use util::ResultExt;
 use workspace::ModalView;
-use wu_actions::editor::{MoveDown, MoveUp};
 
 mod footer;
 mod head;

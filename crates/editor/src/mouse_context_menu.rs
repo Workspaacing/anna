@@ -6,14 +6,14 @@ use crate::{
     actions::{Format, FormatSelections},
     selections_collection::SelectionsCollection,
 };
+use anna_actions::preview::{
+    markdown::OpenPreview as OpenMarkdownPreview, svg::OpenPreview as OpenSvgPreview,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::{Context, DismissEvent, Entity, Focusable as _, Pixels, Point, Subscription, Window};
 use std::ops::Range;
 use text::PointUtf16;
 use workspace::OpenInTerminal;
-use wu_actions::preview::{
-    markdown::OpenPreview as OpenMarkdownPreview, svg::OpenPreview as OpenSvgPreview,
-};
 
 #[derive(Debug)]
 pub enum MenuPosition {
@@ -266,11 +266,11 @@ pub fn deploy_context_menu(
                 )
                 .action(
                     "Show Incoming Calls",
-                    Box::new(wu_actions::ShowIncomingCalls),
+                    Box::new(anna_actions::ShowIncomingCalls),
                 )
                 .action(
                     "Show Outgoing Calls",
-                    Box::new(wu_actions::ShowOutgoingCalls),
+                    Box::new(anna_actions::ShowOutgoingCalls),
                 )
                 .separator()
                 .action("Rename Symbol", Box::new(Rename))

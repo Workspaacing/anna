@@ -21,6 +21,7 @@ path = "src/search.rs"
 doctest = false
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 any_vec.workspace = true
 bitflags.workspace = true
@@ -49,7 +50,6 @@ ui.workspace = true
 util.workspace = true
 util_macros.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 itertools.workspace = true
 ztracing.workspace = true
 tracing.workspace = true

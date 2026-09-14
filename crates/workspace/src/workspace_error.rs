@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
+use anna_actions::OpenBrowser;
 use gpui::{Action, SharedString};
 use ui::{IconName, IconPosition};
-use wu_actions::OpenBrowser;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSeverity {

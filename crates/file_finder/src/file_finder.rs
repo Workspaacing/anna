@@ -22,6 +22,7 @@ use project::{
     PathMatchCandidateSet, Project, ProjectPath, WorktreeId, worktree_store::WorktreeStore,
 };
 
+use anna_actions::search::ToggleIncludeIgnored;
 use settings::{ModalWidthContent, Settings, SettingsStore};
 use std::{
     borrow::Cow,
@@ -45,7 +46,6 @@ use workspace::{
     MAX_RECENT_SELECTIONS, ModalView, OpenOptions, OpenVisible, SplitDirection, Workspace,
     item::PreviewTabsSettings, notifications::NotifyResultExt, pane,
 };
-use wu_actions::search::ToggleIncludeIgnored;
 
 actions!(
     file_finder,

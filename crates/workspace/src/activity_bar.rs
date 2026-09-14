@@ -165,7 +165,7 @@ impl ActivityBar {
             key: GITHUB_ENTRY_KEY,
             icon: IconName::Github,
             icon_tooltip: "GitHub",
-            action: Box::new(wu_actions::OpenGitHub),
+            action: Box::new(anna_actions::OpenGitHub),
         });
         entries.sort_by_key(|entry| {
             PREFERRED_ORDER
@@ -306,19 +306,19 @@ impl ActivityBar {
             )
             .menu(|window, cx| {
                 ContextMenu::build(window, cx, |menu, _, _| {
-                    menu.action("Settings", wu_actions::OpenSettings.boxed_clone())
-                        .action("Keymap", Box::new(wu_actions::OpenKeymap))
+                    menu.action("Settings", anna_actions::OpenSettings.boxed_clone())
+                        .action("Keymap", Box::new(anna_actions::OpenKeymap))
                         .action(
                             "Themes…",
-                            wu_actions::theme_selector::Toggle::default().boxed_clone(),
+                            anna_actions::theme_selector::Toggle::default().boxed_clone(),
                         )
                         .action(
                             "Icon Themes…",
-                            wu_actions::icon_theme_selector::Toggle::default().boxed_clone(),
+                            anna_actions::icon_theme_selector::Toggle::default().boxed_clone(),
                         )
                         .action(
                             "Extensions",
-                            wu_actions::Extensions::default().boxed_clone(),
+                            anna_actions::Extensions::default().boxed_clone(),
                         )
                 })
                 .into()
@@ -484,7 +484,7 @@ mod tests {
             entries,
             vec![
                 ("ProjectPanel", None),
-                (GITHUB_ENTRY_KEY, Some(wu_actions::OpenGitHub.name())),
+                (GITHUB_ENTRY_KEY, Some(anna_actions::OpenGitHub.name())),
                 ("OutlinePanel", None),
             ],
             "entries follow the preferred order, and GitHub is an action entry, not a panel"
@@ -549,7 +549,7 @@ mod tests {
         let github_opened = std::rc::Rc::new(std::cell::Cell::new(false));
         cx.update(|_, cx| {
             let github_opened = github_opened.clone();
-            cx.on_action(move |_: &wu_actions::OpenGitHub, _| github_opened.set(true));
+            cx.on_action(move |_: &anna_actions::OpenGitHub, _| github_opened.set(true));
         });
         workspace.update_in(cx, |workspace, window, cx| {
             workspace

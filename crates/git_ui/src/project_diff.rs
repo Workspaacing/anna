@@ -5,6 +5,7 @@ use crate::{
     staged_diff::StagedDiff,
     unstaged_diff::UnstagedDiff,
 };
+use anna_actions::git as git_actions;
 use anyhow::{Context as _, Result};
 use buffer_diff::DiffHunkSecondaryStatus;
 use editor::{
@@ -37,7 +38,6 @@ use workspace::{
     item::{Item, ItemEvent, ItemHandle, SaveOptions},
     searchable::SearchableItemHandle,
 };
-use wu_actions::git as git_actions;
 
 actions!(
     git,
@@ -972,7 +972,7 @@ mod tests {
         });
     }
 
-    use wu_actions::git as git_actions;
+    use anna_actions::git as git_actions;
 
     use crate::project_diff::{self, ProjectDiff};
 

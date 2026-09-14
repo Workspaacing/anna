@@ -1185,18 +1185,56 @@ fn read_proxy_settings(cx: &mut Context<HeadlessProject>) -> Option<Url> {
 }
 
 fn cleanup_old_binaries() -> Result<()> {
-    let server_dir = paths::remote_server_dir_relative();
     let release_channel = release_channel::RELEASE_CHANNEL.dev_name();
-    let prefix = format!("anna-remote-server-{}-", release_channel);
 
-    for entry in std::fs::read_dir(server_dir.as_std_path())? {
+    cleanup_legacy_server_dir(release_channel).log_err();
+
+    remove_old_binaries(
+        paths::remote_server_dir_relative().as_std_path(),
+        &[format!("anna-remote-server-{}-", release_channel)],
+    )
+}
+
+/// Earlier releases installed the server into `.wu_server`. Newer releases never reuse those
+/// binaries, because their names carry the version, so the old ones are removed like any other
+/// outdated binary, and the folder goes too once nothing is left in it.
+fn cleanup_legacy_server_dir(release_channel: &str) -> Result<()> {
+    let server_dir = paths::legacy_remote_server_dir_relative().as_std_path();
+    if !server_dir.is_dir() {
+        return Ok(());
+    }
+
+    remove_old_binaries(
+        server_dir,
+        &[
+            format!("anna-remote-server-{}-", release_channel),
+            format!("wu-remote-server-{}-", release_channel),
+        ],
+    )?;
+
+    // Binaries of another release channel, or ones still running, keep the folder in place.
+    if std::fs::remove_dir(server_dir).is_ok() {
+        log::info!("removed legacy remote server folder: {:?}", server_dir);
+    }
+
+    Ok(())
+}
+
+fn remove_old_binaries(server_dir: &Path, prefixes: &[String]) -> Result<()> {
+    for entry in std::fs::read_dir(server_dir)? {
         let path = entry?.path();
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        let file_name_text = file_name.to_string_lossy();
+        let Some(version) = prefixes
+            .iter()
+            .find_map(|prefix| file_name_text.strip_prefix(prefix.as_str()))
+        else {
+            continue;
+        };
 
-        if let Some(file_name) = path.file_name()
-            && let Some(version) = file_name.to_string_lossy().strip_prefix(&prefix)
-            && !is_new_version(version)
-            && !is_file_in_use(file_name)
-        {
+        if !is_new_version(version) && !is_file_in_use(file_name) {
             log::info!("removing old remote server binary: {:?}", path);
             std::fs::remove_file(&path)?;
         }
@@ -1208,9 +1246,13 @@ fn cleanup_old_binaries() -> Result<()> {
 // Remove this once 223 goes stable, we only have this to clean up old binaries on WSL
 // we no longer download them into this folder, we use the same folder as other remote servers
 fn cleanup_old_binaries_wsl() {
-    let server_dir = paths::remote_wsl_server_dir_relative();
-    if let Ok(()) = std::fs::remove_dir_all(server_dir.as_std_path()) {
-        log::info!("removing old wsl remote server folder: {:?}", server_dir);
+    for server_dir in [
+        paths::remote_wsl_server_dir_relative(),
+        paths::legacy_remote_wsl_server_dir_relative(),
+    ] {
+        if let Ok(()) = std::fs::remove_dir_all(server_dir.as_std_path()) {
+            log::info!("removing old wsl remote server folder: {:?}", server_dir);
+        }
     }
 }
 

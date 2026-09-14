@@ -12,6 +12,7 @@ workspace = true
 path = "src/keymap_editor.rs"
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 collections.workspace = true
 command_palette.workspace = true
@@ -40,7 +41,6 @@ ui_input.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 
 [dev-dependencies]
 db = {"workspace"= true, "features" = ["test-support"]}

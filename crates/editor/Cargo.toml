@@ -32,6 +32,7 @@ test-support = [
 
 [dependencies]
 aho-corasick.workspace = true
+anna_actions.workspace = true
 anyhow.workspace = true
 assets.workspace = true
 base64.workspace = true
@@ -97,7 +98,6 @@ urlencoding.workspace = true
 util.workspace = true
 uuid.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 zlog.workspace = true
 
 [dev-dependencies]

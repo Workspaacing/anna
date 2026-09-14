@@ -1,12 +1,12 @@
 use std::{path::Path, sync::Arc};
 
+use anna_actions::workspace::OpenWithSystem;
 use gpui::{EventEmitter, FocusHandle, Focusable};
 use ui::{
     App, Button, ButtonCommon, ButtonStyle, Clickable, Context, FluentBuilder, InteractiveElement,
     KeyBinding, Label, LabelCommon, LabelSize, ParentElement, Render, SharedString, Styled as _,
     Window, h_flex, v_flex,
 };
-use wu_actions::workspace::OpenWithSystem;
 
 use crate::Item;
 

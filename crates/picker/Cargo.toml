@@ -16,6 +16,7 @@ doctest = false
 test-support = []
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 db.workspace = true
 language.workspace = true
@@ -31,7 +32,6 @@ theme_settings.workspace = true
 ui.workspace = true
 ui_input.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 util.workspace = true
 
 [dev-dependencies]

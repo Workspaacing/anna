@@ -58,14 +58,14 @@ if ($vsDevShell) {
 $workspace = (Resolve-Path "$PSScriptRoot\..").Path
 $env:ZED_WORKSPACE = $workspace
 
-Push-Location -Path "$workspace\crates\wu"
+Push-Location -Path "$workspace\crates\anna"
 $channel = Get-Content "RELEASE_CHANNEL"
 $env:ZED_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 Pop-Location
 
 if ([string]::IsNullOrWhiteSpace($env:RELEASE_VERSION)) {
-    $cargoToml = Get-Content "$workspace\crates\wu\Cargo.toml"
+    $cargoToml = Get-Content "$workspace\crates\anna\Cargo.toml"
     $env:RELEASE_VERSION = ($cargoToml | Select-String -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
 }
 
@@ -76,7 +76,7 @@ function PrepareForBundle {
         Remove-Item -Path "$innoDir" -Recurse -Force
     }
     New-Item -Path "$innoDir" -ItemType Directory -Force
-    Copy-Item -Path "$workspace\crates\wu\resources\windows\*" -Destination "$innoDir" -Recurse -Force
+    Copy-Item -Path "$workspace\crates\anna\resources\windows\*" -Destination "$innoDir" -Recurse -Force
     New-Item -Path "$innoDir\make_appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
@@ -91,7 +91,7 @@ function GenerateLicenses {
 
 function BuildAnnaAndItsFriends {
     Write-Output "Building Anna and its friends, for channel: $channel"
-    cargo build --release --package wu --package cli --package auto_update_helper --target $target
+    cargo build --release --package anna --package cli --package auto_update_helper --target $target
     Copy-Item -Path ".\$CargoOutDir\anna.exe" -Destination "$innoDir\Anna.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
@@ -155,7 +155,7 @@ function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
     Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\anna.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\anna" -Force
+    Move-Item -Path "$innoDir\anna.sh" -Destination "$innoDir\bin\anna" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
     if($Architecture -eq "aarch64") {
         New-Item -Type Directory -Path "$innoDir\arm64" -Force
@@ -173,7 +173,7 @@ function CollectFiles {
 }
 
 function BuildInstaller {
-    $issFilePath = "$innoDir\zed.iss"
+    $issFilePath = "$innoDir\anna.iss"
     # The registry value name also names the context menu key ("<name>ContextMenu") that
     # crates/explorer_command_injector reads its title from.
     # The AppX full name ends with the publisher id derived from Publisher in
@@ -186,7 +186,7 @@ function BuildInstaller {
             $appDisplayName = "Anna"
             $appSetupName = "Anna-$Architecture"
             # Must match `app_identifier()` in crates/release_channel/src/lib.rs plus the "-Instance-Mutex" suffix
-            # used by crates/wu/src/wu/windows_only_instance.rs.
+            # used by crates/anna/src/anna/windows_only_instance.rs.
             $appMutex = "Anna-Editor-Stable-Instance-Mutex"
             $appExeName = "Anna"
             $regValueName = "Anna"

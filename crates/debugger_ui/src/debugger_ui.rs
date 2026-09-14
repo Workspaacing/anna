@@ -8,11 +8,11 @@ use project::debugger::{self, breakpoint_store::SourceBreakpoint, session::Threa
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use anna_actions::debug_panel::{Toggle, ToggleFocus};
 use tasks_ui::{Spawn, TaskOverrides};
 use ui::{FluentBuilder, InteractiveElement};
 use util::maybe;
 use workspace::{ShutdownDebugAdapters, Workspace};
-use wu_actions::debug_panel::{Toggle, ToggleFocus};
 
 pub mod attach_modal;
 pub mod debugger_panel;

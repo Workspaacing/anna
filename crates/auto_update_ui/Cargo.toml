@@ -12,6 +12,7 @@ workspace = true
 path = "src/auto_update_ui.rs"
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 auto_update.workspace = true
 client.workspace = true
@@ -27,4 +28,3 @@ smol.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true

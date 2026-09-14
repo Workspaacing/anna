@@ -40,7 +40,7 @@ use update_version::UpdateVersion;
 use util::ResultExt;
 use workspace::{AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace};
 
-use wu_actions::OpenRemote;
+use anna_actions::OpenRemote;
 
 pub use onboarding_banner::restore_banner;
 
@@ -680,7 +680,7 @@ impl TitleBar {
                     .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                     .when(!is_project_selected, |s| s.color(Color::Muted)),
                 move |_window, cx| {
-                    Tooltip::for_action("Recent Projects", &wu_actions::OpenRecent::default(), cx)
+                    Tooltip::for_action("Recent Projects", &anna_actions::OpenRecent::default(), cx)
                 },
             )
             .anchor(gpui::Anchor::TopLeft)
@@ -784,7 +784,7 @@ impl TitleBar {
                     move |_window, cx| {
                         Tooltip::with_meta(
                             "Worktree",
-                            Some(&wu_actions::git::Worktree),
+                            Some(&anna_actions::git::Worktree),
                             format!("Currently In Use: {}", worktree_label),
                             cx,
                         )
@@ -842,7 +842,7 @@ impl TitleBar {
                         };
                         Tooltip::with_meta(
                             "Branch & Stash",
-                            Some(&wu_actions::git::Branch),
+                            Some(&anna_actions::git::Branch),
                             meta,
                             cx,
                         )

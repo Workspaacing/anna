@@ -11,12 +11,12 @@ use gpui::{
     TextAlign, TextStyleRefinement, WeakEntity,
 };
 
+use anna_actions::editor::{MoveDown, MoveUp};
 use settings::{
     CenteredPaddingSettings, CodeFade, DelayMs, FontSize, FontWeightContent, InactiveOpacity,
     MinimumContrast, PixelSetting,
 };
 use ui::prelude::*;
-use wu_actions::editor::{MoveDown, MoveUp};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NumberFieldMode {

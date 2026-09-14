@@ -78,7 +78,7 @@ pub fn init(cx: &mut App) {
             workspace.toggle_panel_focus::<CoworkPanel>(window, cx);
         });
         workspace.register_action(
-            |workspace, action: &wu_actions::StartThreadWith, window, cx| {
+            |workspace, action: &anna_actions::StartThreadWith, window, cx| {
                 let Some(panel) = workspace.panel::<CoworkPanel>(cx) else {
                     return;
                 };

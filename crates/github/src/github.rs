@@ -22,7 +22,7 @@ pub use worklist::{Item, Kind, Waiting, WaitingReason, fetch_waiting_in_reposito
 use anyhow::Result;
 use gpui::{App, Task};
 use workspace::Workspace;
-use wu_actions::OpenGitHub;
+use anna_actions::OpenGitHub;
 
 /// The token this app is connected with, for anything outside this crate that needs one.
 ///

@@ -247,7 +247,7 @@ fn render_connect() -> AnyElement {
                         .color(Color::Muted),
                 ),
         )
-        .on_click(|_, window, cx| window.dispatch_action(Box::new(wu_actions::OpenGitHub), cx))
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(anna_actions::OpenGitHub), cx))
         .into_any_element()
 }
 

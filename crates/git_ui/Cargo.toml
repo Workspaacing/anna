@@ -16,6 +16,7 @@ path = "src/git_ui.rs"
 test-support = ["multi_buffer/test-support", "remote_connection/test-support"]
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 askpass.workspace = true
 async-channel.workspace = true
@@ -65,7 +66,6 @@ util.workspace = true
 watch.workspace = true
 workspace.workspace = true
 git_ui_core.workspace = true
-wu_actions.workspace = true
 ztracing.workspace = true
 
 [dev-dependencies]

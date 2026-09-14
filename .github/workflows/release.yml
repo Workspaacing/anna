@@ -34,9 +34,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check that the tag matches the crate version
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/wu/Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/anna/Cargo.toml | head -1)
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match crates/wu/Cargo.toml version ${version}"
+            echo "Tag ${GITHUB_REF_NAME} does not match crates/anna/Cargo.toml version ${version}"
             exit 1
           fi
 
@@ -60,7 +60,7 @@ jobs:
           add-job-id-key: 'false'
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Use the stable release channel
-        run: echo stable > crates/wu/RELEASE_CHANNEL
+        run: echo stable > crates/anna/RELEASE_CHANNEL
       # Signing and notarization only happen when these secrets exist.
       # Without them the bundle is ad-hoc signed.
       - name: Prepare provisioning profile
@@ -122,7 +122,7 @@ jobs:
       # caches and the ci workflow's, which run on every pull request. A Linux cache saved the
       # least time per gigabyte, 34 to 29 minutes, since the workspace's own crates rebuild anyway.
       - name: Use the stable release channel
-        run: echo stable > crates/wu/RELEASE_CHANNEL
+        run: echo stable > crates/anna/RELEASE_CHANNEL
       - name: Bundle
         run: ./script/bundle-linux
       - if: startsWith(github.ref, 'refs/tags/')
@@ -150,7 +150,7 @@ jobs:
           add-job-id-key: 'false'
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Use the stable release channel
-        run: Set-Content -Path crates/wu/RELEASE_CHANNEL -Value stable -NoNewline
+        run: Set-Content -Path crates/anna/RELEASE_CHANNEL -Value stable -NoNewline
         shell: pwsh
       - name: Bundle
         run: script/bundle-windows.ps1 -Architecture x86_64
