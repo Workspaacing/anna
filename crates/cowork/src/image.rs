@@ -37,6 +37,14 @@ const MAX_BASE64_BYTES: usize = 10 * 1024 * 1024;
 /// The same budget expressed in bytes of the original file, for checking before encoding.
 const MAX_BYTES: usize = MAX_BASE64_BYTES / 4 * 3;
 
+/// The largest bitmap converted, measured before conversion.
+///
+/// A bitmap is raw pixels, several times larger than the PNG it becomes, so holding it to
+/// `MAX_BYTES` would refuse ordinary screenshots unconverted: PrintScreen on a Full HD screen is an
+/// 8 MB bitmap. This bound only keeps an absurd bitmap from being decoded; a screenshot across two
+/// 4K monitors is about 64 MB. The PNG it becomes is still held to `MAX_BYTES`.
+const MAX_BITMAP_BYTES: usize = 128 * 1024 * 1024;
+
 /// The media type of an image, read from the bytes rather than from the file name.
 ///
 /// A file called `shot.png` that is really a JPEG is ordinary — screenshots get renamed, browsers
@@ -117,7 +125,17 @@ fn check_size(name: &str, len: usize) -> Result<()> {
 /// Prepares bytes under a name, which is what the clipboard has instead of a file.
 pub fn attach_named(name: String, bytes: Vec<u8>) -> Result<Attachment> {
     // Checked before decoding, so a 400 MB bitmap is refused rather than expanded in memory first.
-    check_size(&name, bytes.len())?;
+    if is_bitmap(&bytes) {
+        if bytes.len() > MAX_BITMAP_BYTES {
+            bail!(
+                "{name} is a {:.0} MB bitmap, too large to convert. Save it as a PNG or JPEG and \
+                 attach that instead.",
+                bytes.len() as f64 / (1024.0 * 1024.0),
+            );
+        }
+    } else {
+        check_size(&name, bytes.len())?;
+    }
 
     let (media_type, bytes) = match sniff(&bytes) {
         Some(media_type) => (media_type, bytes),
@@ -240,6 +258,27 @@ mod tests {
         assert_eq!(decoded.dimensions(), (2, 1));
         assert_eq!(decoded.get_pixel(0, 0), &image::Rgb([255, 0, 0]));
         assert_eq!(decoded.get_pixel(1, 0), &image::Rgb([0, 0, 255]));
+    }
+
+    #[test]
+    fn a_large_screenshot_is_converted_before_its_size_is_judged() {
+        // PrintScreen on a 2560 × 1440 screen: an 11 MB bitmap, over the image limit, that is a
+        // PNG far under it once converted.
+        let bitmap = {
+            let pixels = image::RgbImage::from_pixel(2560, 1440, image::Rgb([30, 30, 30]));
+            let mut buffer = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(pixels)
+                .write_to(&mut buffer, image::ImageFormat::Bmp)
+                .unwrap();
+            buffer.into_inner()
+        };
+        assert!(
+            bitmap.len() > MAX_BYTES,
+            "the bitmap alone is over the limit"
+        );
+
+        let attachment = attach_named("Pasted image".to_owned(), bitmap).unwrap();
+        assert_eq!(attachment.media_type, "image/png");
     }
 
     #[test]
