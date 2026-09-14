@@ -321,7 +321,7 @@ impl GitHubWindow {
             return;
         };
 
-        let action = wu_actions::StartThreadWith {
+        let action = anna_actions::StartThreadWith {
             prompt: item.handoff_prompt(),
         };
         let slug = item.slug();

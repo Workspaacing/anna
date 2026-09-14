@@ -13,6 +13,7 @@ name = "git_ui_core"
 path = "src/git_ui_core.rs"
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 askpass.workspace = true
 buffer_diff.workspace = true
@@ -42,7 +43,6 @@ ui.workspace = true
 util.workspace = true
 watch.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 zeroize.workspace = true
 ztracing.workspace = true
 

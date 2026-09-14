@@ -1,5 +1,7 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
 <div align="center">
-  <img src="crates/wu/resources/app-icon.png" alt="Anna" width="128">
+  <img src="crates/anna/resources/app-icon.png" alt="Anna" width="128">
   <h1>Anna</h1>
   <p>The AI engineering workspace.</p>
   <p><a href="https://github.com/Workspaacing/anna/releases/latest"><strong>Download</strong></a></p>

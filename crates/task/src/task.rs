@@ -18,6 +18,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 pub use adapter_schema::{AdapterSchema, AdapterSchemas};
+pub use anna_actions::RevealTarget;
 pub use debug_format::{
     AttachRequest, BuildTaskDefinition, DebugRequest, DebugScenario, DebugTaskFile, LaunchRequest,
     Request, TcpArgumentsTemplate, ZedDebugConfig,
@@ -30,7 +31,6 @@ pub use util::shell::{Shell, ShellKind};
 pub use util::shell_builder::ShellBuilder;
 pub use vscode_debug_format::VsCodeDebugTaskFile;
 pub use vscode_format::VsCodeTaskFile;
-pub use wu_actions::RevealTarget;
 
 /// Task identifier, unique within the application.
 /// Based on it, task reruns and terminal tabs are managed.

@@ -80,16 +80,33 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// On Windows, this is `%APPDATA%\Anna`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Returns the relative path to the wu_server directory on the ssh host.
+/// Returns the relative path to the anna_server directory on the ssh host.
 pub fn remote_server_dir_relative() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".anna_server").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to the directory earlier releases installed the
+/// remote server into on the ssh host. Nothing is installed there anymore; the
+/// remote server removes the binaries left in it.
+pub fn legacy_remote_server_dir_relative() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".wu_server").unwrap());
     *CACHED
 }
 
 // Remove this once 223 goes stable
-/// Returns the relative path to the wu_wsl_server directory on the wsl host.
+/// Returns the relative path to the anna_wsl_server directory on the wsl host.
 pub fn remote_wsl_server_dir_relative() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".anna_wsl_server").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to the wsl server directory earlier releases used
+/// on the wsl host.
+pub fn legacy_remote_wsl_server_dir_relative() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".wu_wsl_server").unwrap());
     *CACHED
@@ -372,7 +389,7 @@ pub fn debug_scenarios_file() -> &'static PathBuf {
 /// Returns the path to the user-global `AGENTS.md` file.
 ///
 /// This file holds personal agent instructions that apply to every project the
-/// user opens, and is loaded into the native Wu agent's system prompt.
+/// user opens, and is loaded into the native Anna agent's system prompt.
 pub fn agents_file() -> &'static PathBuf {
     static AGENTS_FILE: OnceLock<PathBuf> = OnceLock::new();
     AGENTS_FILE.get_or_init(|| config_dir().join("AGENTS.md"))
@@ -490,7 +507,7 @@ pub fn embeddings_dir() -> &'static PathBuf {
 
 /// Returns the path to the languages directory.
 ///
-/// This is where language servers are downloaded to for languages built-in to Wu.
+/// This is where language servers are downloaded to for languages built-in to Anna.
 pub fn languages_dir() -> &'static PathBuf {
     static LANGUAGES_DIR: OnceLock<PathBuf> = OnceLock::new();
     LANGUAGES_DIR.get_or_init(|| data_dir().join("languages"))
@@ -498,7 +515,7 @@ pub fn languages_dir() -> &'static PathBuf {
 
 /// Returns the path to the debug adapters directory
 ///
-/// This is where debug adapters are downloaded to for DAPs that are built-in to Wu.
+/// This is where debug adapters are downloaded to for DAPs that are built-in to Anna.
 pub fn debug_adapters_dir() -> &'static PathBuf {
     static DEBUG_ADAPTERS_DIR: OnceLock<PathBuf> = OnceLock::new();
     DEBUG_ADAPTERS_DIR.get_or_init(|| data_dir().join("debug_adapters"))

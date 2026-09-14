@@ -26,6 +26,7 @@ test-support = [
 ]
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 bitflags.workspace = true
 collections.workspace = true
@@ -71,7 +72,6 @@ ui_input.workspace = true
 unindent = { workspace = true, optional = true }
 util.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 
 [dev-dependencies]
 dap = { workspace = true, features = ["test-support"] }

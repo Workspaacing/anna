@@ -1,4 +1,4 @@
-//! Biome, as a language server Wu installs and manages itself.
+//! Biome, as a language server Anna installs and manages itself.
 //!
 //! Biome is a linter and formatter for the JavaScript family, written in Rust, that covers ground
 //! ESLint and Prettier otherwise split between them. Running it through its LSP rather than by
@@ -11,7 +11,7 @@
 //! source and nothing else, not even for a file that fails to parse — so a per-file CLI integration
 //! cannot report what it could not fix.
 //!
-//! The project's own copy wins over the one Wu installs: that is the version its lockfile pins and
+//! The project's own copy wins over the one Anna installs: that is the version its lockfile pins and
 //! its CI runs, and a checker that disagrees with CI is worse than no checker.
 
 use anyhow::Result;
@@ -49,11 +49,11 @@ impl BiomeLspAdapter {
     const SERVER_NAME: LanguageServerName = LanguageServerName::new_static("biome");
     const PACKAGE_NAME: &str = "@biomejs/biome";
 
-    /// The version every Wu installs.
+    /// The version every Anna installs.
     ///
     /// Pinned rather than "latest" so the version is a fact about this repository: two people on
     /// the same commit run the same linter and get the same diagnostics, and a Biome release
-    /// cannot change what Wu does to your code without a commit here saying so. The same reason
+    /// cannot change what Anna does to your code without a commit here saying so. The same reason
     /// `eslint.rs` pins its server.
     const VERSION: &str = "2.5.13";
 
@@ -194,7 +194,7 @@ impl LspAdapter for BiomeLspAdapter {
         _: Option<Uri>,
         cx: &mut AsyncApp,
     ) -> Result<Value> {
-        // Biome reads `biome.json` itself; anything here is the user overriding that from Wu's
+        // Biome reads `biome.json` itself; anything here is the user overriding that from Anna's
         // settings, so it is passed through untouched rather than merged with opinions.
         let settings = cx.update(|cx| {
             language_server_settings(delegate.as_ref(), &Self::SERVER_NAME, cx)
@@ -204,7 +204,7 @@ impl LspAdapter for BiomeLspAdapter {
         Ok(json!({ "biome": settings }))
     }
 
-    /// The language ids Biome expects, which are VS Code's rather than Wu's.
+    /// The language ids Biome expects, which are VS Code's rather than Anna's.
     fn language_ids(&self) -> HashMap<LanguageName, String> {
         HashMap::from_iter([
             (

@@ -5,6 +5,10 @@ use crate::{
     commit_view::CommitView,
     git_status_icon,
 };
+use anna_actions::{
+    buffer_search,
+    search::{SelectNextMatch, SelectPreviousMatch, ToggleCaseSensitive},
+};
 use collections::{BTreeMap, HashMap, IndexSet};
 use editor::Editor;
 use file_icons::FileIcons;
@@ -40,10 +44,6 @@ use std::{
     rc::Rc,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
-};
-use wu_actions::{
-    buffer_search,
-    search::{SelectNextMatch, SelectPreviousMatch, ToggleCaseSensitive},
 };
 
 use theme::AccentColors;

@@ -17,6 +17,7 @@ path = "src/project_panel.rs"
 doctest = false
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 collections.workspace = true
 editor.workspace = true
@@ -45,7 +46,6 @@ workspace.workspace = true
 language.workspace = true
 markdown.workspace = true
 markdown_preview.workspace = true
-wu_actions.workspace = true
 notifications.workspace = true
 fs.workspace = true
 log.workspace = true

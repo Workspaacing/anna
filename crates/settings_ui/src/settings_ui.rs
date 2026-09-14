@@ -39,13 +39,13 @@ use ui::{
     prelude::*,
 };
 
+use anna_actions::{
+    OpenProjectSettings, OpenSettings, OpenSettingsAt, OpenSettingsAtTarget, OpenSettingsPage,
+};
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
     AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, WorkspaceSettings,
     client_side_decorations,
-};
-use wu_actions::{
-    OpenProjectSettings, OpenSettings, OpenSettingsAt, OpenSettingsAtTarget, OpenSettingsPage,
 };
 
 use crate::components::{

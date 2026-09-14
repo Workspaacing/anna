@@ -13,6 +13,7 @@ path = "src/diagnostics.rs"
 doctest = false
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 collections.workspace = true
 ctor.workspace = true
@@ -35,7 +36,6 @@ theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 
 [dev-dependencies]
 

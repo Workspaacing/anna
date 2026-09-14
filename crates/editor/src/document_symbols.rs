@@ -340,6 +340,7 @@ mod tests {
         time::Duration,
     };
 
+    use anna_actions::editor::MoveDown;
     use futures::StreamExt as _;
     use gpui::{App, TestAppContext};
     use language::highlight_ranges_from_text;
@@ -348,7 +349,6 @@ mod tests {
     use text::Point;
     use util::path;
     use workspace::item::{Item, ItemEvent};
-    use wu_actions::editor::MoveDown;
 
     use crate::{
         Editor, LSP_REQUEST_DEBOUNCE_TIMEOUT,

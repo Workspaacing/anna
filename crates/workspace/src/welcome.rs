@@ -12,12 +12,12 @@ use gpui::{
 };
 use menu::{SelectNext, SelectPrevious};
 
+use anna_actions::{Extensions, OpenKeymap, OpenOnboarding, OpenSettings, command_palette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{DefaultOpenBehavior, Settings};
 use ui::{ButtonLike, Divider, DividerColor, KeyBinding, prelude::*};
 use util::ResultExt;
-use wu_actions::{Extensions, OpenKeymap, OpenOnboarding, OpenSettings, command_palette};
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = welcome)]
@@ -317,7 +317,7 @@ impl WelcomePage {
                         })
                         .log_err();
                 } else {
-                    use wu_actions::OpenRecent;
+                    use anna_actions::OpenRecent;
                     window.dispatch_action(OpenRecent::default().boxed_clone(), cx);
                 }
             }
@@ -425,7 +425,7 @@ impl Render for WelcomePage {
                             .mb_4()
                             .gap_4()
                             .child(
-                                img("images/wu_icon.png")
+                                img("images/anna_icon.png")
                                     .size(rems_from_px(45_f32))
                                     .flex_none(),
                             )

@@ -16,6 +16,7 @@ default = []
 test-support = []
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 component.workspace = true
 cowork.workspace = true
@@ -45,7 +46,6 @@ theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 
 [dev-dependencies]
 fs = { workspace = true, features = ["test-support"] }

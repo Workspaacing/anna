@@ -551,7 +551,7 @@ impl CoworkPanel {
         self.store
             .update(cx, |store, cx| store.refresh_connections(cx));
         window.dispatch_action(
-            Box::new(wu_actions::OpenSettingsPage {
+            Box::new(anna_actions::OpenSettingsPage {
                 page: "Anna".to_owned(),
                 target: None,
             }),

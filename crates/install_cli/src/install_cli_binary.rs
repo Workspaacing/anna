@@ -1,4 +1,4 @@
-use super::register_wu_scheme;
+use super::register_anna_scheme;
 use anyhow::Result;
 use gpui::{AppContext as _, AsyncApp, Context, PromptLevel, Window, actions};
 use release_channel::ReleaseChannel;
@@ -137,7 +137,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                 cx,
             )
         })?;
-        register_wu_scheme(cx).await.log_err();
+        register_anna_scheme(cx).await.log_err();
         Ok(())
     })
     .detach_and_prompt_err("Cannot install the Anna CLI", window, cx, |_, _, _| None);

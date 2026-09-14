@@ -4,7 +4,7 @@ Anna's agent (the `cowork` crate) began as a chat panel. This is the plan for ma
 natively in Rust, with no external runtime and no dependency on another agent product.
 
 It is written against research into OpenCode's design, kept in
-`.claude/skills/wu/references/opencode/`. Where a decision differs from theirs, the reason is stated.
+`.claude/skills/anna/references/opencode/`. Where a decision differs from theirs, the reason is stated.
 
 ## The one structural fact
 

@@ -28,6 +28,7 @@ test-support = [
 ]
 
 [dependencies]
+anna_actions.workspace = true
 anyhow.workspace = true
 auto_update.workspace = true
 fs.workspace = true
@@ -53,7 +54,6 @@ theme.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-wu_actions.workspace = true
 arrayvec = "0.7.6"
 
 [dev-dependencies]

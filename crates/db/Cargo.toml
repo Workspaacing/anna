@@ -16,6 +16,7 @@ doctest = false
 test-support = []
 
 [dependencies]
+anna_env_vars.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 gpui.workspace = true
@@ -28,7 +29,6 @@ sqlez.workspace = true
 sqlez_macros.workspace = true
 util.workspace = true
 uuid.workspace = true
-wu_env_vars.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

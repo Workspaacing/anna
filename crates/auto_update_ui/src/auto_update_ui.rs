@@ -16,7 +16,7 @@ use workspace::{
         simple_message_notification::MessageNotification,
     },
 };
-use wu_actions::ShowUpdateNotification;
+use anna_actions::ShowUpdateNotification;
 
 actions!(
     auto_update,
