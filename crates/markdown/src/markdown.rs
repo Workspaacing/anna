@@ -30,12 +30,11 @@ use std::time::Duration;
 use collections::{HashMap, HashSet};
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Edges, Entity,
-    FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hitbox, Hsla, Image,
+    FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hitbox, Hsla, Image,
     ImageFormat, ImageSource, KeyContext, Length, MouseButton, MouseDownEvent, MouseEvent,
     MouseMoveEvent, MouseUpEvent, Point, ScrollHandle, Stateful, StrikethroughStyle,
-    StyleRefinement, StyledImage, StyledText, Task, TextAlign, TextLayout, TextRun,
-    TextStyle, TextStyleRefinement, WrappedLineLayout, actions, canvas, img, point, quad, relative,
-    size,
+    StyleRefinement, StyledImage, StyledText, Task, TextAlign, TextLayout, TextRun, TextStyle,
+    TextStyleRefinement, WrappedLineLayout, actions, canvas, img, point, quad, relative, size,
 };
 use language::{CharClassifier, Language, LanguageRegistry, Rope};
 use parser::CodeBlockMetadata;
@@ -91,6 +90,187 @@ pub struct HeadingLevelStyles {
     pub h6: Option<TextStyleRefinement>,
 }
 
+impl HeadingLevelStyles {
+    fn for_level(&self, level: pulldown_cmark::HeadingLevel) -> Option<&TextStyleRefinement> {
+        match level {
+            pulldown_cmark::HeadingLevel::H1 => self.h1.as_ref(),
+            pulldown_cmark::HeadingLevel::H2 => self.h2.as_ref(),
+            pulldown_cmark::HeadingLevel::H3 => self.h3.as_ref(),
+            pulldown_cmark::HeadingLevel::H4 => self.h4.as_ref(),
+            pulldown_cmark::HeadingLevel::H5 => self.h5.as_ref(),
+            pulldown_cmark::HeadingLevel::H6 => self.h6.as_ref(),
+        }
+    }
+}
+
+/// Where the space between blocks goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum BlockSpacing {
+    /// Each kind of block keeps its own margins, mostly below it, and the last block's bottom
+    /// margin is dropped.
+    #[default]
+    Below,
+    /// Space goes above every block but the first in its container, as shadcn's Typeset does, so a
+    /// block appended while a reply streams in never changes the space around the blocks above it.
+    Above(BlockMargins),
+}
+
+/// The space above each kind of block under [`BlockSpacing::Above`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockMargins {
+    /// Above paragraphs, lists, block quotes, code blocks and tables.
+    pub flow: Pixels,
+    /// Above every list item, and above a paragraph or list that follows other content in an item.
+    pub list_item: Pixels,
+    /// Above a horizontal rule.
+    pub rule: Pixels,
+    /// Above any block that directly follows a heading.
+    pub after_heading: Pixels,
+    pub headings: HeadingLevelMargins,
+    /// Above a heading that directly follows a horizontal rule.
+    pub headings_after_rule: HeadingLevelMargins,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadingLevelMargins {
+    pub h1: Pixels,
+    pub h2: Pixels,
+    pub h3: Pixels,
+    pub h4: Pixels,
+    pub h5: Pixels,
+    pub h6: Pixels,
+}
+
+impl HeadingLevelMargins {
+    fn for_level(&self, level: pulldown_cmark::HeadingLevel) -> Pixels {
+        match level {
+            pulldown_cmark::HeadingLevel::H1 => self.h1,
+            pulldown_cmark::HeadingLevel::H2 => self.h2,
+            pulldown_cmark::HeadingLevel::H3 => self.h3,
+            pulldown_cmark::HeadingLevel::H4 => self.h4,
+            pulldown_cmark::HeadingLevel::H5 => self.h5,
+            pulldown_cmark::HeadingLevel::H6 => self.h6,
+        }
+    }
+}
+
+/// Lays list markers out in a column of their own, as shadcn's Typeset does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ListStyle {
+    /// The width of the column the markers sit in.
+    pub indent: Pixels,
+    /// The space between a marker and its item's text.
+    pub marker_gap: Pixels,
+    pub marker_color: Hsla,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TableStyle {
+    /// A bordered grid with a shaded header row and striped body rows.
+    #[default]
+    Grid,
+    /// Horizontal rules in `rule_color` only, above each body row and below the table, as shadcn's
+    /// Typeset draws tables. Body cells use `table_cell_padding`.
+    Rules {
+        header_cell_padding: Point<Pixels>,
+        header_font_weight: FontWeight,
+    },
+}
+
+/// A font chosen in the theme settings, so a [`Typeset`] keeps following the user's fonts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypesetFont {
+    Ui,
+    Buffer,
+    /// The markdown preview font, which is the UI font unless the user chose another.
+    MarkdownPreview,
+    /// The markdown preview code font, which is the buffer font unless the user chose another.
+    MarkdownPreviewCode,
+}
+
+impl TypesetFont {
+    fn resolve(self, theme_settings: &ThemeSettings) -> Font {
+        match self {
+            Self::Ui => theme_settings.ui_font.clone(),
+            Self::Buffer => theme_settings.buffer_font.clone(),
+            Self::MarkdownPreview => Font {
+                family: theme_settings.markdown_preview_font_family().clone(),
+                ..theme_settings.ui_font.clone()
+            },
+            Self::MarkdownPreviewCode => Font {
+                family: theme_settings.markdown_preview_code_font_family().clone(),
+                ..theme_settings.buffer_font.clone()
+            },
+        }
+    }
+}
+
+/// A native port of shadcn's Typeset: rendered markdown styled from a font size, a line height
+/// and the space between blocks, with every other length a proportion of those. Turn one into a
+/// style with [`MarkdownStyle::typeset`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Typeset {
+    /// The body font size.
+    pub size: Pixels,
+    /// The body line height, as a multiple of the font size.
+    pub leading: f32,
+    /// The space between blocks, in ems.
+    pub flow: f32,
+    pub body_font: TypesetFont,
+    pub heading_font: TypesetFont,
+    pub code_font: TypesetFont,
+    /// The widest body text should run, in ems. Applying it is left to the layout around the
+    /// markdown.
+    pub max_width: Option<f32>,
+}
+
+impl Typeset {
+    /// Anna's default `ui_font_size`, the font size the presets' sizes are chosen for.
+    const PRESET_FONT_SIZE: Pixels = px(15.);
+
+    pub fn chat() -> Self {
+        Self {
+            size: px(14.),
+            leading: 1.6,
+            flow: 1.,
+            body_font: TypesetFont::Ui,
+            heading_font: TypesetFont::Ui,
+            code_font: TypesetFont::Buffer,
+            max_width: None,
+        }
+    }
+
+    pub fn docs() -> Self {
+        Self {
+            size: px(15.),
+            leading: 1.75,
+            flow: 1.5,
+            ..Self::chat()
+        }
+    }
+
+    pub fn reading() -> Self {
+        Self {
+            size: px(18.),
+            leading: 1.9,
+            flow: 2.,
+            max_width: Some(37.),
+            ..Self::chat()
+        }
+    }
+
+    /// Scales the size by how far `font_size` is from Anna's default font size, so a preset keeps
+    /// its own size at the default and still follows the user's font size setting and zoom.
+    pub fn scaled_to_font_size(mut self, font_size: Pixels) -> Self {
+        self.size = self.size * (font_size / Self::PRESET_FONT_SIZE);
+        self
+    }
+
+    pub fn max_width_in_pixels(&self) -> Option<Pixels> {
+        self.max_width.map(|max_width| self.size * max_width)
+    }
+}
+
 #[derive(Clone)]
 pub struct MarkdownStyle {
     pub base_text_style: TextStyle,
@@ -108,8 +288,19 @@ pub struct MarkdownStyle {
     pub syntax: Arc<SyntaxTheme>,
     pub selection_background_color: Hsla,
     pub heading: StyleRefinement,
+    /// Set on the heading block, where only the font size and line height take effect.
     pub heading_level_styles: Option<HeadingLevelStyles>,
+    /// Pushed onto the heading's text runs, which carry the weight, color and family but not the
+    /// size.
+    pub heading_level_text_styles: Option<HeadingLevelStyles>,
     pub heading_border_color: Option<Hsla>,
+    pub block_spacing: BlockSpacing,
+    pub block_quote_border_width: Pixels,
+    pub block_quote_padding: DefiniteLength,
+    pub strong_font_weight: FontWeight,
+    /// `None` puts the marker right before the item's text.
+    pub list_style: Option<ListStyle>,
+    pub table_style: TableStyle,
     pub paragraph_spacing: Pixels,
     pub paragraph_line_height: DefiniteLength,
     /// Bottom margin of top-level lists only
@@ -141,7 +332,14 @@ impl Default for MarkdownStyle {
             selection_background_color: Default::default(),
             heading: Default::default(),
             heading_level_styles: None,
+            heading_level_text_styles: None,
             heading_border_color: None,
+            block_spacing: BlockSpacing::Below,
+            block_quote_border_width: px(4.),
+            block_quote_padding: rems(1.).into(),
+            strong_font_weight: FontWeight::BOLD,
+            list_style: None,
+            table_style: TableStyle::Grid,
             paragraph_spacing: px(8.),
             paragraph_line_height: rems(1.3).into(),
             list_spacing: px(0.),
@@ -373,6 +571,193 @@ impl MarkdownStyle {
         let colors = cx.theme().colors();
         self.base_text_style.color = colors.text_muted;
         self
+    }
+
+    /// Styles markdown from a [`Typeset`] and the active theme.
+    pub fn typeset(typeset: Typeset, window: &Window, cx: &App) -> Self {
+        let colors = cx.theme().colors();
+        let syntax = cx.theme().syntax().clone();
+        Self::typeset_with_overrides(typeset, colors, &syntax, window, cx)
+    }
+
+    /// Like [`Self::typeset`], but takes explicit [`ThemeColors`] and [`SyntaxTheme`] so markdown
+    /// can be rendered in a theme other than the active one.
+    pub fn typeset_with_overrides(
+        typeset: Typeset,
+        colors: &theme::ThemeColors,
+        syntax: &Arc<SyntaxTheme>,
+        window: &Window,
+        cx: &App,
+    ) -> Self {
+        let theme_settings = ThemeSettings::get_global(cx);
+        let body_font = typeset.body_font.resolve(theme_settings);
+        let heading_font = typeset.heading_font.resolve(theme_settings);
+        let code_font = typeset.code_font.resolve(theme_settings);
+
+        // Typeset mixes its secondary colors from the text color instead of taking them from the
+        // theme, so they stay in proportion to whatever the text is.
+        let text_color = colors.text;
+        let muted_color = text_color.opacity(0.6);
+        let rule_color = text_color.opacity(0.2);
+        let tint_color = text_color.opacity(0.08);
+
+        let size = typeset.size;
+        let flow = typeset.flow;
+
+        let body_text = TextStyleRefinement {
+            font_family: Some(body_font.family),
+            font_features: Some(body_font.features),
+            font_fallbacks: body_font.fallbacks,
+            font_weight: Some(body_font.weight),
+            font_size: Some(size.into()),
+            line_height: Some(relative(typeset.leading)),
+            color: Some(text_color),
+            ..Default::default()
+        };
+        let mut base_text_style = window.text_style();
+        base_text_style.refine(&body_text);
+
+        let heading_text = |ems: f32, font_weight: FontWeight, line_height: f32, color: Hsla| {
+            TextStyleRefinement {
+                font_family: Some(heading_font.family.clone()),
+                font_features: Some(heading_font.features.clone()),
+                font_fallbacks: heading_font.fallbacks.clone(),
+                font_size: Some((size * ems).into()),
+                font_weight: Some(font_weight),
+                line_height: Some(relative(line_height)),
+                color: Some(color),
+                ..Default::default()
+            }
+        };
+        // Typeset also sets h6 in letter-spaced capitals, which text runs cannot express.
+        let heading_level_styles = HeadingLevelStyles {
+            h1: Some(heading_text(1.75, FontWeight::SEMIBOLD, 1.3, text_color)),
+            h2: Some(heading_text(1.25, FontWeight::SEMIBOLD, 1.4, text_color)),
+            h3: Some(heading_text(1.125, FontWeight::SEMIBOLD, 1.45, text_color)),
+            h4: Some(heading_text(1., FontWeight::SEMIBOLD, 1.5, text_color)),
+            h5: Some(heading_text(0.875, FontWeight::MEDIUM, 1.5, muted_color)),
+            h6: Some(heading_text(0.8125, FontWeight::MEDIUM, 1.5, muted_color)),
+        };
+
+        // CSS resolves `em` against an element's own font size, so a heading's flow margin grows
+        // with the heading, except where Typeset divides the size back out (h5, h6 and code
+        // blocks).
+        let headings = HeadingLevelMargins {
+            h1: size * (flow * 1.75),
+            h2: size * (flow * 1.4 * 1.25),
+            h3: size * (flow * 1.125),
+            h4: size * flow,
+            h5: size * flow,
+            h6: size * flow,
+        };
+        let headings_after_rule = HeadingLevelMargins {
+            h2: size * (flow * 1.25),
+            ..headings
+        };
+
+        let code_size = size * 0.875;
+        let mut code_block = StyleRefinement {
+            padding: EdgesRefinement {
+                top: Some((code_size * 0.75).into()),
+                right: Some(code_size.into()),
+                bottom: Some((code_size * 0.75).into()),
+                left: Some(code_size.into()),
+            },
+            background: Some(tint_color.into()),
+            text: TextStyleRefinement {
+                font_family: Some(code_font.family.clone()),
+                font_features: Some(code_font.features.clone()),
+                font_fallbacks: code_font.fallbacks.clone(),
+                font_weight: Some(code_font.weight),
+                font_size: Some(code_size.into()),
+                line_height: Some(relative(1.5)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let code_block_corner_radius = AbsoluteLength::Pixels(code_size * 0.5);
+        code_block.corner_radii.top_left = Some(code_block_corner_radius);
+        code_block.corner_radii.top_right = Some(code_block_corner_radius);
+        code_block.corner_radii.bottom_left = Some(code_block_corner_radius);
+        code_block.corner_radii.bottom_right = Some(code_block_corner_radius);
+
+        MarkdownStyle {
+            base_text_style,
+            container_style: StyleRefinement {
+                text: body_text,
+                ..Default::default()
+            },
+            code_block,
+            code_block_overflow_x_scroll: true,
+            inline_code: TextStyleRefinement {
+                font_family: Some(code_font.family),
+                font_features: Some(code_font.features),
+                font_fallbacks: code_font.fallbacks,
+                font_weight: Some(code_font.weight),
+                background_color: Some(tint_color),
+                ..Default::default()
+            },
+            // Typeset's `min(0.5em * 0.6, 0.35em)` in the code's own 0.85em. The code itself stays
+            // at the body size, because the runs of one line cannot differ in size.
+            inline_code_corner_radius: size * (0.85 * 0.3),
+            block_quote: TextStyleRefinement::default(),
+            link: TextStyleRefinement {
+                font_weight: Some(FontWeight::MEDIUM),
+                underline: Some(UnderlineStyle {
+                    color: Some(text_color.opacity(0.3)),
+                    thickness: px(1.),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            link_callback: None,
+            rule_color,
+            block_quote_border_color: rule_color,
+            block_quote_kind_colors: {
+                let status = cx.theme().status();
+                BlockQuoteKindColors {
+                    note: status.info,
+                    tip: status.success,
+                    important: status.info,
+                    warning: status.warning,
+                    caution: status.error,
+                }
+            },
+            syntax: syntax.clone(),
+            selection_background_color: colors.element_selection_background,
+            heading: StyleRefinement::default(),
+            heading_level_styles: Some(heading_level_styles.clone()),
+            heading_level_text_styles: Some(heading_level_styles),
+            heading_border_color: None,
+            block_spacing: BlockSpacing::Above(BlockMargins {
+                flow: size * flow,
+                list_item: size * 0.5,
+                rule: size * (flow * 2.4),
+                after_heading: size,
+                headings,
+                headings_after_rule,
+            }),
+            block_quote_border_width: px(2.),
+            block_quote_padding: size.into(),
+            strong_font_weight: FontWeight::SEMIBOLD,
+            list_style: Some(ListStyle {
+                indent: size * 1.5,
+                marker_gap: size * 0.4,
+                marker_color: muted_color,
+            }),
+            table_style: TableStyle::Rules {
+                header_cell_padding: point(size, size * 0.65),
+                header_font_weight: FontWeight::MEDIUM,
+            },
+            paragraph_spacing: size * flow,
+            paragraph_line_height: relative(typeset.leading),
+            list_spacing: px(0.),
+            table_cell_padding: point(size, size * 0.75),
+            height_is_multiple_of_line_height: false,
+            prevent_mouse_interaction: false,
+            table_columns_min_size: false,
+            soft_break_as_hard_break: false,
+        }
     }
 }
 
@@ -1427,6 +1812,36 @@ impl MarkdownElement {
         self
     }
 
+    /// Records a block about to be pushed and, under [`BlockSpacing::Above`], where it goes.
+    fn place_block(
+        &self,
+        builder: &mut MarkdownElementBuilder,
+        block: FlowBlock,
+    ) -> Option<BlockPlacement> {
+        match &self.style.block_spacing {
+            BlockSpacing::Below => None,
+            BlockSpacing::Above(margins) => Some(builder.place_block(block, margins)),
+        }
+    }
+
+    fn unordered_list_marker(&self, builder: &MarkdownElementBuilder) -> &'static str {
+        if self.style.list_style.is_none() {
+            return "•";
+        }
+        let unordered_depth = builder
+            .list_stack
+            .iter()
+            .filter(|list| list.bullet_index.is_none())
+            .count();
+        if unordered_depth >= 3 {
+            "▪"
+        } else if unordered_depth == 2 {
+            "◦"
+        } else {
+            "•"
+        }
+    }
+
     fn push_markdown_code_span(
         &self,
         builder: &mut MarkdownElementBuilder,
@@ -1562,9 +1977,13 @@ impl MarkdownElement {
         text_align_override: Option<TextAlign>,
     ) {
         let align = text_align_override.unwrap_or(self.style.base_text_style.text_align);
+        let placement = self.place_block(builder, FlowBlock::Paragraph);
         let mut paragraph = div().when(!self.style.height_is_multiple_of_line_height, |el| {
-            el.mb(self.style.paragraph_spacing)
-                .line_height(self.style.paragraph_line_height)
+            match placement {
+                Some(placement) => el.mt(placement.margin_top),
+                None => el.mb(self.style.paragraph_spacing),
+            }
+            .line_height(self.style.paragraph_line_height)
         });
 
         paragraph = match align {
@@ -1594,6 +2013,7 @@ impl MarkdownElement {
         text_align_override: Option<TextAlign>,
     ) {
         let align = text_align_override.unwrap_or(self.style.base_text_style.text_align);
+        let placement = self.place_block(builder, FlowBlock::Heading(level));
         let mut heading = div().mt_4().mb_2();
         heading = apply_heading_style(
             heading,
@@ -1611,11 +2031,20 @@ impl MarkdownElement {
         let mut heading_style = self.style.heading.clone();
         let heading_text_style = heading_style.text_style().clone();
         heading.style().refine(&heading_style);
+        if let Some(placement) = placement {
+            heading = heading.mt(placement.margin_top).mb_0();
+        }
 
-        builder.push_text_style(TextStyleRefinement {
-            text_align: Some(align),
-            ..heading_text_style
-        });
+        let mut text_style = self
+            .style
+            .heading_level_text_styles
+            .as_ref()
+            .and_then(|styles| styles.for_level(level))
+            .cloned()
+            .unwrap_or_default();
+        text_style.refine(&heading_text_style);
+        text_style.text_align = Some(align);
+        builder.push_text_style(text_style);
         builder.push_div(heading, range, markdown_end);
     }
 
@@ -1661,10 +2090,14 @@ impl MarkdownElement {
                 .into_any_element()
         });
 
+        let placement = self.place_block(builder, FlowBlock::Other);
         let block_div = div()
-            .pl_4()
-            .mb(self.style.paragraph_spacing)
-            .border_l_4()
+            .pl(self.style.block_quote_padding)
+            .map(|block_div| match placement {
+                Some(placement) => block_div.mt(placement.margin_top),
+                None => block_div.mb(self.style.paragraph_spacing),
+            })
+            .border_l(self.style.block_quote_border_width)
             .border_color(border_color);
         let block_div = match header {
             Some(header) => block_div.child(header),
@@ -1795,8 +2228,29 @@ impl MarkdownElement {
         range: &Range<usize>,
         markdown_end: usize,
     ) {
-        builder.push_div(
-            div()
+        let placement = self.place_block(builder, FlowBlock::ListItem);
+        let item = match self.style.list_style {
+            Some(list_style) => div()
+                .when(!self.style.height_is_multiple_of_line_height, |el| {
+                    match placement {
+                        Some(placement) => el.mt(placement.margin_top),
+                        None => el.mb_1(),
+                    }
+                    .line_height(self.style.paragraph_line_height)
+                })
+                .h_flex()
+                .items_start()
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .justify_end()
+                        .w(list_style.indent)
+                        .mr(list_style.marker_gap)
+                        .text_color(list_style.marker_color)
+                        .child(bullet),
+                ),
+            None => div()
                 .when(!self.style.height_is_multiple_of_line_height, |el| {
                     el.mb_1()
                         .gap_1()
@@ -1805,11 +2259,15 @@ impl MarkdownElement {
                 .h_flex()
                 .items_start()
                 .child(bullet),
+        };
+        builder.push_div(item, range, markdown_end);
+        // Without `w_0`, text doesn't wrap to the width of the container.
+        builder.push_div_with_flow_role(
+            div().flex_1().w_0(),
             range,
             markdown_end,
+            FlowRole::ListItemContent,
         );
-        // Without `w_0`, text doesn't wrap to the width of the container.
-        builder.push_div(div().flex_1().w_0(), range, markdown_end);
     }
 
     fn pop_markdown_list_item(&self, builder: &mut MarkdownElementBuilder) {
@@ -2350,6 +2808,12 @@ impl Element for MarkdownElement {
                                     }
 
                                     parent_container.style().refine(&self.style.code_block);
+                                    if let Some(placement) =
+                                        self.place_block(&mut builder, FlowBlock::Other)
+                                    {
+                                        parent_container =
+                                            parent_container.mt(placement.margin_top).mb_0();
+                                    }
                                     builder.push_div(parent_container, range, markdown_end);
 
                                     let code_block = div()
@@ -2375,21 +2839,36 @@ impl Element for MarkdownElement {
                             }
                         }
                         MarkdownTag::HtmlBlock => {
-                            builder.push_div(div(), range, markdown_end);
+                            // A comment renders nothing, so the blocks inside, if any, are what
+                            // take the space.
+                            builder.push_div_with_flow_role(
+                                div(),
+                                range,
+                                markdown_end,
+                                FlowRole::Transparent,
+                            );
                             if let Some(block) = parsed_markdown.html_blocks.get(&range.start) {
                                 self.render_html_block(block, &mut builder, markdown_end, cx);
                                 handled_html_block = true;
                             }
                         }
                         MarkdownTag::List(bullet_index) => {
+                            let placement = self.place_block(&mut builder, FlowBlock::List);
                             builder.push_list(*bullet_index);
                             let is_top_level = builder.list_stack.len() == 1;
-                            builder.push_div(
-                                div()
-                                    .pl_2p5()
-                                    .when(is_top_level, |this| this.mb(self.style.list_spacing)),
+                            let list = div()
+                                .when(self.style.list_style.is_none(), |this| this.pl_2p5())
+                                .map(|this| match placement {
+                                    Some(placement) => this.mt(placement.margin_top),
+                                    None => this.when(is_top_level, |this| {
+                                        this.mb(self.style.list_spacing)
+                                    }),
+                                });
+                            builder.push_div_with_flow_role(
+                                list,
                                 range,
                                 markdown_end,
+                                FlowRole::List,
                             );
                         }
                         MarkdownTag::Item => {
@@ -2421,7 +2900,9 @@ impl Element for MarkdownElement {
                             } else if let Some(bullet_index) = builder.next_bullet_index() {
                                 div().child(format!("{}.", bullet_index)).into_any_element()
                             } else {
-                                div().child("•").into_any_element()
+                                div()
+                                    .child(self.unordered_list_marker(&builder))
+                                    .into_any_element()
                             };
                             self.push_markdown_list_item(&mut builder, bullet, range, markdown_end);
                         }
@@ -2430,7 +2911,7 @@ impl Element for MarkdownElement {
                             ..Default::default()
                         }),
                         MarkdownTag::Strong => builder.push_text_style(TextStyleRefinement {
-                            font_weight: Some(FontWeight::BOLD),
+                            font_weight: Some(self.style.strong_font_weight),
                             color: Some(cx.theme().colors().text),
                             ..Default::default()
                         }),
@@ -2501,10 +2982,17 @@ impl Element for MarkdownElement {
                             }
                         }
                         MarkdownTag::Table(alignments) => {
+                            let placement = self.place_block(&mut builder, FlowBlock::Other);
                             builder.table.start(alignments.clone());
 
                             let column_count = alignments.len();
-                            builder.push_div(div().flex(), range, markdown_end);
+                            builder.push_div(
+                                div().flex().when_some(placement, |this, placement| {
+                                    this.mt(placement.margin_top)
+                                }),
+                                range,
+                                markdown_end,
+                            );
                             builder.push_div(
                                 div()
                                     .id(("table", range.start))
@@ -2517,10 +3005,16 @@ impl Element for MarkdownElement {
                                     .when(!self.style.table_columns_min_size, |this| {
                                         this.grid_cols_max_content(column_count as u16)
                                     })
-                                    .mb_2()
-                                    .border(px(1.5))
-                                    .border_color(cx.theme().colors().border)
-                                    .rounded_sm()
+                                    .when(placement.is_none(), |this| this.mb_2())
+                                    .map(|this| match self.style.table_style {
+                                        TableStyle::Grid => this
+                                            .border(px(1.5))
+                                            .border_color(cx.theme().colors().border)
+                                            .rounded_sm(),
+                                        TableStyle::Rules { .. } => {
+                                            this.border_b_1().border_color(self.style.rule_color)
+                                        }
+                                    })
                                     .restrict_scroll_to_axis()
                                     .custom_scrollbars(
                                         Scrollbars::new(ScrollAxes::Horizontal)
@@ -2535,8 +3029,14 @@ impl Element for MarkdownElement {
                         }
                         MarkdownTag::TableHead => {
                             builder.table.start_head();
+                            let font_weight = match self.style.table_style {
+                                TableStyle::Grid => FontWeight::SEMIBOLD,
+                                TableStyle::Rules {
+                                    header_font_weight, ..
+                                } => header_font_weight,
+                            };
                             builder.push_text_style(TextStyleRefinement {
-                                font_weight: Some(FontWeight::SEMIBOLD),
+                                font_weight: Some(font_weight),
                                 ..Default::default()
                             });
                         }
@@ -2547,26 +3047,47 @@ impl Element for MarkdownElement {
                             let is_header = builder.table.in_head;
                             let row_index = builder.table.row_index;
                             let col_index = builder.table.col_index;
-                            let alignment = builder.table.current_cell_alignment();
+                            let alignment = match self.style.table_style {
+                                TableStyle::Grid => builder.table.current_cell_alignment(),
+                                TableStyle::Rules { .. } => builder.table.column_alignment(),
+                            };
                             let text_align = alignment
                                 .and_then(alignment_to_text_align)
                                 .unwrap_or(self.style.base_text_style.text_align);
 
-                            let mut cell_div = div()
-                                .flex()
-                                .flex_col()
-                                .h_full()
-                                .when(col_index > 0, |this| this.border_l_1())
-                                .when(row_index > 0, |this| this.border_t_1())
-                                .border_color(cx.theme().colors().border)
-                                .px(self.style.table_cell_padding.x)
-                                .py(self.style.table_cell_padding.y)
-                                .when(is_header, |this| {
-                                    this.bg(cx.theme().colors().title_bar_background)
-                                })
-                                .when(!is_header && row_index % 2 == 1, |this| {
-                                    this.bg(cx.theme().colors().panel_background)
-                                });
+                            let cell_div = div().flex().flex_col().h_full();
+                            let mut cell_div = match self.style.table_style {
+                                TableStyle::Grid => cell_div
+                                    .when(col_index > 0, |this| this.border_l_1())
+                                    .when(row_index > 0, |this| this.border_t_1())
+                                    .border_color(cx.theme().colors().border)
+                                    .px(self.style.table_cell_padding.x)
+                                    .py(self.style.table_cell_padding.y)
+                                    .when(is_header, |this| {
+                                        this.bg(cx.theme().colors().title_bar_background)
+                                    })
+                                    .when(!is_header && row_index % 2 == 1, |this| {
+                                        this.bg(cx.theme().colors().panel_background)
+                                    }),
+                                TableStyle::Rules {
+                                    header_cell_padding,
+                                    ..
+                                } => {
+                                    let padding = if is_header {
+                                        header_cell_padding
+                                    } else {
+                                        self.style.table_cell_padding
+                                    };
+                                    cell_div
+                                        .px(padding.x)
+                                        .py(padding.y)
+                                        .when(col_index == 0, |this| this.pl_0())
+                                        .line_height(relative(1.5))
+                                        .when(!is_header, |this| {
+                                            this.border_t_1().border_color(self.style.rule_color)
+                                        })
+                                }
+                            };
 
                             cell_div = match alignment {
                                 Some(Alignment::Center) => cell_div.items_center(),
@@ -2787,11 +3308,12 @@ impl Element for MarkdownElement {
                     builder.push_text(&parsed_markdown.source[range.clone()], range.clone());
                 }
                 MarkdownEvent::Rule => {
+                    let rule = match self.place_block(&mut builder, FlowBlock::Rule) {
+                        Some(placement) => div().border_t_1().mt(placement.margin_top),
+                        None => div().border_b_1().my(self.style.paragraph_spacing),
+                    };
                     builder.push_div(
-                        div()
-                            .border_b_1()
-                            .my(self.style.paragraph_spacing)
-                            .border_color(self.style.rule_color),
+                        rule.border_color(self.style.rule_color),
                         range,
                         markdown_end,
                     );
@@ -3140,6 +3662,10 @@ impl TableState {
         self.col_index += 1;
     }
 
+    fn column_alignment(&self) -> Option<Alignment> {
+        self.alignments.get(self.col_index).copied()
+    }
+
     fn current_cell_alignment(&self) -> Option<Alignment> {
         if self.alignments.is_empty() {
             return None;
@@ -3262,6 +3788,37 @@ impl MarkdownHighlights {
 struct DivStackEntry {
     div: AnyDiv,
     line_break_mode: LineBreakMode,
+    flow_role: FlowRole,
+    has_children: bool,
+    previous_block: Option<FlowBlock>,
+}
+
+/// How a div takes part in [`BlockSpacing::Above`].
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FlowRole {
+    /// Spaces the blocks pushed into it against each other.
+    Container,
+    /// A list item's content, where paragraphs and nested lists take the list item spacing.
+    ListItemContent,
+    /// A list, which carries the space above its first item.
+    List,
+    /// A wrapper that blocks see through to the container around it.
+    Transparent,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FlowBlock {
+    Paragraph,
+    Heading(pulldown_cmark::HeadingLevel),
+    List,
+    ListItem,
+    Rule,
+    Other,
+}
+
+#[derive(Clone, Copy)]
+struct BlockPlacement {
+    margin_top: Pixels,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -3272,9 +3829,16 @@ enum LineBreakMode {
 
 impl DivStackEntry {
     fn new(div: impl Into<AnyDiv>) -> Self {
+        Self::with_flow_role(div, FlowRole::Container)
+    }
+
+    fn with_flow_role(div: impl Into<AnyDiv>, flow_role: FlowRole) -> Self {
         Self {
             div: div.into(),
             line_break_mode: LineBreakMode::TextLayout,
+            flow_role,
+            has_children: false,
+            previous_block: None,
         }
     }
 }
@@ -3362,6 +3926,16 @@ impl MarkdownElementBuilder {
     }
 
     fn push_div(&mut self, div: impl Into<AnyDiv>, range: &Range<usize>, markdown_end: usize) {
+        self.push_div_with_flow_role(div, range, markdown_end, FlowRole::Container);
+    }
+
+    fn push_div_with_flow_role(
+        &mut self,
+        div: impl Into<AnyDiv>,
+        range: &Range<usize>,
+        markdown_end: usize,
+        flow_role: FlowRole,
+    ) {
         let mut div = div.into();
         self.flush_text();
 
@@ -3390,16 +3964,57 @@ impl MarkdownElementBuilder {
             });
         }
 
-        self.div_stack.push(DivStackEntry::new(div));
+        self.div_stack
+            .push(DivStackEntry::with_flow_role(div, flow_role));
     }
 
     fn push_root_block(&mut self, range: &Range<usize>, markdown_end: usize) {
-        self.push_div(
+        self.push_div_with_flow_role(
             div().group("markdown-root-block").relative(),
             range,
             markdown_end,
+            FlowRole::Transparent,
         );
-        self.push_div(div().pl_4(), range, markdown_end);
+        self.push_div_with_flow_role(div().pl_4(), range, markdown_end, FlowRole::Transparent);
+    }
+
+    /// Records a block about to be pushed into the nearest container that is not a transparent
+    /// wrapper, and returns the space above it.
+    fn place_block(&mut self, block: FlowBlock, margins: &BlockMargins) -> BlockPlacement {
+        self.flush_text();
+        let Some(container) = self
+            .div_stack
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.flow_role != FlowRole::Transparent)
+        else {
+            return BlockPlacement {
+                margin_top: Pixels::ZERO,
+            };
+        };
+        let flow_role = container.flow_role;
+        let previous_block = container.previous_block.replace(block);
+        let is_first = previous_block.is_none() && !container.has_children;
+
+        let margin_top = match (block, flow_role) {
+            // GPUI margins add up instead of collapsing, and the list already carries the space
+            // above it.
+            (FlowBlock::ListItem, FlowRole::List) if is_first => Pixels::ZERO,
+            (FlowBlock::ListItem, _) => margins.list_item,
+            _ if is_first => Pixels::ZERO,
+            _ if matches!(previous_block, Some(FlowBlock::Heading(_))) => margins.after_heading,
+            (FlowBlock::Heading(level), _) if previous_block == Some(FlowBlock::Rule) => {
+                margins.headings_after_rule.for_level(level)
+            }
+            (FlowBlock::Heading(level), _) => margins.headings.for_level(level),
+            (FlowBlock::Rule, _) => margins.rule,
+            (FlowBlock::Paragraph | FlowBlock::List, FlowRole::ListItemContent) => {
+                margins.list_item
+            }
+            _ => margins.flow,
+        };
+
+        BlockPlacement { margin_top }
     }
 
     fn push_image_child(&mut self, child: impl IntoElement) {
@@ -3426,7 +4041,10 @@ impl MarkdownElementBuilder {
     }
 
     fn append_child(&mut self, child: AnyElement) {
-        self.div_stack.last_mut().unwrap().div.extend([child]);
+        if let Some(entry) = self.div_stack.last_mut() {
+            entry.has_children = true;
+            entry.div.extend([child]);
+        }
     }
 
     fn uses_flex_line_breaks(&self) -> bool {
@@ -3474,8 +4092,18 @@ impl MarkdownElementBuilder {
 
     fn pop_div(&mut self) {
         self.flush_text();
-        let div = self.div_stack.pop().unwrap().div.into_any_element();
-        self.append_child(div);
+        let entry = self.div_stack.pop().unwrap();
+        // An empty wrapper, like the one around an HTML comment, renders nothing, so it must not
+        // stop the next block from being the first in its container.
+        let is_empty_wrapper = entry.flow_role == FlowRole::Transparent && !entry.has_children;
+        let div = entry.div.into_any_element();
+        if is_empty_wrapper {
+            if let Some(parent) = self.div_stack.last_mut() {
+                parent.div.extend([div]);
+            }
+        } else {
+            self.append_child(div);
+        }
     }
 
     fn push_list(&mut self, bullet_index: Option<u64>) {
@@ -6209,6 +6837,312 @@ mod tests {
                 style.container_style.text.font_size
             );
         });
+    }
+
+    fn assert_near(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn pixels_of(length: Option<AbsoluteLength>) -> f32 {
+        match length {
+            Some(AbsoluteLength::Pixels(pixels)) => f32::from(pixels),
+            other => panic!("expected a length in pixels, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_typeset_presets_carry_their_numbers() {
+        let chat = Typeset::chat();
+        assert_eq!((chat.size, chat.leading, chat.flow), (px(14.), 1.6, 1.));
+        assert_eq!(chat.body_font, TypesetFont::Ui);
+        assert_eq!(chat.heading_font, TypesetFont::Ui);
+        assert_eq!(chat.code_font, TypesetFont::Buffer);
+        assert_eq!(chat.max_width, None);
+
+        let docs = Typeset::docs();
+        assert_eq!((docs.size, docs.leading, docs.flow), (px(15.), 1.75, 1.5));
+        assert_eq!(docs.max_width, None);
+
+        let reading = Typeset::reading();
+        assert_eq!(
+            (reading.size, reading.leading, reading.flow),
+            (px(18.), 1.9, 2.)
+        );
+        assert_eq!(reading.max_width_in_pixels(), Some(px(18. * 37.)));
+
+        assert_eq!(
+            Typeset::chat().scaled_to_font_size(px(15.)),
+            Typeset::chat()
+        );
+        assert_eq!(Typeset::docs().scaled_to_font_size(px(30.)).size, px(30.));
+    }
+
+    #[gpui::test]
+    fn test_typeset_derives_sizes_and_margins_from_size_and_flow(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        cx.update(|window, cx| {
+            let large = Typeset {
+                size: px(20.),
+                leading: 1.5,
+                flow: 2.,
+                ..Typeset::docs()
+            };
+            for typeset in [Typeset::chat(), large] {
+                let style = MarkdownStyle::typeset(typeset, window, cx);
+                let size = f32::from(typeset.size);
+                let flow = typeset.flow;
+
+                assert_eq!(
+                    style.base_text_style.font_size,
+                    AbsoluteLength::Pixels(typeset.size)
+                );
+                assert_eq!(style.base_text_style.line_height, relative(typeset.leading));
+                assert_eq!(style.paragraph_line_height, relative(typeset.leading));
+
+                let headings = style
+                    .heading_level_styles
+                    .as_ref()
+                    .expect("a typeset styles its headings");
+                for (heading, ems) in [
+                    (&headings.h1, 1.75),
+                    (&headings.h2, 1.25),
+                    (&headings.h3, 1.125),
+                    (&headings.h4, 1.),
+                    (&headings.h5, 0.875),
+                    (&headings.h6, 0.8125),
+                ] {
+                    let heading = heading.as_ref().expect("every heading level is styled");
+                    assert_near(pixels_of(heading.font_size), size * ems);
+                }
+
+                let BlockSpacing::Above(margins) = style.block_spacing else {
+                    panic!("a typeset spaces blocks above them");
+                };
+                assert_near(f32::from(margins.flow), size * flow);
+                assert_near(f32::from(margins.list_item), size * 0.5);
+                assert_near(f32::from(margins.rule), size * flow * 2.4);
+                assert_near(f32::from(margins.after_heading), size);
+                assert_near(f32::from(margins.headings.h1), size * 1.75 * flow);
+                assert_near(f32::from(margins.headings.h2), size * 1.25 * flow * 1.4);
+                assert_near(f32::from(margins.headings.h3), size * 1.125 * flow);
+                assert_near(f32::from(margins.headings.h4), size * flow);
+                assert_near(f32::from(margins.headings.h5), size * flow);
+                assert_near(f32::from(margins.headings.h6), size * flow);
+                assert_near(
+                    f32::from(margins.headings_after_rule.h2),
+                    size * 1.25 * flow,
+                );
+
+                assert_near(pixels_of(style.code_block.text.font_size), size * 0.875);
+                assert_eq!(style.code_block.text.line_height, Some(relative(1.5)));
+                assert_near(
+                    pixels_of(style.code_block.corner_radii.top_left),
+                    size * 0.875 * 0.5,
+                );
+                assert_near(f32::from(style.table_cell_padding.x), size);
+                assert_near(f32::from(style.table_cell_padding.y), size * 0.75);
+
+                let list_style = style.list_style.expect("a typeset lays out list markers");
+                assert_near(f32::from(list_style.indent), size * 1.5);
+                assert_near(f32::from(list_style.marker_gap), size * 0.4);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_typeset_mixes_muted_and_rule_colors_from_the_text_color(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        cx.update(|window, cx| {
+            let text_color = cx.theme().colors().text;
+            let style = MarkdownStyle::typeset(Typeset::chat(), window, cx);
+
+            assert_eq!(style.base_text_style.color, text_color);
+            assert_eq!(style.rule_color, text_color.opacity(0.2));
+            assert_eq!(style.block_quote_border_color, text_color.opacity(0.2));
+            assert_eq!(
+                style.list_style.map(|list_style| list_style.marker_color),
+                Some(text_color.opacity(0.6))
+            );
+            let headings = style
+                .heading_level_styles
+                .as_ref()
+                .expect("a typeset styles its headings");
+            assert_eq!(
+                headings.h1.as_ref().and_then(|heading| heading.color),
+                Some(text_color)
+            );
+            assert_eq!(
+                headings.h5.as_ref().and_then(|heading| heading.color),
+                Some(text_color.opacity(0.6))
+            );
+            assert_eq!(
+                style.inline_code.background_color,
+                Some(text_color.opacity(0.08))
+            );
+            assert_eq!(
+                style
+                    .link
+                    .underline
+                    .as_ref()
+                    .and_then(|underline| underline.color),
+                Some(text_color.opacity(0.3))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_themed_style_keeps_its_block_layout(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        cx.update(|window, cx| {
+            for font in [MarkdownFont::Editor, MarkdownFont::Preview] {
+                let style = MarkdownStyle::themed(font, window, cx);
+                assert_eq!(style.block_spacing, BlockSpacing::Below);
+                assert_eq!(style.list_style, None);
+                assert_eq!(style.table_style, TableStyle::Grid);
+                assert_eq!(style.strong_font_weight, FontWeight::BOLD);
+                assert_eq!(style.block_quote_border_width, px(4.));
+                assert!(style.heading_level_text_styles.is_none());
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_typeset_appending_a_block_leaves_the_blocks_above_in_place(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let typeset = Typeset::chat();
+        let style = {
+            let window = cx.add_empty_window();
+            window.update(|window, cx| MarkdownStyle::typeset(typeset, window, cx))
+        };
+
+        let first = "First paragraph";
+        let second = "Second paragraph";
+        let source = format!("{first}\n\n{second}");
+        let bounds_of = |rendered: &RenderedText, text: &str, source: &str| {
+            let start = source.find(text).expect("text should be in the source");
+            rendered
+                .bounds_for_source_range(start..start + text.len())
+                .into_iter()
+                .next()
+                .expect("text should have bounds")
+        };
+
+        let partial = cx.new(|cx| Markdown::new(first.into(), None, None, cx));
+        let partial = render_markdown_entity_in_view(partial, style.clone(), None, None, cx);
+        let complete = cx.new(|cx| Markdown::new(source.clone().into(), None, None, cx));
+        let complete = render_markdown_entity_in_view(complete, style, None, None, cx);
+
+        let first_before = bounds_of(&partial, first, first);
+        let first_after = bounds_of(&complete, first, &source);
+        let second_after = bounds_of(&complete, second, &source);
+        assert_eq!(
+            first_before, first_after,
+            "appending a block should not move the blocks above it"
+        );
+
+        let gap = second_after.top() - first_after.bottom();
+        let flow = typeset.size * typeset.flow;
+        assert!(
+            (gap - flow).abs() <= px(1.),
+            "blocks should be one flow ({flow:?}) apart, got {gap:?}"
+        );
+    }
+
+    fn render_typeset(
+        source: &str,
+        options: MarkdownOptions,
+        cx: &mut TestAppContext,
+    ) -> (BlockMargins, RenderedText) {
+        ensure_theme_initialized(cx);
+        let style = {
+            let window = cx.add_empty_window();
+            window.update(|window, cx| MarkdownStyle::typeset(Typeset::chat(), window, cx))
+        };
+        let BlockSpacing::Above(margins) = style.block_spacing else {
+            panic!("a typeset spaces blocks above them");
+        };
+        let markdown = cx.new(|cx| {
+            Markdown::new_with_options(source.to_string().into(), None, None, options, cx)
+        });
+        let rendered = render_markdown_entity_in_view(markdown, style, None, None, cx);
+        (margins, rendered)
+    }
+
+    fn line_top_and_bottom(rendered: &RenderedText, text: &str) -> (Pixels, Pixels) {
+        let line = rendered
+            .lines
+            .iter()
+            .find(|line| line.layout.wrapped_text().contains(text))
+            .unwrap_or_else(|| panic!("{text:?} should be rendered"));
+        let top = line.layout.bounds().top();
+        (top, top + line.layout.line_height())
+    }
+
+    #[track_caller]
+    fn assert_gap(rendered: &RenderedText, above: &str, below: &str, expected: Pixels) {
+        let (_, above_bottom) = line_top_and_bottom(rendered, above);
+        let (below_top, _) = line_top_and_bottom(rendered, below);
+        let gap = below_top - above_bottom;
+        assert!(
+            (gap - expected).abs() <= px(1.),
+            "{below:?} should be {expected:?} below {above:?}, got {gap:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn test_typeset_list_after_a_paragraph_is_one_flow_below_it(cx: &mut TestAppContext) {
+        let (margins, rendered) = render_typeset(
+            "Paragraph\n\n- Item\n- Next",
+            MarkdownOptions::default(),
+            cx,
+        );
+        assert_gap(&rendered, "Paragraph", "Item", margins.flow);
+        assert_gap(&rendered, "Item", "Next", margins.list_item);
+    }
+
+    #[gpui::test]
+    fn test_typeset_nested_list_is_one_list_item_space_below_its_item(cx: &mut TestAppContext) {
+        let (margins, rendered) =
+            render_typeset("- Parent\n  - Child", MarkdownOptions::default(), cx);
+        assert_gap(&rendered, "Parent", "Child", margins.list_item);
+    }
+
+    #[gpui::test]
+    fn test_typeset_html_list_is_spaced_like_a_markdown_list(cx: &mut TestAppContext) {
+        let (margins, rendered) = render_typeset(
+            "Paragraph\n\n<ul><li>Item</li><li>Next</li></ul>",
+            MarkdownOptions {
+                parse_html: true,
+                ..Default::default()
+            },
+            cx,
+        );
+        assert_gap(&rendered, "Paragraph", "Item", margins.flow);
+        assert_gap(&rendered, "Item", "Next", margins.list_item);
+    }
+
+    #[gpui::test]
+    fn test_typeset_leading_html_comment_takes_no_space(cx: &mut TestAppContext) {
+        for parse_html in [false, true] {
+            let options = || MarkdownOptions {
+                parse_html,
+                ..Default::default()
+            };
+            let (_, plain) = render_typeset("# Title", options(), cx);
+            let (_, commented) =
+                render_typeset("<!-- markdownlint-disable -->\n# Title", options(), cx);
+            assert_eq!(
+                line_top_and_bottom(&commented, "Title"),
+                line_top_and_bottom(&plain, "Title"),
+                "a leading comment should not push the first block down (parse_html: {parse_html})"
+            );
+        }
     }
 
     fn failing_image_source() -> ImageSource {

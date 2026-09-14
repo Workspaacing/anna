@@ -19,8 +19,8 @@ use gpui::{
 };
 use language::{Buffer, LanguageRegistry};
 use markdown::{
-    CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement, MarkdownFont,
-    MarkdownOptions, MarkdownStyle,
+    CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement, MarkdownOptions,
+    MarkdownStyle, Typeset, TypesetFont,
 };
 use project::search::SearchQuery;
 use project::{Project, ProjectPath, image_store};
@@ -967,16 +967,25 @@ impl MarkdownPreviewView {
             project = Some(project_entity);
         }
 
+        // Scaled to the preview's own font size, so its font size setting and zoom actions still
+        // apply.
+        let preview_font_size = ThemeSettings::get_global(cx).markdown_preview_font_size(cx);
+        let typeset = Typeset {
+            body_font: TypesetFont::MarkdownPreview,
+            heading_font: TypesetFont::MarkdownPreview,
+            code_font: TypesetFont::MarkdownPreviewCode,
+            ..Typeset::docs().scaled_to_font_size(preview_font_size)
+        };
         let markdown_style = if let Some(theme) = preview_theme {
-            MarkdownStyle::themed_with_overrides(
-                MarkdownFont::Preview,
+            MarkdownStyle::typeset_with_overrides(
+                typeset,
                 theme.colors(),
                 theme.syntax(),
                 window,
                 cx,
             )
         } else {
-            MarkdownStyle::themed(MarkdownFont::Preview, window, cx)
+            MarkdownStyle::typeset(typeset, window, cx)
         };
 
         let mut markdown_element = MarkdownElement::new(self.markdown.clone(), markdown_style)

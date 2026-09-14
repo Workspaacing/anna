@@ -23,7 +23,7 @@ use gpui::{
     ScrollHandle, SharedString, Task, WeakEntity, relative,
 };
 use language::LanguageRegistry;
-use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
+use markdown::{Markdown, MarkdownElement, MarkdownStyle, Typeset};
 use project::{
     Project,
     git_store::{GitStoreEvent, RepositoryEvent},
@@ -3862,7 +3862,13 @@ impl Render for CoworkThreadView {
 
         let colors = cx.theme().colors();
         let is_streaming = self.is_streaming();
-        let markdown_style = MarkdownStyle::themed(MarkdownFont::Preview, window, cx);
+        // The window's rem size is the UI font size, so replies follow the user's font size and
+        // zoom like the rest of the thread.
+        let markdown_style = MarkdownStyle::typeset(
+            Typeset::chat().scaled_to_font_size(window.rem_size()),
+            window,
+            cx,
+        );
         let model_label = self.thread.metadata.model.model_id.clone();
 
         // For each message, whether it or anything after it changed a file: what rewinding the code
