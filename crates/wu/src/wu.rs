@@ -2141,7 +2141,7 @@ fn open_local_file(
             }
             let settings_relative_path = resolve_local_config_paths(
                 settings_relative_paths.iter().copied(),
-                |candidate| existing_paths.iter().any(|existing| *existing == candidate),
+                |candidate| existing_paths.contains(&candidate),
             )
             .context("no project config file candidates")?;
             let file_exists = !existing_paths.is_empty();

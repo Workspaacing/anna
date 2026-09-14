@@ -1,0 +1,86 @@
+name: ci
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - docs/**
+  # Runs on main save the caches that pull requests restore.
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - docs/**
+  schedule:
+    # GitHub evicts caches that go unused for 7 days.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  # A cancelled run saves no cache, so runs on main always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CC: clang
+  CXX: clang++
+jobs:
+  clippy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux dependencies
+        run: ./script/linux
+      - name: Install Rust toolchain
+        run: rustup show
+      # Only main saves, so pull requests do not crowd main's caches out of the free 10 GB.
+      - name: Restore the Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-clippy-linux-x86_64
+          add-job-id-key: 'false'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Without --keep-going, Cargo stops at the first crate with a lint and a run reports one
+      # problem at a time.
+      - name: Clippy
+        run: ./script/clippy --keep-going
+
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      # The test binaries of the whole workspace do not fit in the disk space a runner starts with.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@v7
+      - name: Install Linux dependencies
+        run: ./script/linux
+      # The GPU texture atlas tests need a Vulkan adapter, and runners have no GPU: Mesa's lavapipe
+      # is a Vulkan driver that renders on the CPU.
+      - name: Install a software Vulkan driver
+        run: sudo apt-get install -y mesa-vulkan-drivers
+      - name: Install Rust toolchain
+        run: rustup show
+      # The extension host tests compile a test extension to WebAssembly.
+      - name: Download the WASI SDK
+        run: ./script/download-wasi-sdk
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Restore the Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-tests-linux-x86_64
+          add-job-id-key: 'false'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run tests
+        run: cargo nextest run --workspace --no-fail-fast --no-tests=warn

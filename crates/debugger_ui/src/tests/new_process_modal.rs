@@ -215,7 +215,7 @@ async fn test_save_debug_scenario_to_file(executor: BackgroundExecutor, cx: &mut
         .unwrap();
 
     let debug_json_content = fs
-        .load(path!("/project/.zed/debug.json").as_ref())
+        .load(path!("/project/.anna/debug.json").as_ref())
         .await
         .expect("debug.json should exist")
         .lines()
@@ -278,7 +278,7 @@ async fn test_save_debug_scenario_to_file(executor: BackgroundExecutor, cx: &mut
         ]"#};
 
     let debug_json_content = fs
-        .load(path!("/project/.zed/debug.json").as_ref())
+        .load(path!("/project/.anna/debug.json").as_ref())
         .await
         .expect("debug.json should exist")
         .lines()
