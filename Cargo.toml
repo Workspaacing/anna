@@ -707,7 +707,7 @@ vte = { version = "0.15.0", features = ["ansi"] }
 walkdir = "2.5"
 wasm-encoder = "0.252"
 wasmparser = "0.252"
-wasmtime = { version = "48", default-features = false, features = [
+wasmtime = { version = "49", default-features = false, features = [
     "anyhow",
     "async",
     "demangle",
